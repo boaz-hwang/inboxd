@@ -1,22 +1,38 @@
 # 04 — Roadmap
 
-## 순서 (설계가 스파이크보다 먼저다)
+## 소유 범위 결정 (게이트)
 
-아래 0~2가 정리되기 전에는 로드맵 1단계에 착수하지 않는다. 스파이크 결과가
-설계 변경으로 무효화되기 때문이다.
+새 저장소를 만드는 것은 괜찮다. 다만 어댑터까지 직접 구현·이식하기 전에
+기존 도구를 감싼 연결(wrapper-first)로 시작하고, 막히는 지점을 확인한 뒤
+소유 범위를 넓힌다. 독창부는 연결 기술이 아니라 수집 메시지를 신뢰하고
+안전하게 쓰는 방식에 있다.
 
-- **0. MCP 승인 채널 설계** — safe-send 정의를 바꾸므로 1순위. OOB 채널(별도 CLI/TUI/알림)
-  + approval code + TTL. 같은 세션 approve 금지.
-- **1. 역할 분리** — `Gateway.fetchHistorical`(백필 시드) vs 제품 검색(index 전용).
-  `search`라는 이름이 두 층에 걸치지 않도록.
-- **2. inbox 스키마 v2** — `read_cursors`, `identities`, `edited_at/deleted_at`,
-  `sync_coverage` 테이블. 이 없이는 inbox 쿼리가 안 나온다.
+| 대안 | inboxd가 책임질 부분 | 판단 기준 |
+|---|---|---|
+| 기존 CLI/SDK 위에 구축 | 인덱스·정규화·승인만 | 감싼 연결로 첫 검증이 되면 이대로 |
+| Beeper + 카카오 별도 연결 | 위 + 수집경로 통합 | 직접연결이 막힐 때 (카카오 지원·독립실행·데이터 소유 요구 기준) |
+| 플랫폼별 직접 연결 | 위 + 인증·프로토콜 유지보수 | wrapper가 실제 요구를 못 맞출 때만 |
+
+Beeper를 선택적 Gateway로 허용하되, 사용 조건 판단 기준 없이 올리지 않는다.
+
+## 순서
+
+읽기 경로는 승인 설계와 독립적으로 진행한다. safe-send 연결만 승인 설계에 게이트된다.
+
+- **0. MCP 승인 채널 설계** (safe-send 연결의 선행 조건). OOB 채널(별도 CLI/TUI/알림)
+  + approval code + TTL + 승인 바인딩(계정·채팅·대상·본문). 같은 세션 approve 금지.
+  위협 모델 2등급(MCP-only vs 셸) 정의 포함.
+- **1. 역할 분리** (읽기 경로의 선행 조건). `Gateway.fetchHistorical`(백필 시드) vs
+  제품 검색(index 전용).
+- **2. inbox 스키마 v2** (읽기 경로의 선행 조건). `read_cursors(source 포함)`,
+  `identities(계정 범위)`, `edited_at/deleted_at`, `sync_coverage`.
 - **3. privacy** — 저장 암호화 + 읽기 스코프 + audit log.
 
-## 스파이크 (0~2 이후)
+## 스파이크 (0~2 중 읽기 선행조건 이후)
 
-- **Spike A — 아키텍처 증명 (Slack).** ports→normalize→FTS→search 단일 반환.
-  가장 안정적인 어댑터로 구조를 증명한다.
+- **Spike A — 아키텍처 증명 (Slack, wrapper-first).** ports→normalize→FTS→search
+  단일 반환. 먼저 명시할 것: 사용할 인증 방식, 읽을 수 있는 대화 범위, 적용
+  레이트리밋, 사용자 명의 발송 여부. 가장 안정적인 어댑터로 구조를 증명한다.
 - **Spike B — 리스크 측정 (카카오 DB 읽기).** 아키텍처 증명이 목적이 아니다.
   SQLCipher 해독·DB 스키마·AX 셀렉터 생존율을 측정하고 manifest 숫자(백필 속도·파손 조건)를 뽑는다.
 - **Teams는 phase 2.** 토큰 만료(60~90분) 대응(sync 중단 시 coverage 표기+재추출 흐름)이
@@ -24,16 +40,34 @@
 
 ## MVP 완료 기준 (숫자)
 
-- [ ] 백필: Spike A 기준 10만 메시지 수집 + 재개(cursor 이어받기) 동작
-- [ ] 검색: `query+platforms+since` 단일 API, p95 300ms (로컬 기준, 측정 후 조정)
-- [ ] coverage: 모든 search/inbox 응답에 coverage 동봉 100%
+읽기:
+- [ ] 10만 건 fixture로 저장·검색 성능 검증 (규모 증명)
+- [ ] 실제 Slack에서 권한·페이지네이션·중단 후 재개 검증 (연결 증명)
+- [ ] 검색 p95 300ms (로컬 기준, 측정 후 조정)
+- [ ] 모든 search/inbox 응답에 coverage 동봉 100%
+- [ ] **실질문 10개 게이트.** 본인이 실제로 확인할 필요가 있었던 대화 질문 10개를
+  Slack·카카오 제한 채팅에서 찾아 원문과 대조한다. 못 찾은 이유를 수집 범위 /
+  검색 품질 / 접근 한계로 분류한다. 메시지 규모가 아니라 실제 질문이 기준이다.
+- [ ] inbox 정확성: unread 정의(source별)와 "모름" 표기 검증
+- [ ] 한국어 fixture 20~30개 최소 기준 통과 (조사·짧은 단어·띄어쓰기·영문 혼용)
+
+쓰기·보호:
 - [ ] safe-send: propose→OOB approve→send→receipt(Verified/Uncertain) 전 경로 동작
+- [ ] 승인 우회 거부 테스트 (무단 경로 전송 시도 차단)
+- [ ] 허용 범위 밖 수집 차단 테스트
+- [ ] 암호화 저장 + 키 관리 동작 (선택이 아니라 완료 조건)
+
+관측:
 - [ ] doctor: auth·DB·endpoint 진단 커맨드 동작
 - [ ] 테스트: fake transport CI 통과 + 어댑터별 라이브 스모크 1회 이상 기록
+
+위 기준을 모두 통과해도 실질문 10개 게이트를 못 넘으면 MVP 미완료다.
+Slack만 잘 되고 카카오 실질문이 안 풀리면 핵심 사용처 미검증으로 기록한다.
 
 ## Non-goals (MVP에서 제외)
 
 - 통합 TUI 완성형 (showcase 수준만)
-- thread/presence/편집·삭제·전달 (스키마 자리만 확보)
+- thread/presence/사용자 측 편집·삭제 (원격 변경 반영은 포함)
 - Beeper 호환 전체면 (Gateway 구현체 1개로 시작)
 - Windows/Linux 카카오 (macOS 전제 유지)
+- 멀티계정·정규화 멘션·검색 엔진 고도화 (phase 2)

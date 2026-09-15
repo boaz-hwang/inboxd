@@ -4,20 +4,31 @@
 
 **서버를 믿지 않는다. 쓰기를 믿지 않는다. "결과 없음"과 "모름"을 구분한다.**
 
-- 읽기의 진실원인 = 로컬 인덱스. 검색·인박스는 인덱스 위에서만.
+- 조회는 로컬 인덱스에서 수행하고, 원격 상태와의 차이는 coverage로 공개한다.
+  (조회 경로 통일 ≠ 데이터 완전.)
 - 쓰기는 승인 없이는 제안. 기본 deny. 승인은 아웃오브밴드 채널로.
 - 어댑터는 교체품. 깨지는 걸 전제로 얇게 만들고, 진단(doctor)이 복구보다 먼저.
 - 부분 인덱스에서 "결과 없음"은 거짓 응답이다. 모든 검색 응답에 coverage를 동봉한다.
+
+## 첫 사용자 시나리오
+
+> 여러 메신저에서 고객에게 약속한 내용을 근거 메시지와 함께 찾고,
+> 확인한 답장만 전송한다.
+
+검색→inbox→safe-send 순서의 근거다. 이 시나리오에 필요 없는 기능은 MVP에서 뺀다.
 
 ## 핵심 기능 5개
 
 1. **sync** — 어댑터(poll/WS/DB-watch) → 정규화 이벤트 → 로컬 저장. `lastLogId/cursor` 백필 포함.
 2. **search** — SQLite FTS5 기반 통합 검색. `query + platforms + since` 단일 API. 서버 검색 유무와 무관.
 3. **inbox** — 전 플랫폼 unread/mention 요약 한 화면. 인덱스 위에서.
-4. **safe-send** — propose→approve 2단계, allowlist, quota, dry-run, outbox 멱등. non-TTY 무인 전송 거부하되 승인 자체는 아웃오브밴드로.
+4. **safe-send** — propose→approve 2단계, allowlist, quota, dry-run, outbox 멱등.
+   propose는 어디서나(MCP 포함), approve는 대화형 터미널에서만.
 5. **doctor/probe** — auth 상태, DB 복호화, AX 셀렉터, endpoint 진단. Day-1 커맨드.
 
 `send`는 기능이 아니라 4번을 통과한 결과물. TUI/MCP/CLI는 인터페이스일 뿐 핵심이 아니다.
+사용자가 수정·삭제하는 기능은 MVP 제외. 단 원격 수정·삭제의 인덱스 반영은 포함한다
+(인덱스가 조용히 썩는 것을 막는 쪽이다).
 
 ## 아키텍처
 
@@ -40,7 +51,10 @@ platform adapters (thin)
 
 ## 설계 원칙
 
-1. **어댑터는 얇게.** 인증+원시 이벤트 수집만. 파싱·검색·정책은 어댑터에 안 둔다.
+1. **어댑터 경계: 플랫폼 변경이 다른 부분으로 번지지 않는다.** "코드가 짧다"가 목표가
+   아니다. 플랫폼별 파싱·정규화는 해당 플랫폼 모듈에 둔다. core에는 공통 이벤트
+   의미+저장 규칙만 둔다. 읽기전용·실시간미지원 같은 차이는 capability로 선언한다.
+   플랫폼 fixture 변경 시 수정이 해당 모듈 안에서 끝나야 한다.
 2. **Gateway는 core + ext.** core 고정: `listChats / fetchHistorical / send / watch`.
    `fetchHistorical`은 백필 시드용 수집 API이며 제품 검색 진입점이 아니다.
    제품 검색은 index에만 둔다 ("검색은 어댑터에 안 둔다"와 모순 없도록).
@@ -51,29 +65,43 @@ platform adapters (thin)
 
 ```text
 UnifiedMessage {
-  id, platform, chat_id, author_id, ts,
+  id, platform, account, chat_id, author_id, ts,
   body,
   parent_id?,        // thread/reply/quote 부모
   edited_at?,        // 수정 시 FTS 재인덱싱 트리거
   deleted_at?,       // tombstone. 삭제 행을 지우지 않는다
   attachments[]?,    // 메타만 (파일명·mime·size). 본문 저장은 phase 2
 }
-read_cursors { platform, chat_id, last_read_id, updated_at }
-identities   { platform, self_id }   // mention 탐지의 "나"
-sync_state   { platform, chat_id, cursor/lastLogId }
-sync_coverage{ platform, chat_id, from_ts, to_ts, complete }
+read_cursors { platform, account, chat_id, last_read_id, source, updated_at }
+// source: synced(원본 동기화) / local(inboxd 기준) / unknown(모름)
+identities   { platform, account, self_id }   // mention 탐지의 "나". 계정 범위 필수
+sync_state   { platform, account, chat_id, cursor/lastLogId }
+sync_coverage{ platform, account, chat_id, from_ts, to_ts, complete,
+               last_verified_at, limits }
 ```
 
-- unread 집계 = `read_cursors` vs 수신 max. mention 탐지 = `identities` 대조.
-- 수정/삭제 지원 플랫폼(Slack 등)은 `edited_at`/`deleted_at`으로 FTS를 갱신한다. 인덱스가 조용히 썩는 것을 스키마로 막는다.
+- unread 집계 = `read_cursors` vs 수신 max. `source=unknown`인 채팅은 0건이 아니라
+  "모름"으로 표시한다. 0건 표기는 coverage 철학과 충돌한다.
+- mention 탐지 MVP는 본문 매칭 + 단일계정. 정규화된 사용자·그룹 멘션 정보와
+  멀티계정은 phase 2.
+- 수정/삭제 지원 플랫폼(Slack 등)은 `edited_at`/`deleted_at`으로 FTS를 갱신한다.
+- MVP는 단일계정으로 제한한다. 멀티계정·멀티워크스페이스는 범위 밖.
 
 ## safe-send (MCP와 양립하는 정의)
 
-openkakao `safe_send`를 가져오되 non-TTY 거부 조항은 버린다. MCP 서버는 정의상
-non-TTY이므로, 그대로 이식하면 MCP는 영원히 전송 불가다.
+openkakao `safe_send`를 가져온다. TTY 게이트는 approve측에만 존재하므로
+(`src/commands/safe_send.rs: require_approval_session`, 고정 커밋 e9d54e4에서 확인)
+propose(MCP)→approve(터미널) 구조와 양립한다.
 
+- **위협 모델 2등급.** (a) MCP 도구만 쓰는 에이전트 (b) 로컬 셸+파일 접근 가능 에이전트.
+  (b)에게는 별도 CLI가 자기승인 통로가 되므로, 승인 자격증명·발송 토큰의 접근 분리가
+  전제다. 강한 프로세스 격리는 등급 정의 이후에 검토한다.
+- **승인 바인딩.** 승인은 계정·수신채팅·답장대상·정확 본문에 묶인다. 승인 후 내용이
+  바뀌면 승인은 무효다.
 - **승인 채널은 아웃오브밴드.** 같은 세션 내 approve가 아니라 별도 CLI/TUI/알림 채널
   + approval code + TTL 15분. 세션 경계를 넘어야 형식이 아니라 실질이 된다.
+- **Uncertain 규칙.** 전송 여부 불명(프로세스 사망 등) 시 자동 재전송 금지. 재관측
+  또는 사람 판단으로만 해소한다. 중복 발송보다 미발송+표기가 낫다.
 - **receipt는 2단계.** `Verified`(플랫폼이 메시지 id 반환) / `Uncertain`(AX 전송 등
   id 없음. 전송 후 composer 비움+재관측으로 판정, openkakao 방식).
 - **멱등은 best-effort.** 시간창 + 내용 해시 키. 카카오 등 id 없는 경로는 "보장"이라 쓰지 않는다.
@@ -81,9 +109,25 @@ non-TTY이므로, 그대로 이식하면 MCP는 영원히 전송 불가다.
 
 ## coverage 계약 (Day-1)
 
-- `sync_coverage`에 플랫폼·채팅별 구간과 완전 여부를 기록한다.
+- 응답마다 4가지를 구분한다: 검색 대상(계정·채팅·기간) / 수집 범위(백필 구간+중간 누락) /
+  최신성(마지막 동기화·수정삭제 확인 시각) / 제한 사유(권한·보존기간·연결장애·미지원).
 - **모든 search/inbox 응답에 coverage를 동봉한다.** 완전 구간과 불완전 구간을 구분 표기.
-- 초기 백필량·레이트리밋·보존 기간은 어댑터별 manifest에 명시한다. 숫자가 없으면 "전체 검색"이라 주장하지 않는다.
+- **원자성.** 메시지 저장·cursor 전진·coverage 갱신을 한 트랜잭션으로 처리한다.
+  저장 실패 후 cursor만 전진하는 상태를 금지한다 (데이터가 조용히 빠진다).
+- 초기 백필량·레이트리밋·보존 기간은 어댑터별 manifest에 명시한다. 숫자가 없으면
+  "전체 검색"이라 주장하지 않는다.
+
+## 보존 정책 (OPEN — 제안 기본값만, 확정 보류)
+
+| 상황 | 제안 기본값 | 상태 |
+|---|---|---|
+| 원본 메시지 삭제 | tombstone 유지, 본문은 보존기간 후 삭제 | OPEN |
+| 채팅이 allowlist에서 제외 | 수집 중단, 기존 본문은 유지 | OPEN |
+| 계정이 채팅 접근 권한 상실 | 수집 중단, 기존 본문은 유지 | OPEN |
+| 계정 연결 해제 | 수집 중단, 기존 본문은 유지 | OPEN |
+
+"원본의 현재 상태를 반영하는 인박스"와 "개인 대화 아카이브"는 원하는 동작이 다르다.
+기본값을 정해야 하며, 암호화·audit log가 이 결정을 대신하지 못한다.
 
 ## privacy (로컬 인덱스는 평문 허니팟이다)
 
@@ -106,6 +150,15 @@ non-TTY이므로, 그대로 이식하면 MCP는 영원히 전송 불가다.
 스모크(수동/별도 잡). **CI 녹색 ≠ 실제 동작.** SQLCipher 키 유도·AX 셀렉터는
 fake transport가 못 보므로 ② 없이 "검증됨"이라 쓰지 않는다.
 
+## 한국어 검색 (fixture-first)
+
+- FTS5 기본 토큰 검색은 한국어 기대치를 못 맞춘다 ("견적서를 보내주세요" 실측:
+  기본 FTS5는 `견적`·`견적서` 미검색, trigram은 `견적서` 검색·`견적` 미검색,
+  3글자 미만 전문 검색 제한).
+- 처음부터 복잡한 검색 엔진을 만들지 않는다. 실제 사용할 검색어 20~30개와 찾아야 할
+  메시지 예시를 먼저 만들고, 조사·짧은 단어·띄어쓰기·영문 혼용 최소 기준을 정한다.
+- 엔진 고도화는 fixture 통과율로 판단한다. 기준 없이 튜닝하지 않는다.
+
 ## ToS·법적 위험 (공학이 아니라 소유권 문제)
 
 - 데스크톱 토큰 추출·Discord 유저 토큰 사용은 계정 정지 사유다.
@@ -117,4 +170,5 @@ fake transport가 못 보므로 ② 없이 "검증됨"이라 쓰지 않는다.
 
 - `ports` — Nexus `core-domain/ports.rs` 실측 기반
 - `Gateway`+capability 게이팅 — beeptui `tui/runtime.ts` 기반
-- `safe_send`+`[safety]`+`doctor/probe` — openkakao-cli 기반 (non-TTY 조항 제외)
+- `safe_send`+`[safety]`+`doctor/probe` — openkakao-cli 기반
+  (TTY 게이트는 approve측 — "MCP 전송 불가"가 아니라 "MCP propose + 터미널 approve")

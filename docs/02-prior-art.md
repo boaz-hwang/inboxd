@@ -51,13 +51,15 @@
 | 읽기 | 로컬 DB 주력(SQLCipher readonly+PBKDF2 키유도) | 4-track: LOCO/DB/AX/REST + notif DB | AX 스크랩 100% |
 | 보내기 | AX 10단계 자동화 | AX+LOCO 이원화 | AX+AppleScript |
 | 감지 | DB 폴링 2s+webhook | LOCO/AX/notif 3채널+서명 webhook | 수동 session watch |
-| 안전장치 | 문서 문구뿐 | **유일 실존**: propose→approve, outbox SQLite, TTL 15분, rate limit, 기본 deny, non-TTY 거부 | 없음 |
+| 안전장치 | 문서 문구뿐 | **유일 실존**: propose→approve, outbox SQLite, TTL 15분, rate limit, 기본 deny, approve측 TTY 게이트 | 시나리오 수준 제한 있음 (`safe_reply.sh`·`approve_send.sh`·시나리오별 allow_send). 영속 outbox·승인 검증은 없음 |
 | harness | `--json` 우수, 단일 SKILL.md | `--json`+AGENTS.md+외부 skills+hook 디스패치 | session형 JSON, 레거시 skill 14개와 현행 불일치 |
 | 관측 | 단편적 | `doctor/probe/schema` 완비 | 단편적 |
 
 - 공통 취약점: macOS+카톡앱 종속, DB KDF/스키마 변경시 파손, AX 셀렉터 붕괴, 읽음오염/오발송.
 - 공통 갭: safety 게이트 표준 부재(openkakao 제외), 실시간 내구성 공백(백필 표준 없음), skill 파편화, 관측 도구 비대칭.
-- 단, openkakao의 non-TTY 거부는 MCP 서버(정의상 non-TTY)와 정면충돌하므로 그대로 이식하지 않는다. 승인 채널을 아웃오브밴드로 재설계해야 한다(03-proposal).
+- 단, openkakao의 TTY 게이트는 approve측(`safe_send.rs: require_approval_session`)에만
+  있으므로 propose(MCP)→approve(터미널) 구성과 양립한다. "non-TTY 거부"를 통째로
+  이식하지 말고 approve측 게이트로 가져온다(03-proposal).
 
 ## 5. Beeper/Matrix를 위에 안 올리는 이유
 
@@ -65,7 +67,9 @@ Beeper Desktop은 로컬 통합 인덱스+정규화 동기화의 성숙한 선�
 
 1. **클로즈드 + 계정 종속.** 남이 의존하는 런타임이 될 수 없다. Desktop 꺼지면 검색·동기화 전부 무력화(beeptui 구조상 확인됨).
 2. **한국 메신저 부재.** 카카오가 없으면 이 프로젝트의 핵심 사용처가 빠진다.
-3. **승인 경계 없음.** Beeper는 동기화 경계지, 에이전트 쓰기 정책 경계가 아니다.
+3. **선택 기준의 문제.** 승인 경계가 없다는 사실 자체는 배제 근거가 아니다(위에 얹으면 된다).
+   직접 연결과 선택적 Beeper 연결은 카카오 지원·독립 실행·데이터 소유/내보내기 요구를
+   기준으로 비교하며, 판단표는 04-roadmap의 소유 범위 게이트에 있다.
 
 따라서 Beeper는 inboxd Gateway의 구현체 하나로 취급한다(있으면 쓰고, 없어도 돈다). Matrix 브릿지는 프로토콜 변환 계층이지 에이전트용 인덱스/승인 경계가 아니므로 비교 대상에서 제외한다.
 
