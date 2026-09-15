@@ -13,13 +13,13 @@ Slack, Teams, Discord, Telegram, KakaoTalk을 하나의 inbox/search/reply 흐�
 2. **세션 휘발성**: 토큰 만료(Teams 60~90분), 세션 무효화, DB 스키마 변경이 수시로 발생.
 3. **쓰기 위험**: 에이전트 오발송이 문서 주의사항 수준으로만 다뤄짐.
 
-## 결론 방향
+2번의 귀결: 진단은 복구가 아니다. 휘발성에 대한 답은 doctor가 아니라
+sync 백필 + coverage 표기 + 깨지는 어댑터의 격리이며, 상세는 03-proposal의
+sync·coverage·테스트 전략에 있다.
 
-TUI 자체를 제품 본체로 두지 않는다. TUI/MCP/CLI 아래의 런타임 층을 제품으로 둔다.
+## 범위 (MVP)
 
-```text
-Messaging Runtime
-  ├─ TUI (human)
-  ├─ MCP (agent)
-  └─ CLI (automation)
-```
+- 증명용 어댑터: **Slack** (서버 검색·스냅샷·공식 API에 가장 가까워 아키텍처 증명에 적합).
+- 측정용 어댑터: **카카오 DB 읽기** (아키텍처 증명이 아니라 해독·셀렉터 생존율 측정용으로 분리).
+- **Teams는 phase 2.** 배경 목표에는 있지만 MVP에서 제외한다. 넣으면 MVP 완료 기준이 Teams 토큰 만료에 종속된다.
+- Discord/Telegram은 MVP 이후. 한 번에 N개 어댑터를 늘리지 않는다.
