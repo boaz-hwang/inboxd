@@ -40,6 +40,10 @@ function evidenceState(screen: Screen): TuiState {
   return reduce(state, { type: "switchScreen", screen });
 }
 
+function activatedDetailState(screen: Screen): TuiState {
+  return reduce(evidenceState(screen), { type: "key", key: "Enter" });
+}
+
 const outputDirectory = join(import.meta.dir, "..", "rendered");
 await mkdir(outputDirectory, { recursive: true });
 for (const screen of screens) {
@@ -50,4 +54,9 @@ for (const screen of screens) {
       .join("\n");
     await Bun.write(join(outputDirectory, `${screen}-${size.width}x${size.height}.txt`), output);
   }
+  const detail = renderScreen(activatedDetailState(screen), { width: 80, height: 24 })
+    .split("\n")
+    .map((line) => `${line.slice(0, -1)}│`)
+    .join("\n");
+  await Bun.write(join(outputDirectory, `${screen}-detail-80x24.txt`), detail);
 }

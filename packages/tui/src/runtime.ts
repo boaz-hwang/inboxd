@@ -44,11 +44,11 @@ export async function mountInteractiveTui(renderer: OpenTuiRenderer, controller:
   let height = renderer.height;
   const text = new TextRenderable(renderer as never, {
     id: "inboxd-interactive-screen",
-    content: renderScreen(controller.state, { width, height }),
+    content: renderScreen(controller.state, { width, height }, { approvalCode: controller.currentApprovalCode() }),
   });
   renderer.root.add(text);
 
-  const update = (state: TuiState): void => { text.content = renderScreen(state, { width, height }); };
+  const update = (state: TuiState): void => { text.content = renderScreen(state, { width, height }, { approvalCode: controller.currentApprovalCode() }); };
   const onKeypress = (event: OpenTuiKeyEvent): void => {
     const key = actionKey(event);
     event.preventDefault();

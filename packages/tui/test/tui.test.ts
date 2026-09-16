@@ -85,8 +85,38 @@ describe("five-screen operational model", () => {
     expect(wide.split("\n")).toHaveLength(40);
     expect(narrow).toContain("DETAIL (in place)");
     expect(narrow).not.toContain("LIST 40% │ DETAIL 60%");
-    expect(wide).toContain("LIST 40% │ DETAIL 60%");
+    expect(wide).toContain("LIST 40%");
+    expect(wide).toContain("DETAIL 60%");
     expect(wide).toContain("Evidence:");
+  });
+
+  test("renders actual 40/60 list-detail content and an activated in-place detail", () => {
+    let state = readyState();
+    state = reduce(state, { type: "switchScreen", screen: "inbox" });
+
+    const wide = renderScreen(state, { width: 120, height: 40 });
+    expect(wide).toContain("LIST 40%");
+    expect(wide).toContain("DETAIL 60%");
+    expect(wide.split("\n")[2]?.indexOf("│")).toBe(48);
+    expect(wide).toContain("Detail — Inbox");
+    expect(wide).toContain("Message: 긴 한국어 메시지와 ASCII text");
+
+    state = reduce(state, { type: "key", key: "Enter" });
+    const narrow = renderScreen(state, { width: 80, height: 24 });
+    expect(narrow).toContain("Detail — Inbox");
+    expect(narrow).toContain("Back: Esc");
+    expect(narrow).toContain("Message: 긴 한국어 메시지와 ASCII text");
+  });
+
+  test("retains Chat coverage and Approval uncertainty in activated narrow details", () => {
+    let state = readyState();
+    state = reduce(state, { type: "switchScreen", screen: "chat" });
+    state = reduce(state, { type: "key", key: "Enter" });
+    expect(renderScreen(state, { width: 80, height: 24 })).toContain("── coverage gap: 1 · partial ──");
+
+    state = reduce(state, { type: "switchScreen", screen: "approvals" });
+    state = reduce(state, { type: "key", key: "Enter" });
+    expect(renderScreen(state, { width: 80, height: 24 })).toContain("UNCERTAIN — do not resend automatically");
   });
 
   test("keeps fixed Search gaps and Chat inline coverage gaps", () => {
@@ -100,6 +130,24 @@ describe("five-screen operational model", () => {
     expect(chat).toContain("── coverage gap: 1 · partial ──");
     expect(chat).toContain("(edited)");
     expect(chat).toContain("deleted");
+  });
+
+  test("keeps Chat compose controls and the coverage gap visible above a long 80×24 list", () => {
+    let state = readyState();
+    state = reduce(state, {
+      type: "querySucceeded",
+      generation: 1,
+      screen: "chat",
+      data: Array.from({ length: 30 }, (_, index) => ({ id: `m-${index}`, author: "operator", body: `message ${index}` })),
+      coverage: { chats: 3, gaps: 1, freshness: "partial" },
+    });
+    state = reduce(state, { type: "switchScreen", screen: "chat" });
+    state = reduce(state, { type: "key", key: "c" });
+    state = reduce(state, { type: "key", key: "x" });
+
+    const chat = renderScreen(state, { width: 80, height: 24 });
+    expect(chat).toContain("Compose proposal: x [memory-only]");
+    expect(chat).toContain("── coverage gap: 1 · partial ──");
   });
 
   test("requires code for uncertain approvals and disables actions while degraded", () => {
@@ -178,8 +226,12 @@ describe("five-screen operational model", () => {
     expect(calls.map((call) => call.method)).toEqual(["chat.list", "safety.intent.listPending", "system.status", "sync.status", "auth.status"]);
     expect(controller.state.connection.status).toBe("connected");
     expect(JSON.stringify(controller.state)).not.toContain("654321");
-    expect(renderScreen(controller.state, { width: 80, height: 24 })).toContain("Ops");
+    await controller.dispatchKey("4");
+    expect(controller.currentApprovalCode()).toBe("654321");
+    expect(renderScreen(controller.state, { width: 80, height: 24 }, { approvalCode: controller.currentApprovalCode() })).toContain("654321");
+    expect(JSON.stringify(controller.state)).not.toContain("654321");
     controller.stop();
+    expect(controller.currentApprovalCode()).toBeUndefined();
   });
 
   test("maps the real daemon message and coverage shape without hiding limits", async () => {
@@ -230,7 +282,163 @@ describe("five-screen operational model", () => {
     await harness.mockInput.typeText("2");
     await Promise.resolve();
     expect(controller.state.screen).toBe("search");
+    await harness.mockInput.typeText("/alert");
+    await Promise.resolve();
+    expect(controller.state.searchQuery).toBe("alert");
+    expect(controller.state.searchActive).toBe(true);
     mounted.destroy();
     harness.renderer.destroy();
+  });
+
+  test("activates Inbox detail before opening its chat", async () => {
+    let initialState = readyState();
+    initialState = reduce(initialState, {
+      type: "querySucceeded",
+      generation: 1,
+      screen: "inbox",
+      data: [{ id: "slack:me:ops", author: "Ops" }],
+    });
+    const controller = createTuiController({
+      initialState,
+      client: { start: async () => {}, stop: () => {}, request: async () => ({}) },
+    });
+
+    await controller.dispatchKey("Enter");
+    expect(controller.state.screen).toBe("inbox");
+    expect(controller.state.detailOpen).toBe(true);
+    await controller.dispatchKey("Enter");
+    expect(controller.state.screen).toBe("chat");
+  });
+
+  test("submits memory-only typed search text to the active chat", async () => {
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+    const chat = { platform: "slack", account: "me", chat_id: "ops" };
+    const controller = createTuiController({
+      client: {
+        start: async () => {},
+        stop: () => {},
+        request: async (method, params) => {
+          calls.push({ method, params });
+          if (method === "chat.list") return { chats: [] };
+          if (method === "safety.intent.listPending") return { intents: [] };
+          if (method === "system.status" || method === "sync.status" || method === "auth.status") return {};
+          if (method === "message.search") return { messages: [], coverage: { covered: [], gaps: [], limits: [] } };
+          throw new Error(`unexpected protocol call: ${method}`);
+        },
+      },
+    });
+
+    await controller.start();
+    controller.setActiveChat(chat);
+    controller.setSearch({ chat, interval: { from_ts: 10, to_ts: 20 }, query: "" });
+    await controller.dispatchKey("/");
+    for (const key of "alert") await controller.dispatchKey(key);
+    expect(renderScreen(controller.state, { width: 80, height: 24 })).toContain("Search query: alert [memory-only]");
+    await controller.dispatchKey("Enter");
+
+    expect(calls.filter((call) => call.method === "message.search")).toEqual([
+      { method: "message.search", params: { chat, interval: { from_ts: 10, to_ts: 20 }, query: "alert" } },
+    ]);
+    expect(controller.state.searchActive).toBe(false);
+    expect(controller.state.notice).toContain("search submitted");
+    controller.stop();
+    expect(controller.state.searchQuery).toBe("");
+  });
+
+  test("submits a typed Chat compose draft as an approval-gated proposal", async () => {
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+    const scope = { platform: "slack", account: "me", chat_id: "ops" };
+    const controller = createTuiController({
+      actor: "tui:operator",
+      client: {
+        start: async () => {},
+        stop: () => {},
+        request: async (method, params) => {
+          calls.push({ method, params });
+          if (method === "chat.list") return { chats: [] };
+          if (method === "safety.intent.listPending") return { intents: [] };
+          if (method === "system.status" || method === "sync.status" || method === "auth.status") return {};
+          if (method === "safety.intent.create") return { intent_id: "proposal-1", state: "Proposed" };
+          throw new Error(`unexpected protocol call: ${method}`);
+        },
+      },
+    });
+
+    await controller.start();
+    controller.setActiveChat(scope);
+    await controller.dispatchKey("3");
+    await controller.dispatchKey("c");
+    for (const key of "deploy tonight") await controller.dispatchKey(key);
+    expect(renderScreen(controller.state, { width: 80, height: 24 })).toContain("Compose proposal: deploy tonight [memory-only]");
+    await controller.dispatchKey("Enter");
+
+    expect(calls.filter((call) => call.method === "safety.intent.create")).toEqual([
+      { method: "safety.intent.create", params: { actor: "tui:operator", scope, body: "deploy tonight" } },
+    ]);
+    expect(controller.state.draft).toBe("");
+    expect(controller.state.notice).toContain("proposal created");
+  });
+
+  test("keeps q and b as input text instead of quitting or backfilling", async () => {
+    const calls: string[] = [];
+    const chat = { platform: "slack", account: "me", chat_id: "ops" };
+    const controller = createTuiController({
+      initialState: readyState(),
+      client: {
+        start: async () => {},
+        stop: () => { calls.push("stop"); },
+        request: async (method) => { calls.push(method); return {}; },
+      },
+    });
+    controller.setActiveChat(chat);
+
+    await controller.dispatchKey("/");
+    await controller.dispatchKey("q");
+    await controller.dispatchKey("b");
+    expect(controller.state.searchQuery).toBe("qb");
+    expect(controller.state.searchActive).toBe(true);
+
+    await controller.dispatchKey("Escape");
+    await controller.dispatchKey("3");
+    await controller.dispatchKey("c");
+    await controller.dispatchKey("q");
+    await controller.dispatchKey("b");
+    expect(controller.state.draft).toBe("qb");
+    expect(controller.state.composeActive).toBe(true);
+
+    await controller.dispatchKey("Escape");
+    await controller.dispatchKey("4");
+    await controller.dispatchKey("a");
+    await controller.dispatchKey("b");
+    expect(controller.state.codeBuffer).toBe("b");
+    expect(calls).toEqual([]);
+  });
+
+  test("submits the current chat interval through sync.backfill with b", async () => {
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+    const chat = { platform: "slack", account: "me", chat_id: "ops" };
+    const controller = createTuiController({
+      client: {
+        start: async () => {},
+        stop: () => {},
+        request: async (method, params) => {
+          calls.push({ method, params });
+          if (method === "chat.list") return { chats: [] };
+          if (method === "safety.intent.listPending") return { intents: [] };
+          if (method === "system.status" || method === "sync.status" || method === "auth.status" || method === "sync.backfill") return {};
+          throw new Error(`unexpected protocol call: ${method}`);
+        },
+      },
+    });
+
+    await controller.start();
+    controller.setActiveChat(chat);
+    controller.setSearch({ chat, interval: { from_ts: 10, to_ts: 20 }, query: "" });
+    await controller.dispatchKey("b");
+
+    expect(calls.filter((call) => call.method === "sync.backfill")).toEqual([
+      { method: "sync.backfill", params: { platform: "slack", account: "me", chat_id: "ops", from_ts: 10, to_ts: 20 } },
+    ]);
+    expect(controller.state.notice).toContain("no action retried");
   });
 });

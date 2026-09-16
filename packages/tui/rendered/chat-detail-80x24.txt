@@ -2,14 +2,14 @@ INBOXD · connected · slack                                                    
 1 INBOX | 2 SEARCH | ● CHAT | 4 APPROVALS | 5 DOCTOR                           │
 DETAIL (in place)                                                              │
 Evidence: partial · 1 chats / 1 gaps / 1 limits                                │
-Chat                                                                           │
+Detail — Chat                                                                  │
+ID: m-chat-1                                                                   │
+Author: 민수                                                                   │
+Time: 09:41                                                                    │
+Message: 재현 가능한 대화 내용                                                 │
 ── coverage gap: 1 · partial ──                                                │
-> ● 민수 09:41 재현 가능한 대화 내용                                           │
- ○ Ari 09:42 수정됨 (edited)                                                   │
-! subscribed — re-query required                                               │
-                                                                               │
-                                                                               │
-                                                                               │
+Back: Esc                                                                      │
+! chat selection opened                                                        │
                                                                                │
                                                                                │
                                                                                │

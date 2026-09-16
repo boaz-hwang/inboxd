@@ -1,12 +1,12 @@
 INBOXD · connected · slack                                                                                             │
 ● INBOX | 2 SEARCH | 3 CHAT | 4 APPROVALS | 5 DOCTOR                                                                   │
-LIST 40% │ DETAIL 60%                                                                                                  │
-Evidence: partial · 1 chats / 1 gaps / 1 limits                                                                        │
-Inbox                                                                                                                  │
-> ● 운영 09:41 한국어 상태 업데이트 (edited)                                                                           │
- ○ 개발 09:38 다음 점검 항목                                                                                           │
-! subscribed — re-query required                                                                                       │
-                                                                                                                       │
+LIST 40%                                        │DETAIL 60%                                                            │
+Evidence: partial · 1 chats / 1 gaps / 1 limits │Detail — Inbox                                                        │
+Inbox                                           │ID: slack:work:ops                                                    │
+> ● 운영 09:41 한국어 상태 업데이트 (edited)    │Author: 운영                                                          │
+ ○ 개발 09:38 다음 점검 항목                    │Time: 09:41                                                           │
+! subscribed — re-query required                │Message: 한국어 상태 업데이트 (edited)                                │
+                                                │Back: Esc                                                             │
                                                                                                                        │
                                                                                                                        │
                                                                                                                        │

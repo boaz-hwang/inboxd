@@ -1,14 +1,14 @@
 INBOXD · connected · slack                                                                                             │
 1 INBOX | 2 SEARCH | 3 CHAT | 4 APPROVALS | ● DOCTOR                                                                   │
-LIST 40% │ DETAIL 60%                                                                                                  │
-Evidence: partial · 1 chats / 1 gaps / 1 limits                                                                        │
-Doctor                                                                                                                 │
-> Encryption: SQLCipher healthy                                                                                        │
-  Authentication: configured                                                                                           │
-  Daemon: connected                                                                                                    │
-  Connection: connected                                                                                                │
-  Generation: 1 / subscribed 1                                                                                         │
-! subscribed — re-query required                                                                                       │
+LIST 40%                                        │DETAIL 60%                                                            │
+Evidence: partial · 1 chats / 1 gaps / 1 limits │Detail — Doctor                                                       │
+Doctor                                          │ID: encryption                                                        │
+> Encryption: SQLCipher healthy                 │State: SQLCipher healthy                                              │
+  Authentication: configured                    │Back: Esc                                                             │
+  Daemon: connected                             │                                                                      │
+  Connection: connected                         │                                                                      │
+  Generation: 1 / subscribed 1                  │                                                                      │
+! subscribed — re-query required                │                                                                      │
                                                                                                                        │
                                                                                                                        │
                                                                                                                        │
