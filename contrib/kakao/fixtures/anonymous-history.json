@@ -1,0 +1,36 @@
+[
+  {
+    "account_id": "stable:kakao_account_alpha",
+    "chat_id": "stable:kakao_chat_alpha",
+    "message_id": "m-in-range",
+    "author_id": "synthetic:author",
+    "ts": 20,
+    "body": "synthetic in range",
+    "revision": 21
+  },
+  {
+    "account_id": "stable:kakao_account_alpha",
+    "chat_id": "stable:kakao_chat_alpha",
+    "message_id": "m-before-upper-bound",
+    "author_id": "synthetic:author",
+    "ts": 999,
+    "body": "synthetic at upper bound",
+    "revision": 999
+  },
+  {
+    "account_id": "stable:kakao_account_alpha",
+    "chat_id": "stable:kakao_chat_alpha",
+    "message_id": "m-at-upper-bound",
+    "author_id": "synthetic:author",
+    "ts": 1000,
+    "body": "synthetic at upper bound",
+    "revision": 1000
+  },
+  {
+    "message_id": "m-other-chat",
+    "author_id": "synthetic:author",
+    "ts": 30,
+    "body": "synthetic other chat",
+    "revision": 30
+  }
+]
