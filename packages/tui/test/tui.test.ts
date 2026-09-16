@@ -547,7 +547,8 @@ describe("five-screen operational model", () => {
 
     for (const screen of ["inbox", "search", "chat"] as const) {
       await controller.dispatchKey(screen === "inbox" ? "1" : screen === "search" ? "2" : "3");
-      await controller.dispatchKey("n");
+      if (screen === "inbox") await Promise.all([controller.dispatchKey("n"), controller.dispatchKey("n")]);
+      else await controller.dispatchKey("n");
       expect(controller.state.views[screen].data).toHaveLength(2);
       expect(controller.state.views[screen].nextCursor).toBeUndefined();
     }

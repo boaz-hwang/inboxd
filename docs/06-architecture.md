@@ -318,7 +318,7 @@ MCP는 core·store·safety 재작성 없이 붙이는 것을 목표로 한다. �
 
 - 0: PASS_LOCAL — provenance-checked SQLCipher 재개방 gate 통과.
 - 1–5: IMPLEMENTED_LOCAL — store·daemon API·CLI·safe-send state machine·5화면 OpenTUI·MCP,
-  bounded pagination/read audit/UDS 0600 포함. 137개 자동 테스트 통과; live platform 증거는 아님.
+  bounded pagination/read audit/UDS 0600 포함. 146개 자동 테스트 통과; live platform 증거는 아님.
 - 6: IMPLEMENTED_SYNTHETIC / LIVE_BLOCKED — Kakao 측정 PASS 전 adapter I/O 거부.
 - B: BLOCKED_SAFE_HARNESS — 별도 KakaoTalk·Telegram wrapper 합성 확장은 B나 6의 live 증거가 아니다.
 

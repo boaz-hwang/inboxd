@@ -44,7 +44,7 @@ inboxd daemon (DB write · sync · outbox 실행 · 발송 토큰 · audit 독�
   DB KDF·schema·AX 측정이나 제품 통합 증거가 아니다.
 - SQLCipher store, 단일 daemon/UDS, coverage 동봉 search/inbox, protocol-only CLI,
   approval/outbox safety, 5화면 OpenTUI, MCP 3개 도구는 로컬 통합 테스트로 구현·관측됐다.
-  `bun run test`는 137개 테스트를 통과한다. 이는 live Slack/Kakao/발송 증거가 아니다.
+  `bun run test`는 146개 테스트를 통과한다. 이는 live Slack/Kakao/발송 증거가 아니다.
 - Slack 제품 adapter는 wrapper 한계 때문에 degraded/incomplete coverage만 제공한다.
   Kakao 제품 adapter는 원래 Spike B 측정이 통과하기 전 I/O를 거부하도록 구현돼 있으며,
   따라서 Kakao 제품 활성화는 계속 **BLOCKED**다.

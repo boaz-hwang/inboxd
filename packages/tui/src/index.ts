@@ -613,6 +613,7 @@ export class TuiController {
   private search: TuiSearchInput | undefined;
   private readonly approvals = new Map<string, PendingApproval>();
   private readonly approvalCodes = new Map<string, string>();
+  private readonly inFlightPages = new Set<string>();
   private readonly listeners = new Set<(state: TuiState) => void>();
 
   constructor(private readonly options: TuiControllerOptions) {
@@ -667,6 +668,7 @@ export class TuiController {
     this.options.client.stop();
     this.approvals.clear();
     this.approvalCodes.clear();
+    this.inFlightPages.clear();
     this.replace({ ...this.current, draft: "", searchQuery: "", searchActive: false, composeActive: false, codeBuffer: "", approvalPrompt: false });
   }
 
@@ -674,6 +676,7 @@ export class TuiController {
     this.update({ type: "disconnected", generation: this.generation, degraded });
     this.approvals.clear();
     this.approvalCodes.clear();
+    this.inFlightPages.clear();
   }
 
   /** Called by the runtime's ReconnectingProtocolClient event callback. */
@@ -726,9 +729,16 @@ export class TuiController {
 
   private async loadMore(screen: Screen, cursor: string): Promise<void> {
     const generation = this.generation;
-    if (screen === "inbox") await this.refreshInbox(generation, cursor, true);
-    if (screen === "search") await this.refreshSearch(generation, cursor, true);
-    if (screen === "chat") await this.refreshChat(generation, cursor, true);
+    const requestKey = `${generation}\u0000${screen}\u0000${cursor}`;
+    if (this.inFlightPages.has(requestKey)) return;
+    this.inFlightPages.add(requestKey);
+    try {
+      if (screen === "inbox") await this.refreshInbox(generation, cursor, true);
+      if (screen === "search") await this.refreshSearch(generation, cursor, true);
+      if (screen === "chat") await this.refreshChat(generation, cursor, true);
+    } finally {
+      this.inFlightPages.delete(requestKey);
+    }
   }
 
   private async call(screen: Screen, generation: number, method: ProtocolMethod, params: JsonObject): Promise<JsonObject | undefined> {
