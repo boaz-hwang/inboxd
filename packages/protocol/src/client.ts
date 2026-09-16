@@ -66,16 +66,19 @@ export class ReconnectingProtocolClient {
   start(topics: readonly ProtocolEventMethod[]): Promise<void> {
     this.stopped = false;
     this.topics = [...new Set(topics)];
-    this.starting ??= this.establish();
-    return this.starting;
+    return this.ensureConnected();
   }
 
   stop(): void {
+    const activeGeneration = this.activeGeneration;
     this.stopped = true;
     this.ready = false;
+    this.activeGeneration = ++this.generation;
     this.transport?.close();
     this.transport = undefined;
-    this.rejectGeneration(this.activeGeneration, new Error("protocol client stopped"));
+    this.subscriptions = undefined;
+    this.starting = undefined;
+    this.rejectGeneration(activeGeneration, new Error("protocol client stopped"));
   }
 
   async request(method: ProtocolMethod, params: JsonObject): Promise<JsonObject> {
@@ -104,6 +107,18 @@ export class ReconnectingProtocolClient {
     await this.sendRequest("subscribe", subscriptionParams(this.topics), generation);
     if (generation !== this.activeGeneration || this.stopped) return;
     this.ready = true;
+  }
+
+  private ensureConnected(): Promise<void> {
+    if (this.ready) return Promise.resolve();
+    if (this.starting !== undefined) return this.starting;
+    const starting = this.establish();
+    this.starting = starting;
+    void starting.then(
+      () => { if (this.starting === starting) this.starting = undefined; },
+      () => { if (this.starting === starting) this.starting = undefined; },
+    );
+    return starting;
   }
 
   private sendRequest(method: ProtocolMethod, params: JsonObject, generation: number): Promise<JsonObject> {
@@ -160,14 +175,7 @@ export class ReconnectingProtocolClient {
     this.requeryRequired = true;
     this.rejectGeneration(generation, new Error("protocol connection closed"));
     this.subscriptions = undefined;
-    this.starting = undefined;
-    queueMicrotask(() => {
-      if (!this.stopped && generation === this.activeGeneration) {
-        this.starting = this.establish().catch(() => {
-          this.starting = undefined;
-        });
-      }
-    });
+    void this.ensureConnected().catch(() => {});
   }
 
   private rejectGeneration(generation: number, error: Error): void {

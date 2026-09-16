@@ -33,6 +33,44 @@ async function settleSetup(transport: FakeTransport): Promise<void> {
 }
 
 describe("reconnecting protocol client", () => {
+  test("retries when start is called again after an initial connection rejection", async () => {
+    const recovered = new FakeTransport();
+    recovered.respondSynchronously = true;
+    let attempts = 0;
+    const client = new ReconnectingProtocolClient({
+      connect: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("daemon unavailable");
+        return recovered;
+      },
+      role: "reader",
+    });
+
+    await expect(client.start(["message.upserted"])).rejects.toThrow("daemon unavailable");
+    await expect(client.start(["message.upserted"])).resolves.toBeUndefined();
+    expect(attempts).toBe(2);
+    expect(client.ready).toBe(true);
+    client.stop();
+  });
+
+  test("opens a fresh connection when restarted after stop", async () => {
+    const first = new FakeTransport();
+    const second = new FakeTransport();
+    first.respondSynchronously = true;
+    second.respondSynchronously = true;
+    const transports = [first, second];
+    const client = new ReconnectingProtocolClient({ connect: async () => transports.shift()!, role: "reader" });
+
+    await client.start(["message.upserted"]);
+    client.stop();
+    await client.start(["message.upserted"]);
+
+    expect(first.closed).toBe(true);
+    expect(second.sent.map((message) => (message as { method?: string }).method)).toEqual(["system.hello", "subscribe"]);
+    expect(client.ready).toBe(true);
+    client.stop();
+  });
+
   test("records a pending request before a synchronous transport response", async () => {
     const transport = new FakeTransport();
     transport.respondSynchronously = true;
