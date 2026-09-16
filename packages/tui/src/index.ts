@@ -14,6 +14,8 @@ export interface Coverage {
 
 export interface Row {
   id: string;
+  /** Protocol identity; display IDs are never parsed to recover a chat scope. */
+  chat?: ChatRef;
   author?: string;
   ts?: string;
   body?: string;
@@ -29,6 +31,8 @@ interface View {
   status: ViewStatus;
   data: Row[];
   error?: string;
+  /** Opaque daemon continuation token retained only for this in-memory view. */
+  nextCursor?: string;
 }
 
 export interface TuiState {
@@ -64,8 +68,9 @@ export type TuiAction =
   | { type: "subscribed"; generation: number }
   | { type: "disconnected"; generation: number; degraded?: boolean }
   | { type: "queryLoading"; generation: number; screen: Screen }
-  | { type: "querySucceeded"; generation: number; screen: Screen; data: Row[]; coverage?: Coverage }
+  | { type: "querySucceeded"; generation: number; screen: Screen; data: Row[]; coverage?: Coverage; nextCursor?: string; append?: boolean }
   | { type: "queryFailed"; generation: number; screen: Screen; error: string }
+  | { type: "querySkipped"; generation: number; screen: Screen }
   | { type: "coverage"; coverage: Coverage }
   | { type: "event"; generation: number; method: ProtocolEventMethod };
 
@@ -118,6 +123,14 @@ function accepted(state: TuiState, generation: number): boolean {
 
 function allScreens(): Screen[] {
   return [...screens];
+}
+
+function settleRequery(state: TuiState, screen: Screen): Pick<TuiState, "requery" | "notice"> {
+  const requery = state.requery.filter((item) => item !== screen);
+  return {
+    requery,
+    ...(requery.length === 0 && state.notice === "subscribed — re-query required" ? { notice: undefined } : { notice: state.notice }),
+  };
 }
 
 function eventScreens(method: ProtocolEventMethod): Screen[] {
@@ -176,12 +189,23 @@ export function reduce(state: TuiState, action: TuiAction): TuiState {
   }
   if (action.type === "querySucceeded") {
     if (!accepted(state, action.generation)) return state;
-    const next = withView(state, action.screen, { status: action.data.length ? "ready" : "empty", data: action.data });
-    return { ...next, coverage: action.coverage ?? next.coverage, requery: next.requery.filter((screen) => screen !== action.screen) };
+    const prior = state.views[action.screen];
+    const data = action.append ? [...prior.data, ...action.data] : action.data;
+    const next = withView(state, action.screen, {
+      status: data.length ? "ready" : "empty",
+      data,
+      nextCursor: action.nextCursor,
+    });
+    return { ...next, coverage: action.coverage ?? next.coverage, ...settleRequery(next, action.screen) };
   }
   if (action.type === "queryFailed") {
     if (!accepted(state, action.generation)) return state;
-    return withView(state, action.screen, { ...state.views[action.screen], status: "error", error: action.error });
+    const next = withView(state, action.screen, { ...state.views[action.screen], status: "error", error: action.error });
+    return { ...next, ...settleRequery(next, action.screen) };
+  }
+  if (action.type === "querySkipped") {
+    if (!accepted(state, action.generation)) return state;
+    return { ...state, ...settleRequery(state, action.screen) };
   }
   if (action.type === "coverage") return { ...state, coverage: action.coverage };
   if (action.type === "event") {
@@ -243,6 +267,11 @@ export function reduce(state: TuiState, action: TuiAction): TuiState {
     if (state.connection.status !== "connected") return { ...state, notice: "backfill disabled while disconnected" };
     return { ...state, notice: "backfill requested — no action retried after disconnect" };
   }
+  if (action.key === "n") {
+    if (state.connection.status !== "connected") return { ...state, notice: "more results disabled while disconnected" };
+    if (state.views[state.screen].nextCursor === undefined) return { ...state, notice: "no more results" };
+    return { ...state, notice: "fetching more results" };
+  }
   if (action.key === "c") {
     if (state.screen !== "chat") return { ...state, notice: "compose proposal is only available in Chat" };
     if (state.connection.status !== "connected") return { ...state, notice: "compose disabled while disconnected" };
@@ -261,7 +290,7 @@ export function displayWidth(value: string): number {
   return width;
 }
 
-/** Clips by terminal cells and emits an ellipsis without splitting a Unicode code point. */
+/** Clips by terminal cells and emits an ellipsis without splitting a grapheme. */
 export function truncateCells(value: string, width: number): string {
   if (width <= 0) return "";
   if (displayWidth(value) <= width) return value;
@@ -269,7 +298,10 @@ export function truncateCells(value: string, width: number): string {
   const target = width - 1;
   let result = "";
   let used = 0;
-  for (const character of Array.from(value)) {
+  const clusters = typeof Intl.Segmenter === "function"
+    ? Array.from(new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(value), (part) => part.segment)
+    : Array.from(value);
+  for (const character of clusters) {
     const characterWidth = displayWidth(character);
     if (used + characterWidth > target) break;
     result += character;
@@ -304,12 +336,13 @@ function dataLines(state: TuiState, screen: Screen, empty: string): string[] {
   if (view.status === "empty") return [`> ${empty}`];
   const rows = visibleRows(state, screen);
   if (rows.length === 0) return [`> ${empty}`];
-  return rows.map((row, index) => {
+  const data = rows.map((row, index) => {
     const focus = index === state.focus ? ">" : " ";
     const selected = index === state.selected[screen] ? "●" : "○";
     const revision = row.deleted ? " deleted" : row.edited ? " (edited)" : "";
     return `${focus} ${selected} ${row.author ?? row.state ?? "item"} ${row.ts ?? row.expires ?? ""} ${row.destination ?? ""} ${row.body ?? ""}${revision}`.replace(/\s+/g, " ").trimEnd();
   });
+  return state.views[screen].nextCursor === undefined ? data : [...data, "  more results [n] — fetch next page"];
 }
 
 function listContentLines(state: TuiState): string[] {
@@ -354,7 +387,7 @@ function detailLines(state: TuiState): string[] {
     screen === "chat" ? `── coverage gap: ${state.coverage.gaps === undefined ? "?" : state.coverage.gaps} · ${state.coverage.freshness} ──` : undefined,
     screen === "approvals" && visibleRows(state, screen).some((item) => item.state === "Uncertain") ? "UNCERTAIN — do not resend automatically" : undefined,
   ].filter((line): line is string => line !== undefined);
-  return [title, `ID: ${row.id}`, ...details, ...warnings, "Back: Esc"];
+  return [title, `Context: ${state.selected[screen] + 1} of ${visibleRows(state, screen).length} · ${coverageText(state.coverage)}`, `ID: ${row.id}`, ...details, ...warnings, "Back: Esc"];
 }
 
 function joinColumns(left: readonly string[], right: readonly string[], width: number): string[] {
@@ -365,18 +398,18 @@ function joinColumns(left: readonly string[], right: readonly string[], width: n
 }
 
 function narrowBodyLines(state: TuiState): string[] {
-  const prefix = ["DETAIL (in place)", `Evidence: ${coverageText(state.coverage)}`];
+  const prefix = ["DETAIL (in place)", `Evidence rail: ${coverageText(state.coverage)} · ${state.connection.status}${state.connection.stale ? " · stale" : ""}`];
   const content = state.detailOpen ? detailLines(state) : listContentLines(state);
   return [...prefix, ...content];
 }
 
 function wideBodyLines(state: TuiState, width: number): string[] {
-  const list = ["LIST 40%", `Evidence: ${coverageText(state.coverage)}`, ...listContentLines(state), ...(state.notice === undefined ? [] : [`! ${state.notice}`])];
-  const detail = ["DETAIL 60%", ...detailLines(state)];
+  const list = ["LIST 40%", `Evidence rail: ${coverageText(state.coverage)}`, `Status rail: ${state.connection.status}${state.connection.stale ? " · stale retained" : ""} · generation ${state.connection.generation}/${state.connection.subscribedGeneration}`, ...listContentLines(state), ...(state.notice === undefined ? [] : [`! ${state.notice}`])];
+  const detail = ["DETAIL 60%", `Context rail: ${screenLabels[state.screen]} · focus ${state.focus + 1}/${visibleRows(state, state.screen).length || 0}`, ...detailLines(state)];
   return joinColumns(list, detail, width);
 }
 
-/** Deterministic screenshot-equivalent renderer; intentionally emits no ANSI escapes. */
+/** Deterministic fixed-size text renderer used for capture evidence. */
 export function renderScreen(state: TuiState, size: { width: number; height: number }, ephemeral: { approvalCode?: string } = {}): string {
   if (size.width < 80 || size.height < 24) {
     return Array.from({ length: Math.max(1, size.height) }, (_, index) => fit(index === 0 ? "terminal too small — minimum 80×24" : "", Math.max(1, size.width))).join("\n");
@@ -387,11 +420,11 @@ export function renderScreen(state: TuiState, size: { width: number; height: num
   const body = wide ? wideBodyLines(state, size.width) : narrowBodyLines(state);
   if (state.screen === "approvals" && ephemeral.approvalCode !== undefined) body.push(`Approval code [ephemeral]: ${ephemeral.approvalCode}`);
   if (!wide && state.notice) body.push(`! ${state.notice}`);
-  if (state.helpOpen) body.push("Keys: 1–5 screens · j/k/↑↓ move · Enter open · / search · b backfill", "      c compose · a approve · Esc cancel/back · ? help · q quit");
+  if (state.helpOpen) body.push("Keys: 1–5 screens · j/k/↑↓ move · Enter open · / search · n more · b backfill", "      c compose · a approve · Esc cancel/back · ? help · q quit");
   const rowsForBody = size.height - 3;
   const lines = [status, tabs, ...body.slice(0, rowsForBody)];
   while (lines.length < size.height - 1) lines.push("");
-  lines.push("1–5 j/k ↑↓ Enter / b c a Esc ? q");
+  lines.push("1–5 j/k ↑↓ Enter / n-more b c a Esc ? q");
   return lines.slice(0, size.height).map((line) => fit(line, size.width)).join("\n");
 }
 
@@ -527,6 +560,7 @@ function chatRows(value: unknown): Row[] {
     if (ref === undefined) return [];
     return [{
       id: `${ref.platform}:${ref.account}:${ref.chat_id}`,
+      chat: ref,
       author: stringValue(item.display_name) ?? ref.chat_id,
       destination: `${ref.platform}:${ref.account}`,
     }];
@@ -658,6 +692,7 @@ export class TuiController {
     const query = before.searchQuery;
     const draft = before.draft;
     const inputActive = before.approvalPrompt || before.searchActive || before.composeActive;
+    const nextCursor = before.views[before.screen].nextCursor;
     this.update({ type: "key", key });
     if (key === "q" && !inputActive) {
       this.stop();
@@ -667,6 +702,7 @@ export class TuiController {
     if (key === "Enter" && before.composeActive && draft.trim().length > 0) await this.propose(draft);
     if (key === "Enter" && before.approvalPrompt && code.length >= 4) await this.approve(code);
     if (key === "b" && before.connection.status === "connected" && !inputActive) await this.backfill();
+    if (key === "n" && before.connection.status === "connected" && !inputActive && nextCursor !== undefined) await this.loadMore(before.screen, nextCursor);
     if (key === "Enter" && before.screen === "inbox" && before.detailOpen) await this.openFocusedChat();
   }
 
@@ -676,10 +712,23 @@ export class TuiController {
     // Every request is explicitly mapped to the daemon protocol. No storage or
     // platform import is permitted in this package.
     if (this.current.requery.includes("inbox")) await this.refreshInbox(generation);
-    if (this.current.requery.includes("search") && this.search !== undefined) await this.refreshSearch(generation);
-    if (this.current.requery.includes("chat") && this.activeChat !== undefined) await this.refreshChat(generation);
+    if (this.current.requery.includes("search")) {
+      if (this.search !== undefined) await this.refreshSearch(generation);
+      else this.update({ type: "querySkipped", generation, screen: "search" });
+    }
+    if (this.current.requery.includes("chat")) {
+      if (this.activeChat !== undefined) await this.refreshChat(generation);
+      else this.update({ type: "querySkipped", generation, screen: "chat" });
+    }
     if (this.current.requery.includes("approvals")) await this.refreshApprovals(generation);
     if (this.current.requery.includes("doctor")) await this.refreshDoctor(generation);
+  }
+
+  private async loadMore(screen: Screen, cursor: string): Promise<void> {
+    const generation = this.generation;
+    if (screen === "inbox") await this.refreshInbox(generation, cursor, true);
+    if (screen === "search") await this.refreshSearch(generation, cursor, true);
+    if (screen === "chat") await this.refreshChat(generation, cursor, true);
   }
 
   private async call(screen: Screen, generation: number, method: ProtocolMethod, params: JsonObject): Promise<JsonObject | undefined> {
@@ -694,16 +743,17 @@ export class TuiController {
     }
   }
 
-  private async refreshInbox(generation: number): Promise<void> {
-    const result = await this.call("inbox", generation, "chat.list", {});
-    if (result !== undefined) this.update({ type: "querySucceeded", generation, screen: "inbox", data: chatRows(result.chats), coverage: coverage(result.coverage) });
+  private async refreshInbox(generation: number, cursor?: string, append = false): Promise<void> {
+    const result = await this.call("inbox", generation, "chat.list", cursor === undefined ? {} : { cursor });
+    if (result !== undefined) this.update({ type: "querySucceeded", generation, screen: "inbox", data: chatRows(result.chats), coverage: coverage(result.coverage), nextCursor: stringValue(result.next_cursor), append });
   }
 
-  private async refreshSearch(generation: number): Promise<void> {
+  private async refreshSearch(generation: number, cursor?: string, append = false): Promise<void> {
     const input = this.search;
     if (input === undefined) return;
-    const result = await this.call("search", generation, "message.search", input as unknown as JsonObject);
-    if (result !== undefined) this.update({ type: "querySucceeded", generation, screen: "search", data: messageRows(result.messages), coverage: coverage(result.coverage) });
+    const params = { ...input, ...(cursor === undefined ? {} : { cursor }) } as unknown as JsonObject;
+    const result = await this.call("search", generation, "message.search", params);
+    if (result !== undefined) this.update({ type: "querySucceeded", generation, screen: "search", data: messageRows(result.messages), coverage: coverage(result.coverage), nextCursor: stringValue(result.next_cursor), append });
   }
 
   private intervalForActiveChat(): { from_ts: number; to_ts: number } {
@@ -761,11 +811,11 @@ export class TuiController {
     }
   }
 
-  private async refreshChat(generation: number): Promise<void> {
+  private async refreshChat(generation: number, cursor?: string, append = false): Promise<void> {
     const chat = this.activeChat;
     if (chat === undefined) return;
-    const result = await this.call("chat", generation, "message.inbox", { chat });
-    if (result !== undefined) this.update({ type: "querySucceeded", generation, screen: "chat", data: messageRows(result.messages), coverage: coverage(result.coverage) });
+    const result = await this.call("chat", generation, "message.inbox", { chat, ...(cursor === undefined ? {} : { cursor }) });
+    if (result !== undefined) this.update({ type: "querySucceeded", generation, screen: "chat", data: messageRows(result.messages), coverage: coverage(result.coverage), nextCursor: stringValue(result.next_cursor), append });
   }
 
   private async refreshApprovals(generation: number): Promise<void> {
@@ -802,10 +852,8 @@ export class TuiController {
 
   private async openFocusedChat(): Promise<void> {
     const row = this.current.views.inbox.data[this.current.focus];
-    if (row === undefined) return;
-    const [platform, account, chatId] = row.id.split(":");
-    if (platform === undefined || account === undefined || chatId === undefined) return;
-    this.activeChat = { platform, account, chat_id: chatId };
+    if (row?.chat === undefined) return;
+    this.activeChat = row.chat;
     this.update({ type: "switchScreen", screen: "chat" });
     this.update({ type: "event", generation: this.generation, method: "message.upserted" });
     await this.refresh();

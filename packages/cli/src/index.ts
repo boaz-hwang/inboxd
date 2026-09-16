@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { lstatSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 import type { JsonObject } from "../../protocol/src/index.ts";
 import {
@@ -22,10 +23,24 @@ export interface UdsCliOptions extends Omit<CliHandlerOptions, "connect"> {
   readonly socketPath?: string;
 }
 
+export function readCliApproverToken(socketPath: string): string {
+  const path = join(dirname(socketPath), "approver.token");
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600) {
+    throw new Error("local approver token is not an owner-only regular file");
+  }
+  const token = readFileSync(path, "utf8").trim();
+  if (!/^[A-Za-z0-9_-]{32,}$/.test(token)) throw new Error("local approver token is invalid");
+  return token;
+}
+
 /** Creates a CLI client with the daemon UDS as its only data transport. */
 export function createUdsCliHandlers(options: UdsCliOptions = {}): CliHandlers {
   const socketPath = options.socketPath ?? defaultSocketPath;
-  return createCliHandlers({ ...options, connect: () => connectUdsTransport(socketPath) });
+  const approverToken = options.role === "approver"
+    ? options.approverToken ?? readCliApproverToken(socketPath)
+    : undefined;
+  return createCliHandlers({ ...options, approverToken, connect: () => connectUdsTransport(socketPath) });
 }
 
 export function createUdsAgentHandlers(options: Omit<UdsCliOptions, "role"> = {}): AgentHandlers {

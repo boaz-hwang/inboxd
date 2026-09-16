@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { lstatSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 import { ReconnectingProtocolClient, type ClientRole } from "../../protocol/src/index.ts";
 import { createTuiController, type TuiController } from "./index.ts";
@@ -13,6 +14,18 @@ export interface RunTuiOptions {
   readonly role?: Extract<ClientRole, "reader" | "approver">;
 }
 
+/** Reads the daemon's owner-only local approver token without importing daemon internals. */
+export function readTuiApproverToken(socketPath: string): string {
+  const path = join(dirname(socketPath), "approver.token");
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600) {
+    throw new Error("local approver token is not an owner-only regular file");
+  }
+  const token = readFileSync(path, "utf8").trim();
+  if (!/^[A-Za-z0-9_-]{32,}$/.test(token)) throw new Error("local approver token is invalid");
+  return token;
+}
+
 function isTTY(): boolean {
   return Boolean(process.stdin.isTTY && process.stdout.isTTY);
 }
@@ -21,11 +34,13 @@ function isTTY(): boolean {
 export async function runTui(options: RunTuiOptions = {}): Promise<void> {
   if (!isTTY()) throw new Error("inboxd-tui requires stdin and stdout to be TTYs");
   const role = options.role ?? "approver";
+  const socketPath = options.socketPath ?? defaultTuiSocketPath;
   let controller: TuiController;
   const client = new ReconnectingProtocolClient({
-    connect: () => connectTuiUdsTransport(options.socketPath ?? defaultTuiSocketPath),
+    connect: () => connectTuiUdsTransport(socketPath),
     role,
     isTTY,
+    ...(role === "approver" ? { approverToken: readTuiApproverToken(socketPath) } : {}),
     onEvent: (event) => { void controller.receiveEvent(event.method); },
   });
   controller = createTuiController({ client });

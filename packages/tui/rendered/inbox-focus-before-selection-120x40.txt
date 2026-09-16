@@ -1,13 +1,13 @@
 INBOXD · connected · slack                                                                                             │
-1 INBOX | ● SEARCH | 3 CHAT | 4 APPROVALS | 5 DOCTOR                                                                   │
+● INBOX | 2 SEARCH | 3 CHAT | 4 APPROVALS | 5 DOCTOR                                                                   │
 LIST 40%                                        │DETAIL 60%                                                            │
-Evidence rail: partial · 1 chats / 1 gaps / 1 l…│Context rail: SEARCH · focus 1/1                                      │
-Status rail: connected · generation 1/1         │Detail — Search                                                       │
-Search query: (memory-only)                     │Context: 1 of 1 · partial · 1 chats / 1 gaps / 1 limits               │
-Coverage: partial · 1 chats / 1 gaps / 1 limits │ID: m-search                                                          │
-                                                │Author: 민수                                                          │
-Results                                         │Time: 09:41                                                           │
-> ● 민수 09:41 검색 결과와 증거 범위            │Message: 검색 결과와 증거 범위                                        │
+Evidence rail: partial · 1 chats / 1 gaps / 1 l…│Context rail: INBOX · focus 2/2                                       │
+Status rail: connected · generation 1/1         │Detail — Inbox                                                        │
+Inbox                                           │Context: 1 of 2 · partial · 1 chats / 1 gaps / 1 limits               │
+ ● 운영 09:41 한국어/CJK 경계 텍스트 가나다라마…│ID: slack:work:ops                                                    │
+> ○ 개발 09:38 다음 점검 항목                   │Author: 운영                                                          │
+                                                │Time: 09:41                                                           │
+                                                │Message: 한국어/CJK 경계 텍스트 가나다라마바사아자차카타파하漢字かな… │
                                                 │Back: Esc                                                             │
                                                                                                                        │
                                                                                                                        │

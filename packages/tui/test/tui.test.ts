@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   createInitialState,
@@ -12,6 +15,7 @@ import {
   truncateCells,
   type TuiState,
 } from "../src/index.ts";
+import { readTuiApproverToken } from "../src/main.ts";
 
 const fixtures = {
   inbox: [
@@ -33,6 +37,21 @@ function readyState(): TuiState {
 }
 
 describe("five-screen operational model", () => {
+  test("reads only the daemon owner-only approver token beside the socket", () => {
+    const directory = mkdtempSync(join(tmpdir(), "inboxd-tui-token-"));
+    try {
+      const socketPath = join(directory, "sock");
+      const tokenPath = join(directory, "approver.token");
+      const token = "abcdefghijklmnopqrstuvwxyz_1234567890";
+      writeFileSync(tokenPath, `${token}\n`, { mode: 0o600 });
+      expect(readTuiApproverToken(socketPath)).toBe(token);
+      chmodSync(tokenPath, 0o644);
+      expect(() => readTuiApproverToken(socketPath)).toThrow(/owner-only/);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   test("documents and handles 1–5, movement, activation, search, help and escape", () => {
     let state = readyState();
     for (const [key, screen] of [["1", "inbox"], ["2", "search"], ["3", "chat"], ["4", "approvals"], ["5", "doctor"]] as const) {
@@ -49,7 +68,7 @@ describe("five-screen operational model", () => {
     state = reduce(state, { type: "key", key: "Escape" });
     expect(state.helpOpen).toBe(false);
     const help = renderScreen(state, { width: 80, height: 24 });
-    expect(help).toContain("1–5 j/k ↑↓ Enter / b c a Esc ? q");
+    expect(help).toContain("1–5 j/k ↑↓ Enter / n-more b c a Esc ? q");
     state = { ...state, draft: "memory-only reply" };
     state = reduce(state, { type: "key", key: "q" });
     expect(state.draft).toBe("");
@@ -87,7 +106,8 @@ describe("five-screen operational model", () => {
     expect(narrow).not.toContain("LIST 40% │ DETAIL 60%");
     expect(wide).toContain("LIST 40%");
     expect(wide).toContain("DETAIL 60%");
-    expect(wide).toContain("Evidence:");
+    expect(wide).toContain("Evidence rail:");
+    expect(wide).toContain("Status rail:");
   });
 
   test("renders actual 40/60 list-detail content and an activated in-place detail", () => {
@@ -186,11 +206,15 @@ describe("five-screen operational model", () => {
     expect(state.requery).toContain("approvals");
     expect(state.requery).toContain("doctor");
     expect(state.connection.status).toBe("connected");
+    state = reduce(state, { type: "switchScreen", screen: "doctor" });
+    state = reduce(state, { type: "disconnected", generation: 2 });
+    expect(renderScreen(state, { width: 80, height: 24 })).toContain("Daemon: stale response retained");
   });
 
   test("clips CJK by terminal cells without splitting and rejects secret persistence recursively", () => {
     expect(displayWidth("가나다")).toBe(6);
     expect(truncateCells("가나다라마바사", 7)).toBe("가나다…");
+    expect(truncateCells("가\u0301나다라마바사", 5)).toBe("가\u0301나…");
     expect(displayWidth(truncateCells("가나다라마바사", 7))).toBeLessThanOrEqual(7);
     expect(sanitizePersistence({ screen: "search", platform: "slack", period: "24h" })).toEqual({ screen: "search", platform: "slack", period: "24h" });
     expect(() => sanitizePersistence({ screen: "search", nested: { draft: "no", token: "no" }, query: "no", code: "no" })).toThrow(/not persisted/i);
@@ -296,7 +320,7 @@ describe("five-screen operational model", () => {
       type: "querySucceeded",
       generation: 1,
       screen: "inbox",
-      data: [{ id: "slack:me:ops", author: "Ops" }],
+      data: [{ id: "slack:me:ops", chat: { platform: "slack", account: "me", chat_id: "ops" }, author: "Ops" }],
     });
     const controller = createTuiController({
       initialState,
@@ -440,5 +464,93 @@ describe("five-screen operational model", () => {
       { method: "sync.backfill", params: { platform: "slack", account: "me", chat_id: "ops", from_ts: 10, to_ts: 20 } },
     ]);
     expect(controller.state.notice).toContain("no action retried");
+  });
+
+  test("keeps colon-bearing ChatRef values structural for inbox, search, proposals, and backfill", async () => {
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+    const chat = { platform: "slack", account: "stable:acct", chat_id: "stable:ops" };
+    const controller = createTuiController({
+      actor: "tui:operator",
+      client: {
+        start: async () => {},
+        stop: () => {},
+        request: async (method, params) => {
+          calls.push({ method, params });
+          if (method === "chat.list") return { chats: [{ ...chat, display_name: "Stable Ops" }] };
+          if (method === "message.inbox" || method === "message.search") return { messages: [], coverage: { covered: [], gaps: [], limits: [] } };
+          if (method === "safety.intent.listPending") return { intents: [] };
+          if (method === "system.status" || method === "sync.status" || method === "auth.status" || method === "sync.backfill") return {};
+          if (method === "safety.intent.create") return { intent_id: "proposal-1", state: "Proposed" };
+          throw new Error(`unexpected protocol call: ${method}`);
+        },
+      },
+    });
+
+    await controller.start();
+    await controller.dispatchKey("Enter");
+    await controller.dispatchKey("Enter");
+    controller.setSearch({ chat, interval: { from_ts: 10, to_ts: 20 }, query: "needle" });
+    await controller.dispatchKey("/");
+    for (const key of "needle") await controller.dispatchKey(key);
+    await controller.dispatchKey("Enter");
+    await controller.dispatchKey("3");
+    await controller.dispatchKey("c");
+    for (const key of "deploy") await controller.dispatchKey(key);
+    await controller.dispatchKey("Enter");
+    await controller.dispatchKey("b");
+
+    expect(calls.filter((call) => call.method === "message.inbox")).toEqual([
+      { method: "message.inbox", params: { chat } },
+    ]);
+    expect(calls.filter((call) => call.method === "message.search")).toEqual([
+      { method: "message.search", params: { chat, interval: { from_ts: 10, to_ts: 20 }, query: "needle" } },
+    ]);
+    expect(calls.filter((call) => call.method === "safety.intent.create")).toEqual([
+      { method: "safety.intent.create", params: { actor: "tui:operator", scope: chat, body: "deploy" } },
+    ]);
+    expect(calls.filter((call) => call.method === "sync.backfill")).toEqual([
+      { method: "sync.backfill", params: { platform: "slack", account: "stable:acct", chat_id: "stable:ops", from_ts: 10, to_ts: 20 } },
+    ]);
+  });
+
+  test("retains paged inbox, search, and chat rows and clears the subscribed notice after current queries settle", async () => {
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+    const chat = { platform: "slack", account: "me", chat_id: "ops" };
+    const controller = createTuiController({
+      client: {
+        start: async () => {},
+        stop: () => {},
+        request: async (method, params) => {
+          calls.push({ method, params });
+          const cursor = params.cursor;
+          if (method === "chat.list") return cursor === "inbox-next"
+            ? { chats: [{ platform: "slack", account: "me", chat_id: "second", display_name: "Second" }] }
+            : { chats: [{ ...chat, display_name: "Ops" }], next_cursor: "inbox-next" };
+          if (method === "message.search") return cursor === "search-next"
+            ? { messages: [{ msg_id: "s2", body: "second search" }], coverage: { covered: [], gaps: [], limits: [] } }
+            : { messages: [{ msg_id: "s1", body: "first search" }], coverage: { covered: [], gaps: [], limits: [] }, next_cursor: "search-next" };
+          if (method === "message.inbox") return cursor === "chat-next"
+            ? { messages: [{ msg_id: "c2", body: "second chat" }], coverage: { covered: [], gaps: [], limits: [] } }
+            : { messages: [{ msg_id: "c1", body: "first chat" }], coverage: { covered: [], gaps: [], limits: [] }, next_cursor: "chat-next" };
+          if (method === "safety.intent.listPending") return { intents: [] };
+          if (method === "system.status" || method === "sync.status" || method === "auth.status") return {};
+          throw new Error(`unexpected protocol call: ${method}`);
+        },
+      },
+    });
+    controller.setActiveChat(chat);
+    controller.setSearch({ chat, interval: { from_ts: 10, to_ts: 20 }, query: "needle" });
+
+    await controller.start();
+    expect(controller.state.notice).not.toBe("subscribed — re-query required");
+    expect(renderScreen(controller.state, { width: 80, height: 24 })).toContain("more results [n]");
+
+    for (const screen of ["inbox", "search", "chat"] as const) {
+      await controller.dispatchKey(screen === "inbox" ? "1" : screen === "search" ? "2" : "3");
+      await controller.dispatchKey("n");
+      expect(controller.state.views[screen].data).toHaveLength(2);
+      expect(controller.state.views[screen].nextCursor).toBeUndefined();
+    }
+    expect(calls.filter((call) => call.params.cursor !== undefined).map((call) => call.params.cursor)).toEqual(["inbox-next", "search-next", "chat-next"]);
   });
 });

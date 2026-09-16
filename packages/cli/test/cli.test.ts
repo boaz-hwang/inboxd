@@ -46,11 +46,12 @@ async function ready(transport: FakeTransport): Promise<void> {
   for (let index = 0; index < 8; index += 1) await Promise.resolve();
 }
 
-async function started(transport: FakeTransport, options: { role?: "reader" | "agent" | "approver"; isTTY?: boolean; launchDaemon?: () => Promise<void> } = {}) {
+async function started(transport: FakeTransport, options: { role?: "reader" | "agent" | "approver"; isTTY?: boolean; approverToken?: string; launchDaemon?: () => Promise<void> } = {}) {
   const handlers = createCliHandlers({
     connect: async () => transport,
     role: options.role ?? "reader",
     isTTY: () => options.isTTY ?? true,
+    approverToken: options.approverToken,
     launchDaemon: options.launchDaemon,
   });
   clients.push(handlers);
@@ -128,7 +129,8 @@ describe("protocol-only CLI handlers", () => {
 
   test("uses approver protocol methods only after the TTY gate", async () => {
     const transport = new FakeTransport();
-    const cli = await started(transport, { role: "approver", isTTY: true });
+    const cli = await started(transport, { role: "approver", isTTY: true, approverToken: "owner-only-token" });
+    expect(transport.sent[0]).toMatchObject({ method: "system.hello", params: { role: "approver", approver_token: "owner-only-token" } });
     await respondToCall(transport, cli.listPending(), { intents: [] });
     expect(lastRequest(transport).method).toBe("safety.intent.listPending");
     await respondToCall(transport, cli.approve(approval), { state: "approved" });

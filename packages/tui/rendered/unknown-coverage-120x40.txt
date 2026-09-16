@@ -1,10 +1,10 @@
 INBOXD · connected · slack                                                                                             │
 1 INBOX | ● SEARCH | 3 CHAT | 4 APPROVALS | 5 DOCTOR                                                                   │
 LIST 40%                                        │DETAIL 60%                                                            │
-Evidence rail: partial · 1 chats / 1 gaps / 1 l…│Context rail: SEARCH · focus 1/1                                      │
+Evidence rail: unknown · ? chats / ? gaps       │Context rail: SEARCH · focus 1/1                                      │
 Status rail: connected · generation 1/1         │Detail — Search                                                       │
-Search query: (memory-only)                     │Context: 1 of 1 · partial · 1 chats / 1 gaps / 1 limits               │
-Coverage: partial · 1 chats / 1 gaps / 1 limits │ID: m-search                                                          │
+Search query: (memory-only)                     │Context: 1 of 1 · unknown · ? chats / ? gaps                          │
+Coverage: unknown · ? chats / ? gaps            │ID: m-search                                                          │
                                                 │Author: 민수                                                          │
 Results                                         │Time: 09:41                                                           │
 > ● 민수 09:41 검색 결과와 증거 범위            │Message: 검색 결과와 증거 범위                                        │

@@ -24,7 +24,7 @@ class FakeRequester implements ProtocolRequester {
   result: Record<string, unknown> = {};
   failure: unknown;
 
-  async request(method: "message.search" | "safety.intent.create", params: Record<string, unknown>): Promise<Record<string, unknown>> {
+  async request(method: "message.inbox" | "message.search" | "safety.intent.create", params: Record<string, unknown>): Promise<Record<string, unknown>> {
     this.calls.push({ method, params });
     if (this.failure !== undefined) throw this.failure;
     return this.result;
@@ -91,7 +91,7 @@ describe("inboxd MCP agent server", () => {
     await expect(handlers.inbox_list({ chat, interval })).resolves.toEqual(requester.result);
     expect(requester.calls).toEqual([
       { method: "message.search", params: { chat, interval, query: "find me" } },
-      { method: "message.search", params: { chat, interval, query: "" } },
+      { method: "message.inbox", params: { chat, interval } },
     ]);
   });
 
@@ -148,7 +148,7 @@ describe("inboxd MCP agent server", () => {
     await expect(handlers.inbox_list({ chat, interval })).rejects.toMatchObject({
       name: "McpDaemonError",
       code: "LOCKED",
-      method: "message.search",
+      method: "message.inbox",
     } satisfies Partial<McpDaemonError>);
   });
 

@@ -10,7 +10,7 @@ import {
 
 export const MCP_TOOL_NAMES = ["inbox_search", "inbox_list", "send_propose"] as const;
 
-type DaemonMethod = "message.search" | "safety.intent.create";
+type DaemonMethod = "message.inbox" | "message.search" | "safety.intent.create";
 type ToolName = (typeof MCP_TOOL_NAMES)[number];
 type JsonRecord = Record<string, unknown>;
 
@@ -123,11 +123,11 @@ async function daemonRequest(requester: ProtocolRequester, method: DaemonMethod,
   }
 }
 
-function coverageResult(result: JsonRecord): JsonRecord {
+function coverageResult(result: JsonRecord, method: "message.inbox" | "message.search"): JsonRecord {
   const coverage = result.coverage;
   if (!Array.isArray(result.messages) || coverage === null || typeof coverage !== "object" || Array.isArray(coverage)
     || !Array.isArray((coverage as JsonRecord).covered) || !Array.isArray((coverage as JsonRecord).gaps) || !Array.isArray((coverage as JsonRecord).limits)) {
-    throw new McpDaemonError("message.search", new Error("daemon returned an invalid inbox result"));
+    throw new McpDaemonError(method, new Error("daemon returned an invalid inbox result"));
   }
   return result;
 }
@@ -147,12 +147,12 @@ export function createToolHandlers(requester: ProtocolRequester): ToolHandlers {
   return {
     inbox_search: async (input) => {
       const parsed = parse(inboxSearchSchema, input);
-      return coverageResult(await daemonRequest(requester, "message.search", parsed));
+      return coverageResult(await daemonRequest(requester, "message.search", parsed), "message.search");
     },
-    // Listing is a blank-query search so its result retains the daemon's complete coverage evidence.
+    // Inbox reads preserve the daemon's complete coverage evidence without a search query.
     inbox_list: async (input) => {
       const parsed = parse(inboxListSchema, input);
-      return coverageResult(await daemonRequest(requester, "message.search", { ...parsed, query: "" }));
+      return coverageResult(await daemonRequest(requester, "message.inbox", parsed), "message.inbox");
     },
     send_propose: async (input) => {
       const parsed = parse(sendProposeSchema, input);

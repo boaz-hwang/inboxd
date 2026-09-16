@@ -1,13 +1,15 @@
 INBOXD · connected · slack                                                                                             │
 1 INBOX | 2 SEARCH | 3 CHAT | ● APPROVALS | 5 DOCTOR                                                                   │
 LIST 40%                                        │DETAIL 60%                                                            │
-Evidence: partial · 1 chats / 1 gaps / 1 limits │Detail — Approvals                                                    │
-Approvals                                       │ID: intent-1                                                          │
-> ● Proposed 10m slack:work:ops 승인 대기 제안  │State: Proposed                                                       │
- ○ Uncertain expired slack:work:ops 자동 재전송…│Destination: slack:work:ops                                           │
-UNCERTAIN — do not resend automatically         │Expires: 10m                                                          │
-Approve [a]                                     │Message: 승인 대기 제안                                               │
-! subscribed — re-query required                │Approval code required                                                │
+Evidence rail: partial · 1 chats / 1 gaps / 1 l…│Context rail: APPROVALS · focus 1/2                                   │
+Status rail: connected · generation 1/1         │Detail — Approvals                                                    │
+Approvals                                       │Context: 1 of 2 · partial · 1 chats / 1 gaps / 1 limits               │
+> ● Proposed 10m slack:work:ops 승인 대기 제안  │ID: intent-1                                                          │
+ ○ Uncertain expired slack:work:ops 자동 재전송…│State: Proposed                                                       │
+UNCERTAIN — do not resend automatically         │Destination: slack:work:ops                                           │
+Approve [a]                                     │Expires: 10m                                                          │
+                                                │Message: 승인 대기 제안                                               │
+                                                │Approval code required                                                │
                                                 │UNCERTAIN — do not resend automatically                               │
                                                 │Back: Esc                                                             │
                                                                                                                        │
@@ -35,6 +37,4 @@ Approve [a]                                     │Message: 승인 대기 제안
                                                                                                                        │
                                                                                                                        │
                                                                                                                        │
-                                                                                                                       │
-                                                                                                                       │
-1–5 j/k ↑↓ Enter / b c a Esc ? q                                                                                       │
+1–5 j/k ↑↓ Enter / n-more b c a Esc ? q                                                                                │

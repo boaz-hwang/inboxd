@@ -1,8 +1,9 @@
 INBOXD · connected · slack                                                     │
 1 INBOX | 2 SEARCH | ● CHAT | 4 APPROVALS | 5 DOCTOR                           │
 DETAIL (in place)                                                              │
-Evidence: partial · 1 chats / 1 gaps / 1 limits                                │
+Evidence rail: partial · 1 chats / 1 gaps / 1 limits · connected               │
 Detail — Chat                                                                  │
+Context: 1 of 2 · partial · 1 chats / 1 gaps / 1 limits                        │
 ID: m-chat-1                                                                   │
 Author: 민수                                                                   │
 Time: 09:41                                                                    │
@@ -20,5 +21,4 @@ Back: Esc                                                                      �
                                                                                │
                                                                                │
                                                                                │
-                                                                               │
-1–5 j/k ↑↓ Enter / b c a Esc ? q                                               │
+1–5 j/k ↑↓ Enter / n-more b c a Esc ? q                                        │

@@ -1,12 +1,19 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
 
-import { createInitialState, reduce, renderScreen, screens, type Row, type Screen, type TuiState } from "../src/index.ts";
+import { createInitialState, displayWidth, reduce, renderScreen, screens, truncateCells, type Row, type Screen, type TuiState } from "../src/index.ts";
 
 const rows: Record<Screen, Row[]> = {
   inbox: [
-    { id: "slack:work:ops", author: "운영", ts: "09:41", body: "한국어 상태 업데이트", edited: true },
-    { id: "slack:work:dev", author: "개발", ts: "09:38", body: "다음 점검 항목" },
+    {
+      id: "slack:work:ops",
+      chat: { platform: "slack", account: "work", chat_id: "ops" },
+      author: "운영",
+      ts: "09:41",
+      body: "한국어/CJK 경계 텍스트 가나다라마바사아자차카타파하漢字かなカナ — whole grapheme clipping evidence",
+      edited: true,
+    },
+    { id: "slack:work:dev", chat: { platform: "slack", account: "work", chat_id: "dev" }, author: "개발", ts: "09:38", body: "다음 점검 항목" },
   ],
   search: [{ id: "m-search", author: "민수", ts: "09:41", body: "검색 결과와 증거 범위" }],
   chat: [
@@ -23,6 +30,9 @@ const rows: Record<Screen, Row[]> = {
     { id: "sync", state: "degraded coverage" },
   ],
 };
+
+const sizes = [{ width: 80, height: 24 }, { width: 120, height: 40 }] as const;
+const outputDirectory = join(import.meta.dir, "..", "rendered");
 
 function evidenceState(screen: Screen): TuiState {
   let state = createInitialState({ screen, platform: "slack", period: "24h" });
@@ -44,19 +54,47 @@ function activatedDetailState(screen: Screen): TuiState {
   return reduce(evidenceState(screen), { type: "key", key: "Enter" });
 }
 
-const outputDirectory = join(import.meta.dir, "..", "rendered");
+function focusBeforeSelectionState(): TuiState {
+  return reduce(evidenceState("inbox"), { type: "key", key: "j" });
+}
+
+function unknownCoverageState(): TuiState {
+  return reduce(evidenceState("search"), { type: "coverage", coverage: { freshness: "unknown" } });
+}
+
+function disconnectedApprovalsState(degraded: boolean): TuiState {
+  return reduce(evidenceState("approvals"), { type: "disconnected", generation: 1, degraded });
+}
+
+function staleDoctorState(): TuiState {
+  return reduce(evidenceState("doctor"), { type: "disconnected", generation: 1 });
+}
+
+/** Reserve one cell for a visible capture border without breaking CJK clipping. */
+function bordered(render: string, width: number): string {
+  return render.split("\n").map((line) => {
+    const content = line.trimEnd();
+    const bounded = displayWidth(content) >= width ? truncateCells(content, width - 2) : content;
+    return `${bounded}${" ".repeat(width - 1 - displayWidth(bounded))}│`;
+  }).join("\n");
+}
+
+async function capture(name: string, state: TuiState, size: { width: number; height: number }): Promise<void> {
+  await Bun.write(join(outputDirectory, `${name}-${size.width}x${size.height}.txt`), bordered(renderScreen(state, size), size.width));
+}
+
 await mkdir(outputDirectory, { recursive: true });
+for (const stale of await readdir(outputDirectory)) {
+  if (stale.endsWith(".txt")) await Bun.write(join(outputDirectory, stale), "");
+}
 for (const screen of screens) {
-  for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
-    const output = renderScreen(evidenceState(screen), size)
-      .split("\n")
-      .map((line) => `${line.slice(0, -1)}│`)
-      .join("\n");
-    await Bun.write(join(outputDirectory, `${screen}-${size.width}x${size.height}.txt`), output);
-  }
-  const detail = renderScreen(activatedDetailState(screen), { width: 80, height: 24 })
-    .split("\n")
-    .map((line) => `${line.slice(0, -1)}│`)
-    .join("\n");
-  await Bun.write(join(outputDirectory, `${screen}-detail-80x24.txt`), detail);
+  for (const size of sizes) await capture(screen, evidenceState(screen), size);
+  await capture(`${screen}-detail`, activatedDetailState(screen), { width: 80, height: 24 });
+}
+for (const size of sizes) {
+  await capture("inbox-focus-before-selection", focusBeforeSelectionState(), size);
+  await capture("unknown-coverage", unknownCoverageState(), size);
+  await capture("approvals-disconnected", disconnectedApprovalsState(false), size);
+  await capture("approvals-degraded", disconnectedApprovalsState(true), size);
+  await capture("doctor-stale", staleDoctorState(), size);
 }

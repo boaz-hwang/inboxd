@@ -1,15 +1,15 @@
 INBOXD · connected · slack                                                     │
-● INBOX | 2 SEARCH | 3 CHAT | 4 APPROVALS | 5 DOCTOR                           │
+1 INBOX | ● SEARCH | 3 CHAT | 4 APPROVALS | 5 DOCTOR                           │
 DETAIL (in place)                                                              │
-Evidence rail: partial · 1 chats / 1 gaps / 1 limits · connected               │
-Detail — Inbox                                                                 │
-Context: 1 of 2 · partial · 1 chats / 1 gaps / 1 limits                        │
-ID: slack:work:ops                                                             │
-Author: 운영                                                                   │
-Time: 09:41                                                                    │
-Message: 한국어/CJK 경계 텍스트 가나다라마바사아자차카타파하漢字かなカナ — wh… │
-Back: Esc                                                                      │
-! inbox selection opened                                                       │
+Evidence rail: unknown · ? chats / ? gaps · connected                          │
+Search query: (memory-only)                                                    │
+Coverage: unknown · ? chats / ? gaps                                           │
+                                                                               │
+Results                                                                        │
+> ● 민수 09:41 검색 결과와 증거 범위                                           │
+                                                                               │
+                                                                               │
+                                                                               │
                                                                                │
                                                                                │
                                                                                │

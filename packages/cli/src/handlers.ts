@@ -50,6 +50,7 @@ export interface CliHandlerOptions {
   readonly connect: TransportConnector;
   readonly role?: CliRole;
   readonly isTTY?: () => boolean;
+  readonly approverToken?: string;
   /** Process lifecycle is injected so protocol handlers never own a daemon implementation. */
   readonly launchDaemon?: () => Promise<void>;
 }
@@ -110,7 +111,7 @@ export function formatCliResult(result: JsonObject, role: CliRole = "reader"): s
 export function createCliHandlers(options: CliHandlerOptions): CliHandlers {
   const role = options.role ?? "reader";
   const isTTY = options.isTTY ?? defaultStdinTTY;
-  const client = new ReconnectingProtocolClient({ connect: options.connect, role, isTTY });
+  const client = new ReconnectingProtocolClient({ connect: options.connect, role, isTTY, approverToken: options.approverToken });
   const connect = (): Promise<void> => client.ready ? Promise.resolve() : client.start([]);
 
   const call = async (method: ProtocolMethod, params: JsonObject): Promise<JsonObject> => {
