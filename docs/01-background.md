@@ -19,7 +19,18 @@ sync·coverage·테스트 전략에 있다.
 
 ## 범위 (MVP)
 
-- 증명용 어댑터: **Slack** (서버 검색·스냅샷·공식 API에 가장 가까워 아키텍처 증명에 적합).
-- 측정용 어댑터: **카카오 DB 읽기** (아키텍처 증명이 아니라 해독·셀렉터 생존율 측정용으로 분리).
+- 아키텍처 증명 후보 어댑터: **Slack** (서버 검색·스냅샷·공식 API에 가장 가까움).
+  현재 wrapper-first Spike A는 PARTIAL이다. 제한된 live read와 합성 검색·재개는
+  확인했지만 wrapper가 pagination metadata를 버려 완전 이력과 cursor 복구는 증명하지 못했다.
+- **카카오 DB 읽기**: 먼저 아키텍처 증명과 분리해 해독·셀렉터 생존율을 측정한다.
+  측정 이후 읽기 어댑터를 sync·store·TUI에 연결하고 실제 질문으로 검증해야 전체 MVP가 완료된다.
+  MVP에서 카카오 발송은 지원하지 않는다.
+  별도의 KakaoTalk·Telegram wrapper 합성 확장은 원래 Spike B의 DB KDF·schema·AX 측정을
+  대체하지 않으며, 두 계정이 미설정이어서 live 제품 증거도 아니다.
 - **Teams는 phase 2.** 배경 목표에는 있지만 MVP에서 제외한다. 넣으면 MVP 완료 기준이 Teams 토큰 만료에 종속된다.
 - Discord/Telegram은 MVP 이후. 한 번에 N개 어댑터를 늘리지 않는다.
+- 인터페이스 순서: **CLI → TUI → MCP.** Slack TUI가 첫 제품 마일스톤이고,
+  전체 MVP는 MCP·카카오 읽기 통합과 두 플랫폼의 실질문 검증까지다. 셋 다 데몬 1개의
+  로컬 소켓 클라이언트로 구성한다(06-architecture).
+- 승인 보호는 MVP에서 **MCP-only 에이전트(등급 a)**에 한해 주장한다. 셸 접근
+  에이전트(등급 b)는 phase 2.

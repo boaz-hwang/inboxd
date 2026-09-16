@@ -13,13 +13,43 @@
 - `docs/02-prior-art.md` — 선행 프로젝트 6종 소스코드 해부 (커밋 핀 포함)
 - `docs/03-proposal.md` — 핵심 기능·아키텍처·스키마·프라이버시
 - `docs/04-roadmap.md` — 순서와 MVP 완료 기준
+- `docs/05-architecture-review.md` — 설계 비판 검토 (2026-09-16): 유지 항목과 보완할 계약·검증 과제
+- `docs/06-architecture.md` — 검토 반영 설계: 데몬 런타임·패키지·store 계약·승인 경계·TUI·빌드 순서
+- `docs/07-evidence-ledger.md` — 합성·과거 live·새 live 필요·blocked 증거와 MVP claim 경계
 
-## 한눈에
+## 목표 아키텍처 (현재 미구현)
 
 ```text
-platform adapters (thin) → normalize → store (SQLite FTS5)
-  → search / inbox (coverage 동봉) → safe-send (propose→approve→send→receipt)
+inboxd daemon (DB write · sync · outbox 실행 · 발송 토큰 · audit 독점)
+  platform adapters (thin) → normalize → store (SQLCipher + FTS5)
+    → search / inbox (coverage 동봉) → safe-send (propose→approve[OOB]→send→receipt)
+  ▲ Unix domain socket
+  cli (TTY, approve) · tui (TTY, approve) · mcp (agent, propose만)
 ```
 
 핵심 기능 5개: `sync`, `search`, `inbox`, `safe-send`, `doctor/probe`.
-상세는 `docs/03-proposal.md`.
+인터페이스는 CLI → **Slack TUI(첫 제품 마일스톤)** → MCP 순.
+먼저 Slack 제한 채팅의 수집부터 CLI 검색까지 검증하고 기능을 확장한다.
+전체 MVP는 카카오 읽기 통합과 Slack·카카오 실질문 10개 검증까지 포함한다.
+카카오 발송은 MVP 범위 밖이다.
+상세는 `docs/03-proposal.md`, 빌드 순서는 `docs/06-architecture.md` §7.
+
+## 현재 관측 상태 (2026-09-16)
+
+- Slack Spike A는 **PARTIAL**이다. 제한된 두 식별자에서 과거 89개 메시지를 읽은
+  기록과 합성 fixture·성능 결과는 있으나, wrapper가 pagination metadata를 버려
+  완전 이력·page 내부 중단 복구·authoritative coverage는 증명하지 못했다.
+- KakaoTalk·Telegram wrapper 확장은 **IMPLEMENTED_SYNTHETIC / LIVE_BLOCKED**다.
+  두 계정 모두 미설정이어서 live read를 하지 않았고, 이 결과는 원래 Kakao Spike B의
+  DB KDF·schema·AX 측정이나 제품 통합 증거가 아니다.
+- SQLCipher, 제품 daemon/API/CLI, safe-send, Slack TUI, MCP, Kakao 제품 통합은 아직
+  이 문서의 목표 계약이며 관측된 완료 상태가 아니다.
+- 10만 건·한국어 25개 fixture는 합성 검증을 통과했지만, 실제 사용자가 확인한 질문
+  10개 게이트는 provenance가 없어 **BLOCKED**다.
+
+## 보호 범위 (정직하게)
+
+MVP는 **MCP 도구만 쓰는 에이전트**의 오발송을 막는다. 승인 code는 TTY 승인 클라이언트에만
+전달되고 발송 토큰은 데몬만 갖는다. 로컬 셸·파일 접근이 있는 에이전트는 승인 클라이언트로
+접속하고 키체인을 읽을 수 있으므로 MVP는 그 경우를 보호한다고 주장하지 않는다.
+DB 암호화는 파일 유출 대비이지 같은 사용자로 도는 프로세스를 막는 장치가 아니다.
