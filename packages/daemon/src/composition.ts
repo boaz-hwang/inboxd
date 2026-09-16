@@ -1,17 +1,26 @@
 import type { Database } from "bun:sqlite";
 
 import { applySyncBatch, diagnoseStore, migrateDatabase, openSqlCipherDatabase, type ApplySyncBatchInput, type SqlCipherKeyProvider } from "../../store/src/index.ts";
+import { createSafetyService, type SafetyOptions, type SendTransport } from "../../safety/src/index.ts";
 import type { ProtocolEvent } from "../../protocol/src/schema.ts";
 import { acquireSingleInstanceLock, type SingleInstanceLock } from "./lock.ts";
 import { daemonStateDirectory, removeStaleSocket } from "./lifecycle.ts";
 import { recoverInterruptedSends } from "./recovery.ts";
-import { createDaemonServer, type DaemonServer } from "./server.ts";
+import { createDaemonServer, type DaemonServer, type TrustedApproverSessionAuthorizer } from "./server.ts";
 
 export interface DaemonOptions {
   readonly socketPath: string;
   readonly databasePath: string;
   readonly keyProvider: SqlCipherKeyProvider;
   readonly maxQueuedEvents?: number;
+  /** A transport must be explicitly injected; the daemon never constructs a live sender. */
+  readonly sendTransport?: SendTransport;
+  readonly approvalCode?: SafetyOptions["approvalCode"];
+  readonly quotaLimit?: SafetyOptions["quotaLimit"];
+  readonly transportTimeoutMs?: SafetyOptions["transportTimeoutMs"];
+  readonly allowSend?: SafetyOptions["allowSend"];
+  /** Code-bearing operations are default-denied unless this local-session predicate approves them. */
+  readonly isTrustedApproverSession?: TrustedApproverSessionAuthorizer;
   readonly startSync?: () => void | Promise<void>;
   readonly startPlatform?: () => void | Promise<void>;
   readonly startCredentials?: () => void | Promise<void>;
@@ -49,7 +58,14 @@ export async function composeDaemon(options: DaemonOptions): Promise<DaemonContr
     lock = acquireSingleInstanceLock(daemonStateDirectory(options.socketPath));
     database = openOwnedStore(options);
     if (await removeStaleSocket(options.socketPath)) { /* stale endpoint removed under the exclusive lock */ }
-    server = createDaemonServer(database, options.maxQueuedEvents);
+    const safety = createSafetyService(database, {
+      transport: options.sendTransport,
+      approvalCode: options.approvalCode,
+      quotaLimit: options.quotaLimit,
+      transportTimeoutMs: options.transportTimeoutMs,
+      allowSend: options.allowSend,
+    });
+    server = createDaemonServer(database, options.maxQueuedEvents, { safety, isTrustedApproverSession: options.isTrustedApproverSession });
     await server.listen(options.socketPath);
     // No sync/platform/credential/audit work begins until SQLCipher, schema, recovery, and UDS are ready.
     await options.startCredentials?.();

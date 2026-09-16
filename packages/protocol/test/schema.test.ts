@@ -32,6 +32,7 @@ describe("protocol schemas", () => {
     for (const role of ["agent", "mcp"] as const) {
       expect(() => parseRequest({ type: "request", id: "pending", method: "safety.intent.listPending", params: {} }, role)).toThrow(/approver/i);
       expect(() => parseRequest({ type: "request", id: "approve", method: "safety.intent.approve", params: { code: "123456" } }, role)).toThrow(/approver/i);
+      expect(() => parseRequest({ type: "request", id: "reject", method: "safety.intent.reject", params: { intent_id: "i1" } }, role)).toThrow(/approver/i);
       expect(() => parseResponse({
         type: "response", id: "pending", method: "safety.intent.listPending", ok: true,
         result: { intents: [{ intent_id: "i1", approval_code: "123456" }] },

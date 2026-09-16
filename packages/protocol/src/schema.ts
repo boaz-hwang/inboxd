@@ -97,7 +97,9 @@ function containsApprovalCode(value: unknown): boolean {
 
 function assertApprovalAccess(method: ProtocolMethod, role?: ClientRole): void {
   if (role !== undefined && role !== "approver" && (
-    method === "safety.intent.listPending" || method === "safety.intent.approve"
+    method === "safety.intent.listPending"
+    || method === "safety.intent.approve"
+    || method === "safety.intent.reject"
   )) {
     throw new ProtocolSchemaError(`${method} requires an approver role`);
   }

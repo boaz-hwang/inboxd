@@ -2,6 +2,7 @@ import { createServer, type Server, type Socket } from "node:net";
 
 import type { Database } from "bun:sqlite";
 import { getMessage, searchMessages } from "../../store/src/queries.ts";
+import { createSafetyService, type SafetyService, type SendScope } from "../../safety/src/index.ts";
 import { encodeJsonLine, JsonLinesDecoder } from "../../protocol/src/framing.ts";
 import { parseRequest, parseRole, type ClientRole, type ProtocolEvent, type ProtocolEventMethod, type ProtocolMethod, type ProtocolResponse } from "../../protocol/src/schema.ts";
 import { SubscriptionQueue } from "../../protocol/src/subscriptions.ts";
@@ -12,9 +13,18 @@ export interface DaemonServer {
   publish(event: ProtocolEvent): void;
 }
 
+export type TrustedApproverSessionAuthorizer = (session: { readonly socket: Socket; readonly role: "approver" }) => boolean;
+
+export interface DaemonServerOptions {
+  readonly safety?: SafetyService;
+  /** Defaults to deny: a claimed protocol role is not trusted local authorization. */
+  readonly isTrustedApproverSession?: TrustedApproverSessionAuthorizer;
+}
+
 interface Connection {
   readonly socket: Socket;
   role?: ClientRole;
+  trustedApprover: boolean;
   readonly topics: Set<ProtocolEventMethod>;
   readonly queue: SubscriptionQueue;
 }
@@ -35,6 +45,10 @@ function chat(params: Record<string, unknown>): { platform: string; account: str
   const value = object(params.chat, "chat");
   return { platform: string(value.platform, "chat.platform"), account: string(value.account, "chat.account"), chat_id: string(value.chat_id, "chat.chat_id") };
 }
+function scope(value: unknown): SendScope {
+  const parsed = object(value, "scope");
+  return { platform: string(parsed.platform, "scope.platform"), account: string(parsed.account, "scope.account"), chat_id: string(parsed.chat_id, "scope.chat_id") };
+}
 function response(id: string, method: ProtocolMethod, result: Record<string, unknown>): ProtocolResponse {
   return { type: "response", id, method, ok: true, result };
 }
@@ -43,12 +57,27 @@ function failure(id: string, method: ProtocolMethod, code: string, message: stri
 }
 
 /** UDS-only protocol surface. Database ownership never crosses this boundary. */
-export function createDaemonServer(database: Database, maxQueuedEvents?: number): DaemonServer {
+export function createDaemonServer(database: Database, maxQueuedEvents?: number, options: DaemonServerOptions = {}): DaemonServer {
+  const safety = options.safety ?? createSafetyService(database);
+  const authorizeApprover = options.isTrustedApproverSession ?? (() => false);
   const connections = new Set<Connection>();
+
+  function publish(event: ProtocolEvent): void {
+    for (const connection of connections) {
+      if (connection.topics.has(event.method)) connection.queue.enqueue(event);
+    }
+  }
+
+  function publishSafety(intentId: string): void {
+    const intent = safety.getIntent(intentId);
+    if (intent !== undefined) publish({ type: "event", method: "safety.intent.changed", params: { intent_id: intentId, state: intent.state } });
+  }
+
   const server: Server = createServer((socket) => {
     const decoder = new JsonLinesDecoder();
     const connection: Connection = {
       socket,
+      trustedApprover: false,
       topics: new Set(),
       queue: new SubscriptionQueue({
         maxQueuedEvents,
@@ -61,7 +90,7 @@ export function createDaemonServer(database: Database, maxQueuedEvents?: number)
     socket.on("error", () => connections.delete(connection));
     socket.on("data", (chunk: Buffer) => {
       try {
-        for (const frame of decoder.push(chunk)) handle(connection, frame);
+        for (const frame of decoder.push(chunk)) void handle(connection, frame);
       } catch (error) {
         socket.write(encodeJsonLine(failure("invalid", "system.ping", "BAD_REQUEST", error instanceof Error ? error.message : "invalid protocol request")));
         socket.destroy();
@@ -69,7 +98,7 @@ export function createDaemonServer(database: Database, maxQueuedEvents?: number)
     });
   });
 
-  function handle(connection: Connection, frame: unknown): void {
+  async function handle(connection: Connection, frame: unknown): Promise<void> {
     let request: ReturnType<typeof parseRequest>;
     try { request = parseRequest(frame, connection.role); } catch (error) {
       const raw = frame as { id?: unknown; method?: unknown };
@@ -78,16 +107,23 @@ export function createDaemonServer(database: Database, maxQueuedEvents?: number)
       return;
     }
     try {
-      const result = dispatch(connection, request.method, request.params);
+      const result = await dispatch(connection, request.method, request.params);
       connection.socket.write(encodeJsonLine(response(request.id, request.method, result)));
     } catch (error) {
       connection.socket.write(encodeJsonLine(failure(request.id, request.method, "UNSUPPORTED", error instanceof Error ? error.message : "unsupported request")));
     }
   }
 
-  function dispatch(connection: Connection, method: ProtocolMethod, params: Record<string, unknown>): Record<string, unknown> {
+  function assertTrustedApprover(connection: Connection): void {
+    if (connection.role !== "approver") throw new Error("approver role is required");
+    if (!connection.trustedApprover) throw new Error("trusted local approver authorization is required");
+  }
+
+  async function dispatch(connection: Connection, method: ProtocolMethod, params: Record<string, unknown>): Promise<Record<string, unknown>> {
     if (method === "system.hello") {
-      connection.role = parseRole(params.role);
+      const role = parseRole(params.role);
+      connection.role = role;
+      connection.trustedApprover = role === "approver" && authorizeApprover({ socket: connection.socket, role });
       return { protocol: "inboxd", ready: true };
     }
     if (!connection.role) throw new Error("system.hello is required before API requests");
@@ -114,6 +150,32 @@ export function createDaemonServer(database: Database, maxQueuedEvents?: number)
       }
       case "sync.status": return { state: "idle" };
       case "auth.status": return { authenticated: false };
+      case "safety.intent.create": {
+        const created = safety.propose({ actor: string(params.actor, "actor"), scope: scope(params.scope), body: string(params.body, "body"), ...(params.parent_id === undefined ? {} : { parent_id: string(params.parent_id, "parent_id") }) });
+        publishSafety(created.intent_id);
+        // Deliberately return only the non-secret proposal receipt; code stays at the approver boundary.
+        return { ...created };
+      }
+      case "safety.intent.listPending": {
+        assertTrustedApprover(connection);
+        return { intents: safety.listPending() };
+      }
+      case "safety.intent.approve": {
+        assertTrustedApprover(connection);
+        const intentId = string(params.intent_id, "intent_id");
+        const approved = await safety.approve({ intentId, code: string(params.code, "code"), actor: string(params.actor, "actor"), scope: scope(params.scope) });
+        publishSafety(intentId);
+        const outcome = safety.hasTransport() ? await safety.execute(intentId) : approved;
+        publishSafety(intentId);
+        return { ...outcome };
+      }
+      case "safety.intent.reject": {
+        assertTrustedApprover(connection);
+        const intentId = string(params.intent_id, "intent_id");
+        const rejected = safety.reject(intentId);
+        publishSafety(intentId);
+        return { ...rejected };
+      }
       case "send.status": {
         const row = database.query("SELECT id, state, created_at FROM sends WHERE id = ?").get(string(params.id, "id")) as { id: string; state: string; created_at: number } | null;
         return row === null ? { state: "missing" } : row;
@@ -138,10 +200,6 @@ export function createDaemonServer(database: Database, maxQueuedEvents?: number)
       for (const connection of connections) connection.socket.destroy();
       server.close((error) => error ? reject(error) : resolve());
     }),
-    publish: (event) => {
-      for (const connection of connections) {
-        if (connection.topics.has(event.method)) connection.queue.enqueue(event);
-      }
-    },
+    publish,
   };
 }
