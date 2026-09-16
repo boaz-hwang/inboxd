@@ -1,0 +1,670 @@
+import type { ClientRole, JsonObject, ProtocolEventMethod, ProtocolMethod } from "../../protocol/src/schema.ts";
+
+export const screens = ["inbox", "search", "chat", "approvals", "doctor"] as const;
+export type Screen = (typeof screens)[number];
+export type ConnectionStatus = "connected" | "reconnecting" | "degraded";
+type ViewStatus = "idle" | "loading" | "ready" | "empty" | "error" | "stale";
+
+export interface Coverage {
+  chats?: number;
+  gaps?: number;
+  limits?: number;
+  freshness: "fresh" | "partial" | "unknown" | "stale";
+}
+
+export interface Row {
+  id: string;
+  author?: string;
+  ts?: string;
+  body?: string;
+  edited?: boolean;
+  deleted?: boolean;
+  state?: string;
+  destination?: string;
+  expires?: string;
+  codeRequired?: boolean;
+}
+
+interface View {
+  status: ViewStatus;
+  data: Row[];
+  error?: string;
+}
+
+export interface TuiState {
+  screen: Screen;
+  focus: number;
+  selected: Record<Screen, number>;
+  views: Record<Screen, View>;
+  coverage: Coverage;
+  connection: { status: ConnectionStatus; generation: number; subscribedGeneration: number; stale: boolean };
+  requery: Screen[];
+  helpOpen: boolean;
+  searchActive: boolean;
+  approvalPrompt: boolean;
+  codeBuffer: string;
+  /** Compose content never leaves memory and is cleared when the operator exits. */
+  draft: string;
+  notice?: string;
+  platform?: string;
+  period?: string;
+  quitRequested: boolean;
+}
+
+export type TuiAction =
+  | { type: "key"; key: string }
+  | { type: "switchScreen"; screen: Screen }
+  | { type: "connected"; generation: number }
+  | { type: "subscribed"; generation: number }
+  | { type: "disconnected"; generation: number; degraded?: boolean }
+  | { type: "queryLoading"; generation: number; screen: Screen }
+  | { type: "querySucceeded"; generation: number; screen: Screen; data: Row[]; coverage?: Coverage }
+  | { type: "queryFailed"; generation: number; screen: Screen; error: string }
+  | { type: "coverage"; coverage: Coverage }
+  | { type: "event"; generation: number; method: ProtocolEventMethod };
+
+const screenLabels: Record<Screen, string> = {
+  inbox: "INBOX",
+  search: "SEARCH",
+  chat: "CHAT",
+  approvals: "APPROVALS",
+  doctor: "DOCTOR",
+};
+
+function blankView(): View {
+  return { status: "idle", data: [] };
+}
+
+function views(): Record<Screen, View> {
+  return { inbox: blankView(), search: blankView(), chat: blankView(), approvals: blankView(), doctor: blankView() };
+}
+
+export function createInitialState(settings: { platform?: string; period?: string; screen?: Screen } = {}): TuiState {
+  return {
+    screen: settings.screen ?? "inbox",
+    focus: 0,
+    selected: { inbox: 0, search: 0, chat: 0, approvals: 0, doctor: 0 },
+    views: views(),
+    coverage: { freshness: "unknown" },
+    connection: { status: "reconnecting", generation: 0, subscribedGeneration: 0, stale: false },
+    requery: [],
+    helpOpen: false,
+    searchActive: false,
+    approvalPrompt: false,
+    codeBuffer: "",
+    draft: "",
+    platform: settings.platform,
+    period: settings.period,
+    quitRequested: false,
+  };
+}
+
+function withView(state: TuiState, screen: Screen, next: View): TuiState {
+  return { ...state, views: { ...state.views, [screen]: next } };
+}
+
+function accepted(state: TuiState, generation: number): boolean {
+  return state.connection.generation === generation && state.connection.subscribedGeneration === generation;
+}
+
+function allScreens(): Screen[] {
+  return [...screens];
+}
+
+function eventScreens(method: ProtocolEventMethod): Screen[] {
+  if (method === "safety.intent.changed") return ["approvals"];
+  if (method === "coverage.changed") return ["inbox", "search", "chat"];
+  return ["inbox", "search", "chat"];
+}
+
+function maxFocus(state: TuiState): number {
+  return Math.max(0, state.views[state.screen].data.length - 1);
+}
+
+/** Pure state reducer. A generation must subscribe before its responses or events are trusted. */
+export function reduce(state: TuiState, action: TuiAction): TuiState {
+  if (action.type === "switchScreen") return { ...state, screen: action.screen, focus: state.selected[action.screen], helpOpen: false };
+  if (action.type === "connected") {
+    if (action.generation < state.connection.generation) return state;
+    return {
+      ...state,
+      connection: { status: "reconnecting", generation: action.generation, subscribedGeneration: 0, stale: state.connection.stale },
+      notice: "reconnecting — subscribing before re-query",
+    };
+  }
+  if (action.type === "subscribed") {
+    if (action.generation !== state.connection.generation) return state;
+    return {
+      ...state,
+      connection: { ...state.connection, status: "connected", subscribedGeneration: action.generation, stale: false },
+      requery: allScreens(),
+      notice: "subscribed — re-query required",
+    };
+  }
+  if (action.type === "disconnected") {
+    if (action.generation !== state.connection.generation) return state;
+    const staleViews = Object.fromEntries(screens.map((screen) => {
+      const view = state.views[screen];
+      return [screen, view.status === "ready" || view.status === "empty" ? { ...view, status: "stale" as const } : view];
+    })) as Record<Screen, View>;
+    return {
+      ...state,
+      views: staleViews,
+      connection: { ...state.connection, status: action.degraded ? "degraded" : "reconnecting", subscribedGeneration: 0, stale: true },
+      approvalPrompt: false,
+      codeBuffer: "",
+      notice: "connection lost — send actions disabled; no action retried",
+    };
+  }
+  if (action.type === "queryLoading") {
+    if (!accepted(state, action.generation)) return state;
+    return withView(state, action.screen, { ...state.views[action.screen], status: "loading", error: undefined });
+  }
+  if (action.type === "querySucceeded") {
+    if (!accepted(state, action.generation)) return state;
+    const next = withView(state, action.screen, { status: action.data.length ? "ready" : "empty", data: action.data });
+    return { ...next, coverage: action.coverage ?? next.coverage, requery: next.requery.filter((screen) => screen !== action.screen) };
+  }
+  if (action.type === "queryFailed") {
+    if (!accepted(state, action.generation)) return state;
+    return withView(state, action.screen, { ...state.views[action.screen], status: "error", error: action.error });
+  }
+  if (action.type === "coverage") return { ...state, coverage: action.coverage };
+  if (action.type === "event") {
+    if (!accepted(state, action.generation)) return state;
+    return { ...state, requery: [...new Set([...state.requery, ...eventScreens(action.method)])], notice: "update received — re-query required" };
+  }
+
+  if (action.key >= "1" && action.key <= "5") return reduce(state, { type: "switchScreen", screen: screens[Number(action.key) - 1]! });
+  if (action.key === "?") return { ...state, helpOpen: !state.helpOpen };
+  if (action.key === "Escape") {
+    if (state.approvalPrompt) return { ...state, approvalPrompt: false, codeBuffer: "", notice: "approval code cleared from memory" };
+    return { ...state, helpOpen: false, searchActive: false };
+  }
+  if (action.key === "/") return { ...state, screen: "search", searchActive: true, helpOpen: false, notice: "search input is memory-only" };
+  if (action.key === "q") return { ...state, quitRequested: true, draft: "", codeBuffer: "", approvalPrompt: false, notice: "memory drafts cleared on exit" };
+  if (action.key === "j" || action.key === "ArrowDown") return { ...state, focus: Math.min(maxFocus(state), state.focus + 1) };
+  if (action.key === "k" || action.key === "ArrowUp") return { ...state, focus: Math.max(0, state.focus - 1) };
+  if (action.key === "Enter") {
+    if (state.approvalPrompt) {
+      if (state.connection.status !== "connected") return { ...state, notice: "approval disabled while disconnected" };
+      if (state.codeBuffer.length < 4) return { ...state, notice: "approval code required — enter the full code" };
+      return { ...state, approvalPrompt: false, codeBuffer: "", notice: "approval submitted; code cleared from memory" };
+    }
+    return { ...state, selected: { ...state.selected, [state.screen]: state.focus }, notice: `${screenLabels[state.screen].toLowerCase()} selection opened` };
+  }
+  if (action.key === "a") {
+    if (state.screen !== "approvals") return { ...state, notice: "approval prompt is only available in Approvals" };
+    if (state.connection.status !== "connected") return { ...state, notice: "approval disabled while disconnected" };
+    return { ...state, approvalPrompt: true, codeBuffer: "", notice: undefined };
+  }
+  if (action.key === "b") return { ...state, notice: "backfill proposal — review scope before sending" };
+  if (action.key === "c") return { ...state, draft: "", notice: "compose proposal — draft remains memory-only" };
+  if (state.approvalPrompt && action.key.length === 1) return { ...state, codeBuffer: state.codeBuffer + action.key };
+  return state;
+}
+
+export function displayWidth(value: string): number {
+  let width = 0;
+  for (const character of Array.from(value)) {
+    const code = character.codePointAt(0)!;
+    if (code === 0x200d || (code >= 0x300 && code <= 0x36f) || (code >= 0xfe00 && code <= 0xfe0f)) continue;
+    width += code >= 0x1100 && (code <= 0x115f || code >= 0x2e80 && code <= 0xa4cf || code >= 0xac00 && code <= 0xd7a3 || code >= 0xf900 && code <= 0xfaff || code >= 0xff01 && code <= 0xff60 || code >= 0x1f300) ? 2 : 1;
+  }
+  return width;
+}
+
+/** Clips by terminal cells and emits an ellipsis without splitting a Unicode code point. */
+export function truncateCells(value: string, width: number): string {
+  if (width <= 0) return "";
+  if (displayWidth(value) <= width) return value;
+  if (width === 1) return "…";
+  const target = width - 1;
+  let result = "";
+  let used = 0;
+  for (const character of Array.from(value)) {
+    const characterWidth = displayWidth(character);
+    if (used + characterWidth > target) break;
+    result += character;
+    used += characterWidth;
+  }
+  return `${result}…`;
+}
+
+function fit(line: string, width: number): string {
+  const clipped = truncateCells(line, width);
+  return clipped + " ".repeat(Math.max(0, width - displayWidth(clipped)));
+}
+
+function count(value: number | undefined, label: string): string {
+  return `${value === undefined ? "?" : value} ${label}`;
+}
+
+function coverageText(coverage: Coverage): string {
+  const limits = coverage.limits === undefined ? "" : ` / ${count(coverage.limits, "limits")}`;
+  return `${coverage.freshness} · ${count(coverage.chats, "chats")} / ${count(coverage.gaps, "gaps")}${limits}`;
+}
+
+function visibleRows(state: TuiState, screen: Screen): Row[] {
+  if (screen === "chat" && state.views.chat.data.length === 0) return state.views.inbox.data;
+  return state.views[screen].data;
+}
+
+function dataLines(state: TuiState, screen: Screen, empty: string): string[] {
+  const view = state.views[screen];
+  if (view.status === "loading") return ["> Loading…"];
+  if (view.status === "error") return [`> ${view.error} — retry query`];
+  if (view.status === "empty") return [`> ${empty}`];
+  const rows = visibleRows(state, screen);
+  if (rows.length === 0) return [`> ${empty}`];
+  return rows.map((row, index) => {
+    const focus = index === state.focus ? ">" : " ";
+    const selected = index === state.selected[screen] ? "●" : "○";
+    const revision = row.deleted ? " deleted" : row.edited ? " (edited)" : "";
+    return `${focus} ${selected} ${row.author ?? row.state ?? "item"} ${row.ts ?? row.expires ?? ""} ${row.destination ?? ""} ${row.body ?? ""}${revision}`.replace(/\s+/g, " ").trimEnd();
+  });
+}
+
+function bodyLines(state: TuiState, wide: boolean): string[] {
+  const screen = state.screen;
+  const view = state.views[screen];
+  const prefix = wide ? ["LIST 40% │ DETAIL 60%", `Evidence: ${coverageText(state.coverage)}`] : ["DETAIL (in place)", `Evidence: ${coverageText(state.coverage)}`];
+  if (screen === "inbox") return [...prefix, "Inbox", ...dataLines(state, screen, "No messages")];
+  if (screen === "search") return [...prefix, "Search query: (memory-only)", `Coverage: ${coverageText(state.coverage)}`, "", "Results", ...dataLines(state, screen, "No results")];
+  if (screen === "chat") return [...prefix, "Chat", ...dataLines(state, screen, "No messages"), `── coverage gap: ${state.coverage.gaps === undefined ? "?" : state.coverage.gaps} · ${state.coverage.freshness} ──`];
+  if (screen === "approvals") {
+    const disabled = state.connection.status === "connected" ? "Approve [a]" : "Approve [disabled: disconnected]";
+    const rows = dataLines(state, screen, "No pending approvals");
+    const uncertain = visibleRows(state, screen).some((row) => row.state === "Uncertain") ? ["UNCERTAIN — do not resend automatically"] : [];
+    const prompt = state.approvalPrompt ? ["┌ Approval code [memory-only]", `│ ${"•".repeat(state.codeBuffer.length)}_`, "└ Enter submit · Esc cancel"] : [];
+    return [...prefix, "Approvals", ...rows, ...uncertain, disabled, ...prompt];
+  }
+  const stale = state.connection.stale ? "stale response retained" : "connected";
+  return [...prefix, "Doctor", `> Encryption: ${view.data[0]?.state ?? "unknown"}`, `  Authentication: ${view.data[1]?.state ?? "unknown"}`, `  Daemon: ${stale}`, `  Connection: ${state.connection.status}`, `  Generation: ${state.connection.generation} / subscribed ${state.connection.subscribedGeneration}`];
+}
+
+/** Deterministic screenshot-equivalent renderer; intentionally emits no ANSI escapes. */
+export function renderScreen(state: TuiState, size: { width: number; height: number }): string {
+  if (size.width < 80 || size.height < 24) {
+    return Array.from({ length: Math.max(1, size.height) }, (_, index) => fit(index === 0 ? "terminal too small — minimum 80×24" : "", Math.max(1, size.width))).join("\n");
+  }
+  const status = `INBOXD · ${state.connection.status}${state.connection.stale ? " · STALE" : ""} · ${state.platform ?? "account ?"}`;
+  const tabs = screens.map((screen, index) => screen === state.screen ? `● ${screenLabels[screen]}` : `${index + 1} ${screenLabels[screen]}`).join(" | ");
+  const body = bodyLines(state, size.width >= 120);
+  if (state.notice) body.push(`! ${state.notice}`);
+  if (state.helpOpen) body.push("Keys: 1–5 screens · j/k/↑↓ move · Enter open · / search · b backfill", "      c compose · a approve · Esc cancel/back · ? help · q quit");
+  const rowsForBody = size.height - 3;
+  const lines = [status, tabs, ...body.slice(0, rowsForBody)];
+  while (lines.length < size.height - 1) lines.push("");
+  lines.push("1–5 j/k ↑↓ Enter / b c a Esc ? q");
+  return lines.slice(0, size.height).map((line) => fit(line, size.width)).join("\n");
+}
+
+/** Persist only navigation/filter settings; content and secrets are rejected at every nesting level. */
+export function sanitizePersistence(value: Record<string, unknown>): { screen?: Screen; platform?: string; period?: string } {
+  assertNoPersistedSecret(value);
+  const screen = screens.includes(value.screen as Screen) ? value.screen as Screen : undefined;
+  const platform = typeof value.platform === "string" ? value.platform : undefined;
+  const period = typeof value.period === "string" ? value.period : undefined;
+  return { ...(screen === undefined ? {} : { screen }), ...(platform === undefined ? {} : { platform }), ...(period === undefined ? {} : { period }) };
+}
+
+function assertNoPersistedSecret(value: unknown): void {
+  if (Array.isArray(value)) {
+    for (const item of value) assertNoPersistedSecret(item);
+    return;
+  }
+  if (value === null || typeof value !== "object") return;
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    if (/(draft|query|body|code|token|secret)/i.test(key)) {
+      throw new Error(`persistence key ${key} is not persisted`);
+    }
+    assertNoPersistedSecret(nested);
+  }
+}
+
+interface NativeRenderer {
+  root: { add(renderable: unknown): unknown };
+}
+
+/** Native OpenTUI entry point; callers own the renderer lifecycle. */
+export async function mountOpenTui(renderer: NativeRenderer, state: TuiState, width = 80, height = 24): Promise<{ destroy(): void }> {
+  const coreModule = "@opentui/core";
+  const { TextRenderable } = await import(coreModule);
+  const text = new TextRenderable(renderer as never, { id: "inboxd-screen", content: renderScreen(state, { width, height }) });
+  renderer.root.add(text);
+  return text;
+}
+
+/** Construction-safe smoke helper: uses OpenTUI's native test renderer and never enters an interactive loop. */
+export async function createNativeScreen(width: number, height: number): Promise<{ content: string; destroy(): void }> {
+  const testingModule = "@opentui/core/testing";
+  const coreModule = "@opentui/core";
+  const { createTestRenderer } = await import(testingModule);
+  const { TextRenderable } = await import(coreModule);
+  const harness = await createTestRenderer({ width, height });
+  const content = renderScreen(createInitialState(), { width, height });
+  const text = new TextRenderable(harness.renderer as never, { id: "inboxd-smoke", content });
+  harness.renderer.root.add(text);
+  await harness.renderOnce();
+  return { content, destroy: () => { text.destroy(); harness.renderer.destroy(); } };
+}
+
+export interface TuiProtocolClient {
+  start(topics: readonly ProtocolEventMethod[]): Promise<void>;
+  stop(): void;
+  request(method: ProtocolMethod, params: JsonObject): Promise<JsonObject>;
+}
+
+export interface ChatRef {
+  readonly platform: string;
+  readonly account: string;
+  readonly chat_id: string;
+}
+
+export interface TuiSearchInput {
+  readonly chat: ChatRef;
+  readonly interval: { readonly from_ts: number; readonly to_ts: number };
+  /** Search text is process-memory-only and is never copied into TuiState. */
+  readonly query: string;
+}
+
+interface PendingApproval {
+  readonly actor: string;
+  readonly scope: ChatRef;
+}
+
+export interface TuiControllerOptions {
+  readonly client: TuiProtocolClient;
+  readonly initialState?: TuiState;
+  readonly onStateChange?: (state: TuiState) => void;
+}
+
+const tuiTopics: readonly ProtocolEventMethod[] = ["message.upserted", "coverage.changed", "safety.intent.changed"];
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function records(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.flatMap((item) => {
+    const itemRecord = record(item);
+    return itemRecord === undefined ? [] : [itemRecord];
+  }) : [];
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function chatRef(value: unknown): ChatRef | undefined {
+  const item = record(value);
+  const platform = stringValue(item?.platform);
+  const account = stringValue(item?.account);
+  const chatId = stringValue(item?.chat_id);
+  return platform === undefined || account === undefined || chatId === undefined ? undefined : { platform, account, chat_id: chatId };
+}
+
+function messageRows(value: unknown): Row[] {
+  return records(value).flatMap((item) => {
+    const id = stringValue(item.msg_id) ?? stringValue(item.id);
+    if (id === undefined) return [];
+    return [{
+      id,
+      author: stringValue(item.author_id) ?? stringValue(item.author),
+      ts: stringValue(item.ts) ?? (numberValue(item.ts) === undefined ? undefined : String(numberValue(item.ts))),
+      body: stringValue(item.body),
+      edited: item.edited_at !== undefined || item.edited === true,
+      deleted: item.deleted_at !== undefined || item.deleted === true,
+    }];
+  });
+}
+
+function chatRows(value: unknown): Row[] {
+  return records(value).flatMap((item) => {
+    const ref = chatRef(item);
+    if (ref === undefined) return [];
+    return [{
+      id: `${ref.platform}:${ref.account}:${ref.chat_id}`,
+      author: stringValue(item.display_name) ?? ref.chat_id,
+      destination: `${ref.platform}:${ref.account}`,
+    }];
+  });
+}
+
+function coverage(value: unknown): Coverage | undefined {
+  const item = record(value);
+  if (item === undefined) return undefined;
+  const legacyFreshness = item.freshness;
+  if (legacyFreshness === "fresh" || legacyFreshness === "partial" || legacyFreshness === "unknown" || legacyFreshness === "stale") {
+    const chats = numberValue(item.chats);
+    const gaps = numberValue(item.gaps);
+    const limits = numberValue(item.limits);
+    return {
+      freshness: legacyFreshness,
+      ...(chats === undefined ? {} : { chats }),
+      ...(gaps === undefined ? {} : { gaps }),
+      ...(limits === undefined ? {} : { limits }),
+    };
+  }
+  const covered = Array.isArray(item.covered) ? item.covered : [];
+  const gaps = Array.isArray(item.gaps) ? item.gaps : [];
+  const freshnessEntries = Array.isArray(item.freshness) ? item.freshness : [];
+  const limits = Array.isArray(item.limits) ? item.limits : [];
+  const target = record(item.target);
+  const targetChat = chatRef(target?.chat);
+  const freshness: Coverage["freshness"] = gaps.length > 0
+    ? "partial"
+    : freshnessEntries.length > 0 || covered.length > 0
+      ? "fresh"
+      : "unknown";
+  return {
+    freshness,
+    chats: targetChat === undefined ? 0 : 1,
+    gaps: gaps.length,
+    limits: limits.length,
+  };
+}
+
+/**
+ * Protocol-only controller: it owns no database, adapter, daemon lifecycle, or
+ * persisted content. The runtime supplies a protocol client and forwards its
+ * subscribed events here.
+ */
+export class TuiController {
+  private current: TuiState;
+  private generation = 0;
+  private activeChat: ChatRef | undefined;
+  private search: TuiSearchInput | undefined;
+  private readonly approvals = new Map<string, PendingApproval>();
+  private readonly listeners = new Set<(state: TuiState) => void>();
+
+  constructor(private readonly options: TuiControllerOptions) {
+    this.current = options.initialState ?? createInitialState();
+  }
+
+  get state(): TuiState { return this.current; }
+
+  subscribe(listener: (state: TuiState) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private notify(): void {
+    this.options.onStateChange?.(this.current);
+    for (const listener of this.listeners) listener(this.current);
+  }
+
+  private update(action: TuiAction): void {
+    this.current = reduce(this.current, action);
+    this.notify();
+  }
+
+  private replace(next: TuiState): void {
+    this.current = next;
+    this.notify();
+  }
+
+  async start(): Promise<void> {
+    const generation = ++this.generation;
+    this.update({ type: "connected", generation });
+    try {
+      await this.options.client.start(tuiTopics);
+      if (generation !== this.generation) return;
+      this.update({ type: "subscribed", generation });
+      await this.refresh();
+    } catch (error) {
+      if (generation === this.generation) {
+        this.update({ type: "disconnected", generation, degraded: true });
+        this.replace({ ...this.current, notice: `connection failed — ${error instanceof Error ? error.message : "retry when daemon is available"}` });
+      }
+    }
+  }
+
+  stop(): void {
+    this.generation++;
+    this.options.client.stop();
+    this.approvals.clear();
+    this.replace({ ...this.current, draft: "", codeBuffer: "", approvalPrompt: false });
+  }
+
+  disconnected(degraded = false): void {
+    this.update({ type: "disconnected", generation: this.generation, degraded });
+    this.approvals.clear();
+  }
+
+  /** Called by the runtime's ReconnectingProtocolClient event callback. */
+  async receiveEvent(method: ProtocolEventMethod): Promise<void> {
+    const generation = this.generation;
+    this.update({ type: "event", generation, method });
+    await this.refresh();
+  }
+
+  setActiveChat(chat: ChatRef | undefined): void { this.activeChat = chat; }
+  setSearch(input: TuiSearchInput | undefined): void { this.search = input; }
+
+  async dispatchKey(key: string): Promise<void> {
+    const before = this.current;
+    const code = before.codeBuffer;
+    this.update({ type: "key", key });
+    if (key === "q") {
+      this.stop();
+      return;
+    }
+    if (key === "Enter" && before.approvalPrompt && code.length >= 4) await this.approve(code);
+    if (key === "Enter" && this.current.screen === "inbox") await this.openFocusedChat();
+  }
+
+  async refresh(): Promise<void> {
+    const generation = this.generation;
+    if (this.current.connection.status !== "connected") return;
+    // Every request is explicitly mapped to the daemon protocol. No storage or
+    // platform import is permitted in this package.
+    if (this.current.requery.includes("inbox")) await this.refreshInbox(generation);
+    if (this.current.requery.includes("search") && this.search !== undefined) await this.refreshSearch(generation);
+    if (this.current.requery.includes("chat") && this.activeChat !== undefined) await this.refreshChat(generation);
+    if (this.current.requery.includes("approvals")) await this.refreshApprovals(generation);
+    if (this.current.requery.includes("doctor")) await this.refreshDoctor(generation);
+  }
+
+  private async call(screen: Screen, generation: number, method: ProtocolMethod, params: JsonObject): Promise<JsonObject | undefined> {
+    this.update({ type: "queryLoading", generation, screen });
+    try {
+      const result = await this.options.client.request(method, params);
+      if (generation !== this.generation) return undefined;
+      return result;
+    } catch (error) {
+      if (generation === this.generation) this.update({ type: "queryFailed", generation, screen, error: error instanceof Error ? error.message : "daemon query failed" });
+      return undefined;
+    }
+  }
+
+  private async refreshInbox(generation: number): Promise<void> {
+    const result = await this.call("inbox", generation, "chat.list", {});
+    if (result !== undefined) this.update({ type: "querySucceeded", generation, screen: "inbox", data: chatRows(result.chats), coverage: coverage(result.coverage) });
+  }
+
+  private async refreshSearch(generation: number): Promise<void> {
+    const input = this.search;
+    if (input === undefined) return;
+    const result = await this.call("search", generation, "message.search", input as unknown as JsonObject);
+    if (result !== undefined) this.update({ type: "querySucceeded", generation, screen: "search", data: messageRows(result.messages), coverage: coverage(result.coverage) });
+  }
+
+  private async refreshChat(generation: number): Promise<void> {
+    const chat = this.activeChat;
+    if (chat === undefined) return;
+    const result = await this.call("chat", generation, "message.inbox", { chat });
+    if (result !== undefined) this.update({ type: "querySucceeded", generation, screen: "chat", data: messageRows(result.messages), coverage: coverage(result.coverage) });
+  }
+
+  private async refreshApprovals(generation: number): Promise<void> {
+    const result = await this.call("approvals", generation, "safety.intent.listPending", {});
+    if (result === undefined) return;
+    this.approvals.clear();
+    const rows = records(result.intents).flatMap((intent) => {
+      const id = stringValue(intent.intent_id);
+      const actor = stringValue(intent.actor);
+      const scope = chatRef(intent.scope);
+      if (id === undefined || actor === undefined || scope === undefined) return [];
+      this.approvals.set(id, { actor, scope });
+      // Deliberately drop approval_code and every non-rendered protocol field.
+      return [{ id, state: stringValue(intent.state), destination: `${scope.platform}:${scope.account}:${scope.chat_id}`, expires: String(intent.expires_at ?? "?"), body: stringValue(intent.body), codeRequired: true }];
+    });
+    this.update({ type: "querySucceeded", generation, screen: "approvals", data: rows });
+  }
+
+  private async refreshDoctor(generation: number): Promise<void> {
+    const status = await this.call("doctor", generation, "system.status", {});
+    if (status === undefined) return;
+    const sync = await this.options.client.request("sync.status", {}).catch(() => ({ state: "unknown" }));
+    const auth = await this.options.client.request("auth.status", {}).catch(() => ({ authenticated: false }));
+    if (generation !== this.generation) return;
+    this.update({ type: "querySucceeded", generation, screen: "doctor", data: [
+      { id: "encryption", state: stringValue(status.encryption) ?? "unknown" },
+      { id: "authentication", state: auth.authenticated === true ? "healthy" : "unknown" },
+      { id: "sync", state: stringValue(sync.state) ?? "unknown" },
+    ] });
+  }
+
+  private async openFocusedChat(): Promise<void> {
+    const row = this.current.views.inbox.data[this.current.focus];
+    if (row === undefined) return;
+    const [platform, account, chatId] = row.id.split(":");
+    if (platform === undefined || account === undefined || chatId === undefined) return;
+    this.activeChat = { platform, account, chat_id: chatId };
+    this.update({ type: "switchScreen", screen: "chat" });
+    this.update({ type: "event", generation: this.generation, method: "message.upserted" });
+    await this.refresh();
+  }
+
+  private async approve(code: string): Promise<void> {
+    const row = this.current.views.approvals.data[this.current.selected.approvals];
+    const pending = row === undefined ? undefined : this.approvals.get(row.id);
+    if (row === undefined || pending === undefined) {
+      this.replace({ ...this.current, notice: "approval unavailable — refresh pending approvals" });
+      return;
+    }
+    try {
+      await this.options.client.request("safety.intent.approve", { intent_id: row.id, code, actor: pending.actor, scope: pending.scope });
+      this.replace({ ...this.current, notice: "approval submitted; code cleared from memory" });
+      this.update({ type: "event", generation: this.generation, method: "safety.intent.changed" });
+      await this.refresh();
+    } catch (error) {
+      this.replace({ ...this.current, notice: `approval failed — ${error instanceof Error ? error.message : "refresh and retry"}` });
+    }
+  }
+}
+
+export function createTuiController(options: TuiControllerOptions): TuiController {
+  return new TuiController(options);
+}
+
+export type TuiRole = Extract<ClientRole, "reader" | "approver">;
+
+export * from "./runtime.ts";
+export * from "./transport.ts";

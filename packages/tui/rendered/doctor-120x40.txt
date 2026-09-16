@@ -1,0 +1,40 @@
+INBOXD · connected · slack                                                                                             │
+1 INBOX | 2 SEARCH | 3 CHAT | 4 APPROVALS | ● DOCTOR                                                                   │
+LIST 40% │ DETAIL 60%                                                                                                  │
+Evidence: partial · 1 chats / 1 gaps / 1 limits                                                                        │
+Doctor                                                                                                                 │
+> Encryption: SQLCipher healthy                                                                                        │
+  Authentication: configured                                                                                           │
+  Daemon: connected                                                                                                    │
+  Connection: connected                                                                                                │
+  Generation: 1 / subscribed 1                                                                                         │
+! subscribed — re-query required                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+                                                                                                                       │
+1–5 j/k ↑↓ Enter / b c a Esc ? q                                                                                       │

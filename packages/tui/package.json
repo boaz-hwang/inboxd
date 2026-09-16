@@ -3,6 +3,12 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "inboxd-tui": "./src/main.ts"
+  },
+  "scripts": {
+    "start": "bun run src/main.ts"
+  },
   "dependencies": {
     "@opentui/core": "^0.5.11"
   }

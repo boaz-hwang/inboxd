@@ -1,0 +1,24 @@
+INBOXD · connected · slack                                                     │
+● INBOX | 2 SEARCH | 3 CHAT | 4 APPROVALS | 5 DOCTOR                           │
+DETAIL (in place)                                                              │
+Evidence: partial · 1 chats / 1 gaps / 1 limits                                │
+Inbox                                                                          │
+> ● 운영 09:41 한국어 상태 업데이트 (edited)                                   │
+ ○ 개발 09:38 다음 점검 항목                                                   │
+! subscribed — re-query required                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+1–5 j/k ↑↓ Enter / b c a Esc ? q                                               │
