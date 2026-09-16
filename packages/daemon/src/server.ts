@@ -1,7 +1,9 @@
 import { createServer, type Server, type Socket } from "node:net";
+import { chmodSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
 
 import type { Database } from "bun:sqlite";
-import { getMessage, searchMessages } from "../../store/src/queries.ts";
+import { getMessage, inboxMessages, searchMessages } from "../../store/src/queries.ts";
 import { createSafetyService, type SafetyService, type SendScope } from "../../safety/src/index.ts";
 import { encodeJsonLine, JsonLinesDecoder } from "../../protocol/src/framing.ts";
 import { parseRequest, parseRole, type ClientRole, type ProtocolEvent, type ProtocolEventMethod, type ProtocolMethod, type ProtocolResponse } from "../../protocol/src/schema.ts";
@@ -17,11 +19,13 @@ export type TrustedApproverSessionAuthorizer = (session: { readonly socket: Sock
 
 export interface DaemonServerOptions {
   readonly safety?: SafetyService;
+  readonly backfill?: (request: { readonly chat: { readonly platform: string; readonly account: string; readonly chat_id: string }; readonly interval: { readonly from_ts: number; readonly to_ts: number } }) => Promise<Record<string, unknown>>;
   /** Defaults to deny: a claimed protocol role is not trusted local authorization. */
   readonly isTrustedApproverSession?: TrustedApproverSessionAuthorizer;
 }
 
 interface Connection {
+  readonly sessionId: string;
   readonly socket: Socket;
   role?: ClientRole;
   trustedApprover: boolean;
@@ -29,21 +33,54 @@ interface Connection {
   readonly queue: SubscriptionQueue;
 }
 
+class BadRequestError extends Error {
+  constructor(message: string) { super(message); this.name = "BadRequestError"; }
+}
+
 function object(value: unknown, label: string): Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object`);
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new BadRequestError(`${label} must be an object`);
   return value as Record<string, unknown>;
 }
 function string(value: unknown, label: string): string {
-  if (typeof value !== "string" || value.length === 0) throw new Error(`${label} must be a non-empty string`);
+  if (typeof value !== "string" || value.length === 0) throw new BadRequestError(`${label} must be a non-empty string`);
   return value;
 }
 function number(value: unknown, label: string): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${label} must be a finite number`);
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new BadRequestError(`${label} must be a finite number`);
   return value;
 }
 function chat(params: Record<string, unknown>): { platform: string; account: string; chat_id: string } {
   const value = object(params.chat, "chat");
   return { platform: string(value.platform, "chat.platform"), account: string(value.account, "chat.account"), chat_id: string(value.chat_id, "chat.chat_id") };
+}
+function interval(params: Record<string, unknown>): { from_ts: number; to_ts: number } {
+  // Older local clients asked for the full retained chat without an interval.
+  // Preserve that read shape while still returning explicit evidence.
+  if (params.interval === undefined) return { from_ts: 0, to_ts: Number.MAX_SAFE_INTEGER };
+  const value = object(params.interval, "interval");
+  const from_ts = number(value.from_ts, "interval.from_ts");
+  const to_ts = number(value.to_ts, "interval.to_ts");
+  if (from_ts >= to_ts) throw new BadRequestError("interval.from_ts must be before interval.to_ts");
+  return { from_ts, to_ts };
+}
+function parseBackfillRequest(params: Record<string, unknown>): { chat: { platform: string; account: string; chat_id: string }; interval: { from_ts: number; to_ts: number } } {
+  if (params.chat !== undefined) return { chat: chat(params), interval: interval(params) };
+  const from_ts = number(params.from_ts, "from_ts");
+  const to_ts = number(params.to_ts, "to_ts");
+  if (from_ts >= to_ts) throw new BadRequestError("from_ts must be before to_ts");
+  return {
+    chat: { platform: string(params.platform, "platform"), account: string(params.account, "account"), chat_id: string(params.chat_id, "chat_id") },
+    interval: { from_ts, to_ts },
+  };
+}
+function page(params: Record<string, unknown>): { limit?: number; cursor?: string } {
+  const limit = params.limit === undefined ? undefined : number(params.limit, "limit");
+  if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)) {
+    throw new BadRequestError("limit must be an integer from 1 to 100");
+  }
+  const cursor = params.cursor === undefined ? undefined : string(params.cursor, "cursor");
+  if (cursor !== undefined && (cursor.length > 4_096 || !/^[A-Za-z0-9_-]+$/.test(cursor))) throw new BadRequestError("cursor is malformed");
+  return { ...(limit === undefined ? {} : { limit }), ...(cursor === undefined ? {} : { cursor }) };
 }
 function scope(value: unknown): SendScope {
   const parsed = object(value, "scope");
@@ -73,9 +110,17 @@ export function createDaemonServer(database: Database, maxQueuedEvents?: number,
     if (intent !== undefined) publish({ type: "event", method: "safety.intent.changed", params: { intent_id: intentId, state: intent.state } });
   }
 
+  function auditRead(connection: Connection, action: string, subject: string, resultCount: number): void {
+    database.run(
+      "INSERT INTO audit (action, subject, payload_json, created_at) VALUES (?, ?, ?, ?)",
+      [action, createHash("sha256").update(subject).digest("hex"), JSON.stringify({ role: connection.role, session_id: connection.sessionId, result_count: resultCount }), Date.now()],
+    );
+  }
+
   const server: Server = createServer((socket) => {
     const decoder = new JsonLinesDecoder();
     const connection: Connection = {
+      sessionId: randomUUID(),
       socket,
       trustedApprover: false,
       topics: new Set(),
@@ -110,7 +155,7 @@ export function createDaemonServer(database: Database, maxQueuedEvents?: number,
       const result = await dispatch(connection, request.method, request.params);
       connection.socket.write(encodeJsonLine(response(request.id, request.method, result)));
     } catch (error) {
-      connection.socket.write(encodeJsonLine(failure(request.id, request.method, "UNSUPPORTED", error instanceof Error ? error.message : "unsupported request")));
+      connection.socket.write(encodeJsonLine(failure(request.id, request.method, error instanceof BadRequestError ? "BAD_REQUEST" : "UNSUPPORTED", error instanceof Error ? error.message : "unsupported request")));
     }
   }
 
@@ -132,21 +177,33 @@ export function createDaemonServer(database: Database, maxQueuedEvents?: number,
       case "system.status": return { ready: true, owner: "daemon" };
       case "chat.list": {
         const rows = database.query("SELECT platform, account, chat_id, display_name FROM chats ORDER BY platform, account, chat_id").all();
+        auditRead(connection, "read.chat_list", "all-chats", rows.length);
         return { chats: rows };
       }
       case "message.inbox": {
         const key = chat(params);
-        const rows = database.query("SELECT platform, account, chat_id, msg_id, author_id, ts, body, edited_at, deleted_at, revision_kind, revision_value FROM messages WHERE platform = ? AND account = ? AND chat_id = ? AND deleted_at IS NULL ORDER BY ts, msg_id").all(key.platform, key.account, key.chat_id);
-        return { messages: rows };
+        const found = inboxMessages(database, { chat: key, interval: interval(params), ...page(params) });
+        auditRead(connection, "read.inbox", `${key.platform}\0${key.account}\0${key.chat_id}`, found.messages.length);
+        return { messages: found.messages, coverage: found.coverage, ...(found.next_cursor === undefined ? {} : { next_cursor: found.next_cursor }) };
       }
       case "message.get": {
         const key = { ...chat(params), msg_id: string(params.msg_id, "msg_id") };
-        return { message: getMessage(database, key) };
+        const message = getMessage(database, key);
+        auditRead(connection, "read.message", `${key.platform}\0${key.account}\0${key.chat_id}\0${key.msg_id}`, message === null ? 0 : 1);
+        return { message };
       }
       case "message.search": {
-        const interval = object(params.interval, "interval");
-        const found = searchMessages(database, { chat: chat(params), interval: { from_ts: number(interval.from_ts, "interval.from_ts"), to_ts: number(interval.to_ts, "interval.to_ts") }, query: string(params.query, "query") });
-        return { messages: found.messages, coverage: found.coverage };
+        const key = chat(params);
+        const found = searchMessages(database, { chat: key, interval: interval(params), query: string(params.query, "query"), ...page(params) });
+        auditRead(connection, "read.search", `${key.platform}\0${key.account}\0${key.chat_id}`, found.messages.length);
+        return { messages: found.messages, coverage: found.coverage, ...(found.next_cursor === undefined ? {} : { next_cursor: found.next_cursor }) };
+      }
+      case "sync.backfill": {
+        if (options.backfill === undefined) throw new Error("sync.backfill is unavailable because no adapter is configured");
+        const requested = parseBackfillRequest(params);
+        const result = await options.backfill(requested);
+        publish({ type: "event", method: "coverage.changed", params: { chat: requested.chat } });
+        return result;
       }
       case "sync.status": return { state: "idle" };
       case "auth.status": return { authenticated: false };
@@ -194,7 +251,17 @@ export function createDaemonServer(database: Database, maxQueuedEvents?: number,
   return {
     listen: (socketPath) => new Promise((resolve, reject) => {
       server.once("error", reject);
-      server.listen(socketPath, () => { server.removeListener("error", reject); resolve(); });
+      server.listen(socketPath, () => {
+        try {
+          // UDS requests contain message content and approval operations. Do not
+          // rely on an inherited umask to keep other local users out.
+          chmodSync(socketPath, 0o600);
+          server.removeListener("error", reject);
+          resolve();
+        } catch (error) {
+          server.close(() => reject(error));
+        }
+      });
     }),
     close: () => new Promise((resolve, reject) => {
       for (const connection of connections) connection.socket.destroy();

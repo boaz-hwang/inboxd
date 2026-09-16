@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
 import { createDaemon } from "../src/main.ts";
+import { recoverInterruptedSends } from "../src/recovery.ts";
 import { migrateDatabase, openSqlCipherDatabase } from "../../store/src/index.ts";
 import { createDaemonFixture, connectJsonLines } from "./fixtures/daemon-fixture.ts";
 
@@ -11,11 +12,12 @@ afterEach(async () => {
   for (const fixture of fixtures.splice(0)) fixture.dispose();
 });
 
-test("startup marks persisted Sending rows Uncertain without remote resend", async () => {
+test("startup marks persisted Sending rows and intents Uncertain without remote resend", async () => {
   const state = createDaemonFixture();
   fixtures.push(state);
   const database = openSqlCipherDatabase({ filename: state.databasePath, keyProvider: state.keyProvider });
   migrateDatabase(database);
+  database.run("INSERT INTO intents (id, kind, payload_json, created_at) VALUES (?, ?, ?, ?)", ["i1", "send", JSON.stringify({ state: "Sending" }), 1]);
   database.run("INSERT INTO sends (id, intent_id, idempotency_key, state, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)", ["s1", "i1", "key1", "Sending", "{}", 1]);
   database.close();
   let remoteResends = 0;
@@ -32,4 +34,24 @@ test("startup marks persisted Sending rows Uncertain without remote resend", asy
   expect(status.state).toBe("Uncertain");
   expect(remoteResends).toBe(0);
   client.close();
+
+  await daemon.stop();
+  const recovered = openSqlCipherDatabase({ filename: state.databasePath, keyProvider: state.keyProvider });
+  expect(JSON.parse((recovered.query("SELECT payload_json FROM intents WHERE id = 'i1'").get() as { payload_json: string }).payload_json)).toMatchObject({ state: "Uncertain" });
+  recovered.close();
+});
+
+test("rolls back send recovery when the paired intent transition cannot commit", () => {
+  const state = createDaemonFixture();
+  fixtures.push(state);
+  const database = openSqlCipherDatabase({ filename: state.databasePath, keyProvider: state.keyProvider });
+  migrateDatabase(database);
+  database.run("INSERT INTO intents (id, kind, payload_json, created_at) VALUES (?, ?, ?, ?)", ["i1", "send", JSON.stringify({ state: "Sending" }), 1]);
+  database.run("INSERT INTO sends (id, intent_id, idempotency_key, state, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)", ["s1", "i1", "key1", "Sending", "{}", 1]);
+  database.run("CREATE TRIGGER reject_intent_recovery BEFORE UPDATE OF payload_json ON intents WHEN NEW.id = 'i1' BEGIN SELECT RAISE(ABORT, 'intent recovery rejected'); END");
+
+  expect(() => recoverInterruptedSends(database)).toThrow("intent recovery rejected");
+  expect(database.query("SELECT state FROM sends WHERE id = 's1'").get()).toEqual({ state: "Sending" });
+  expect(JSON.parse((database.query("SELECT payload_json FROM intents WHERE id = 'i1'").get() as { payload_json: string }).payload_json)).toMatchObject({ state: "Sending" });
+  database.close();
 });

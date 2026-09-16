@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { createServer } from "node:net";
 
 import { createDaemon } from "../src/main.ts";
@@ -20,6 +20,18 @@ describe("single daemon owner", () => {
     expect(started).toHaveLength(1);
     expect([first, second].filter((result) => result.status === "rejected")).toHaveLength(1);
     await started[0]!.value.stop();
+  });
+
+  test("creates the UDS endpoint owner-only even under a permissive process umask", async () => {
+    const state = fixture();
+    const previousUmask = process.umask(0o000);
+    try {
+      const daemon = await createDaemon({ socketPath: state.socketPath, databasePath: state.databasePath, keyProvider: state.keyProvider });
+      expect(statSync(state.socketPath).mode & 0o777).toBe(0o600);
+      await daemon.stop();
+    } finally {
+      process.umask(previousUmask);
+    }
   });
 
   test("stale socket cleanup never unlinks a reachable active owner", async () => {

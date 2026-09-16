@@ -48,7 +48,11 @@ function runPlainBunSqlite(path: string): { exitCode: number; stderr: string } {
   };
 }
 
-function runBootstrapInChild(path: string, sqlCipherPath?: string): number {
+function runBootstrapInChild(
+  path: string,
+  sqlCipherPath?: string,
+  nodeEnv = "test",
+): number {
   const modulePath = new URL("../src/sqlcipher.ts", import.meta.url).pathname;
   const script = `
     import { openSqlCipherDatabase, SqlCipherBootstrapError } from ${JSON.stringify(modulePath)};
@@ -62,7 +66,7 @@ function runBootstrapInChild(path: string, sqlCipherPath?: string): number {
       process.exit(error instanceof SqlCipherBootstrapError ? 0 : 31);
     }
   `;
-  const env = { ...process.env };
+  const env: Record<string, string | undefined> = { ...process.env, NODE_ENV: nodeEnv };
   if (sqlCipherPath === undefined) delete env.SQLCIPHER_PATH;
   else env.SQLCIPHER_PATH = sqlCipherPath;
   return Bun.spawnSync({ cmd: [process.execPath, "--eval", script], env }).exitCode;
@@ -82,6 +86,16 @@ describe("SQLCipher encrypted store bootstrap", () => {
     const value = fixture();
     expect(runBootstrapInChild(value.databasePath)).toBe(0);
     expect(runBootstrapInChild(value.databasePath, "/missing/libsqlcipher.dylib")).toBe(0);
+  });
+
+  test("ignores ambient SQLCIPHER_PATH and opens the fixed production SQLCipher pack", () => {
+    const value = fixture();
+    expect(runBootstrapInChild(value.databasePath, "/missing/attacker-controlled-sqlcipher.dylib", "production")).toBe(29);
+  });
+
+  test("permits an explicit SQLCIPHER_PATH override in a test child", () => {
+    const value = fixture();
+    expect(runBootstrapInChild(value.databasePath, sqlCipherPath)).toBe(29);
   });
 
   test("reports a non-empty SQLCipher version and uses WAL", () => {

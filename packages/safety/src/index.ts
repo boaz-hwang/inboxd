@@ -67,7 +67,7 @@ export interface IntentSummary {
 }
 
 export interface PendingIntent extends IntentSummary {
-  readonly approval_code: string;
+  readonly approval_code?: string;
 }
 
 export interface ProposalResult {
@@ -89,6 +89,9 @@ export interface SafetyOptions {
   readonly approvalCode?: () => string;
   readonly id?: () => string;
   readonly approvalTtlMs?: number;
+  /** Maximum sends reserved across every destination. Defaults to unlimited. */
+  readonly globalQuotaLimit?: number;
+  /** Maximum sends reserved for one destination scope. Defaults to unlimited. */
   readonly quotaLimit?: number;
   readonly transportTimeoutMs?: number;
   readonly transport?: SendTransport;
@@ -149,6 +152,7 @@ function metadata(intentId: string, payload: IntentPayload): Record<string, unkn
 export function createSafetyService(database: Database, options: SafetyOptions = {}) {
   const now = options.now ?? Date.now;
   const approvalTtlMs = options.approvalTtlMs ?? 15 * 60 * 1_000;
+  const globalQuotaLimit = options.globalQuotaLimit ?? Number.MAX_SAFE_INTEGER;
   const quotaLimit = options.quotaLimit ?? Number.MAX_SAFE_INTEGER;
   const transportTimeoutMs = options.transportTimeoutMs ?? 30_000;
   if (!Number.isFinite(transportTimeoutMs) || transportTimeoutMs <= 0) {
@@ -210,20 +214,32 @@ export function createSafetyService(database: Database, options: SafetyOptions =
     return expireIfNecessary(intentId, payload);
   }
 
+  // Scope keys are canonical JSON objects, so this scalar sentinel cannot collide with a real scope.
+  const globalQuotaScope = "__global__";
+
   function quotaScope(scope: SendScope): string { return canonical(scope); }
 
-  function reserveQuota(scope: SendScope): void {
-    const key = quotaScope(scope);
+  function reserveQuotaKey(key: string, limit: number): void {
     const existing = database.query("SELECT used FROM quota WHERE scope = ?").get(key) as { used: number } | null;
-    if ((existing?.used ?? 0) >= quotaLimit) throw new QuotaExceededError();
+    if ((existing?.used ?? 0) >= limit) throw new QuotaExceededError();
     if (existing === null) database.run("INSERT INTO quota (scope, used, updated_at) VALUES (?, ?, ?)", [key, 1, now()]);
     else database.run("UPDATE quota SET used = ?, updated_at = ? WHERE scope = ?", [existing.used + 1, now(), key]);
   }
 
-  function releaseQuota(scope: SendScope): void {
-    const key = quotaScope(scope);
+  function releaseQuotaKey(key: string): void {
     const existing = database.query("SELECT used FROM quota WHERE scope = ?").get(key) as { used: number } | null;
     if (existing !== null) database.run("UPDATE quota SET used = ?, updated_at = ? WHERE scope = ?", [Math.max(0, existing.used - 1), now(), key]);
+  }
+
+  /** Called inside claim/finalize transactions so both counters change atomically. */
+  function reserveQuota(scope: SendScope): void {
+    reserveQuotaKey(globalQuotaScope, globalQuotaLimit);
+    reserveQuotaKey(quotaScope(scope), quotaLimit);
+  }
+
+  function releaseQuota(scope: SendScope): void {
+    releaseQuotaKey(quotaScope(scope));
+    releaseQuotaKey(globalQuotaScope);
   }
 
   function sendWithTimeout(request: SendTransportRequest): Promise<TransportResult> {
@@ -283,10 +299,12 @@ export function createSafetyService(database: Database, options: SafetyOptions =
       const rows = database.query("SELECT id, payload_json FROM intents ORDER BY created_at, id").all() as { id: string; payload_json: string }[];
       return rows.flatMap((row) => {
         const payload = expireIfNecessary(row.id, decode<IntentPayload>(row.payload_json));
-        if (payload.state !== "Proposed" && payload.state !== "Approved") return [];
+        if (payload.state !== "Proposed" && payload.state !== "Approved" && payload.state !== "Sending" && payload.state !== "Uncertain") return [];
+        const summary = proposedSummary(row.id, payload);
+        if (payload.state === "Sending" || payload.state === "Uncertain") return [summary];
         const approval = loadApproval(row.id);
         if (approval === undefined) return [];
-        return [{ ...proposedSummary(row.id, payload), approval_code: approval.payload.code }];
+        return [{ ...summary, approval_code: approval.payload.code }];
       });
     },
 

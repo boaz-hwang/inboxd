@@ -1,8 +1,24 @@
 import { Database } from "bun:sqlite";
-import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { closeSync, existsSync, openSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 
 const SQLITE_HEADER = "SQLite format 3\0";
+
+/**
+ * The only production SQLCipher binary accepted by the macOS arm64 build.
+ *
+ * Use the versioned Cellar path, not Homebrew's mutable `opt` symlink, then
+ * pin the binary digest so a replacement at that path fails before SQLite can
+ * open a database. Update this record only when intentionally shipping and
+ * reviewing a new SQLCipher pack.
+ */
+const PRODUCTION_SQLCIPHER_PACK = {
+  platform: "darwin",
+  arch: "arm64",
+  libraryPath: "/opt/homebrew/Cellar/sqlcipher/4.19.0/lib/libsqlcipher.3.53.4.dylib",
+  sha256: "275d151f5f8d82fd0f61d0eed024068c8d504830f805e56386fe714437b56801",
+} as const;
 
 let configuredSqlCipherPath: string | undefined;
 
@@ -65,7 +81,7 @@ export class MacOSKeychainKeyProvider implements SqlCipherKeyProvider {
   }
 }
 
-function sqlCipherLibraryPath(): string {
+function testSqlCipherLibraryPath(): string {
   const path = process.env.SQLCIPHER_PATH;
   if (!path) {
     throw new SqlCipherBootstrapError("SQLCIPHER_PATH must name the SQLCipher dynamic library");
@@ -85,9 +101,44 @@ function sqlCipherLibraryPath(): string {
   return path;
 }
 
+function productionSqlCipherLibraryPath(): string {
+  if (process.platform !== PRODUCTION_SQLCIPHER_PACK.platform || process.arch !== PRODUCTION_SQLCIPHER_PACK.arch) {
+    throw new SqlCipherBootstrapError("No allowlisted SQLCipher pack is available for this production platform");
+  }
+
+  let canonicalPath: string;
+  try {
+    canonicalPath = realpathSync(PRODUCTION_SQLCIPHER_PACK.libraryPath);
+    if (canonicalPath !== PRODUCTION_SQLCIPHER_PACK.libraryPath || !statSync(canonicalPath).isFile()) {
+      throw new SqlCipherBootstrapError("The production SQLCipher pack is not the allowlisted library file");
+    }
+  } catch (error) {
+    if (error instanceof SqlCipherBootstrapError) throw error;
+    throw new SqlCipherBootstrapError("The allowlisted production SQLCipher pack is unavailable");
+  }
+
+  try {
+    const actualDigest = createHash("sha256").update(readFileSync(canonicalPath)).digest("hex");
+    if (actualDigest !== PRODUCTION_SQLCIPHER_PACK.sha256) {
+      throw new SqlCipherBootstrapError("The production SQLCipher pack failed provenance verification");
+    }
+  } catch (error) {
+    if (error instanceof SqlCipherBootstrapError) throw error;
+    throw new SqlCipherBootstrapError("The production SQLCipher pack could not be provenance-checked");
+  }
+  return canonicalPath;
+}
+
+function sqlCipherLibraryPath(): string {
+  return process.env.NODE_ENV === "test"
+    ? testSqlCipherLibraryPath()
+    : productionSqlCipherLibraryPath();
+}
+
 /**
  * Select SQLCipher before the first Bun SQLite database is constructed.
- * This intentionally has no fallback to Bun's bundled/system SQLite.
+ * `SQLCIPHER_PATH` is a test-only escape hatch. Production always resolves and
+ * verifies the fixed allowlisted pack, ignoring ambient loader input.
  */
 export function configureSqlCipher(): void {
   const path = sqlCipherLibraryPath();

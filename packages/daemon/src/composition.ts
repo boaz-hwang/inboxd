@@ -6,7 +6,7 @@ import type { ProtocolEvent } from "../../protocol/src/schema.ts";
 import { acquireSingleInstanceLock, type SingleInstanceLock } from "./lock.ts";
 import { daemonStateDirectory, removeStaleSocket } from "./lifecycle.ts";
 import { recoverInterruptedSends } from "./recovery.ts";
-import { createDaemonServer, type DaemonServer, type TrustedApproverSessionAuthorizer } from "./server.ts";
+import { createDaemonServer, type DaemonServer, type DaemonServerOptions, type TrustedApproverSessionAuthorizer } from "./server.ts";
 
 export interface DaemonOptions {
   readonly socketPath: string;
@@ -16,11 +16,13 @@ export interface DaemonOptions {
   /** A transport must be explicitly injected; the daemon never constructs a live sender. */
   readonly sendTransport?: SendTransport;
   readonly approvalCode?: SafetyOptions["approvalCode"];
+  readonly globalQuotaLimit?: SafetyOptions["globalQuotaLimit"];
   readonly quotaLimit?: SafetyOptions["quotaLimit"];
   readonly transportTimeoutMs?: SafetyOptions["transportTimeoutMs"];
   readonly allowSend?: SafetyOptions["allowSend"];
   /** Code-bearing operations are default-denied unless this local-session predicate approves them. */
   readonly isTrustedApproverSession?: TrustedApproverSessionAuthorizer;
+  readonly backfill?: DaemonServerOptions["backfill"];
   readonly startSync?: () => void | Promise<void>;
   readonly startPlatform?: () => void | Promise<void>;
   readonly startCredentials?: () => void | Promise<void>;
@@ -61,11 +63,12 @@ export async function composeDaemon(options: DaemonOptions): Promise<DaemonContr
     const safety = createSafetyService(database, {
       transport: options.sendTransport,
       approvalCode: options.approvalCode,
+      globalQuotaLimit: options.globalQuotaLimit,
       quotaLimit: options.quotaLimit,
       transportTimeoutMs: options.transportTimeoutMs,
       allowSend: options.allowSend,
     });
-    server = createDaemonServer(database, options.maxQueuedEvents, { safety, isTrustedApproverSession: options.isTrustedApproverSession });
+    server = createDaemonServer(database, options.maxQueuedEvents, { safety, isTrustedApproverSession: options.isTrustedApproverSession, backfill: options.backfill });
     await server.listen(options.socketPath);
     // No sync/platform/credential/audit work begins until SQLCipher, schema, recovery, and UDS are ready.
     await options.startCredentials?.();

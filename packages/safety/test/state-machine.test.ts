@@ -6,6 +6,7 @@ import { migrateDatabase, openSqlCipherDatabase } from "../../store/src/index.ts
 import {
   ApprovalRejectedError,
   createSafetyService,
+  QuotaExceededError,
   type SendTransport,
   type SendScope,
 } from "../src/index.ts";
@@ -111,6 +112,7 @@ describe("safety intent approval and outbox", () => {
     await approve(uncertain, third.intent_id);
     await expect(uncertain.execute(third.intent_id)).resolves.toEqual(expect.objectContaining({ state: "Uncertain" }));
     await expect(uncertain.execute(third.intent_id)).rejects.toThrow(/Uncertain|eligible/i);
+    expect(uncertain.listPending()).toContainEqual(expect.objectContaining({ intent_id: third.intent_id, state: "Uncertain" }));
     expect(calls).toBe(1);
 
     const timedOut = createSafetyService(database, {
@@ -157,5 +159,52 @@ describe("safety intent approval and outbox", () => {
     await approve(disabled, blocked.intent_id);
     await expect(disabled.execute(blocked.intent_id)).resolves.toEqual(expect.objectContaining({ state: "Failed" }));
     expect(falseCalls).toBe(0);
+  });
+
+  test("reserves the per-scope quota before concurrent sends can reach the transport", async () => {
+    const { database } = fixture();
+    let calls = 0;
+    const service = createSafetyService(database, {
+      now: () => 1_000,
+      approvalCode: () => "654321",
+      quotaLimit: 1,
+      globalQuotaLimit: 3,
+      transport: { capabilities: { send: true }, send: async () => { calls++; return { state: "sent", receipt: `r-${calls}` }; } },
+    });
+    const intents = [proposal(service, "first"), proposal(service, "second"), proposal(service, "third")];
+    await Promise.all(intents.map(({ intent_id }) => approve(service, intent_id)));
+
+    const results = await Promise.allSettled(intents.map(({ intent_id }) => service.execute(intent_id)));
+    const rejected = results.filter((result) => result.status === "rejected");
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(rejected).toHaveLength(2);
+    expect(rejected.every((result) => result.reason instanceof QuotaExceededError)).toBe(true);
+    expect(calls).toBe(1);
+  });
+
+  test("reserves one global quota across concurrent sends to separate scopes", async () => {
+    const { database } = fixture();
+    const otherScope: SendScope = { ...scope, chat_id: "chat-2" };
+    let calls = 0;
+    const service = createSafetyService(database, {
+      now: () => 1_000,
+      approvalCode: () => "654321",
+      quotaLimit: 2,
+      globalQuotaLimit: 1,
+      transport: { capabilities: { send: true }, send: async () => { calls++; return { state: "sent", receipt: `r-${calls}` }; } },
+    });
+    const first = proposal(service, "first");
+    const second = service.propose({ actor: "agent:alpha", scope: otherScope, body: "second" });
+    await approve(service, first.intent_id);
+    await service.approve({ intentId: second.intent_id, code: "654321", actor: "agent:alpha", scope: otherScope });
+
+    const results = await Promise.allSettled([service.execute(first.intent_id), service.execute(second.intent_id)]);
+    const rejected = results.filter((result) => result.status === "rejected");
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]?.reason).toBeInstanceOf(QuotaExceededError);
+    expect(calls).toBe(1);
   });
 });

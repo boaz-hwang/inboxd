@@ -1,4 +1,4 @@
-import { mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync, closeSync } from "node:fs";
+import { chmodSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync, closeSync } from "node:fs";
 import { join } from "node:path";
 
 export class SingleInstanceError extends Error {
@@ -27,6 +27,9 @@ function ownerIsAlive(lockPath: string): boolean {
 /** Atomically claims a daemon state directory; stale locks are reclaimed only after liveness checks. */
 export function acquireSingleInstanceLock(directory: string): SingleInstanceLock {
   mkdirSync(directory, { recursive: true, mode: 0o700 });
+  // mkdir's mode does not repair an already-existing directory. The lock,
+  // database, and UDS endpoint must stay private to this OS account.
+  chmodSync(directory, 0o700);
   const lockPath = join(directory, "inboxd.lock");
   for (let attempt = 0; attempt < 2; attempt++) {
     let descriptor: number | undefined;
