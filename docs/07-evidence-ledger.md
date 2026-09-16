@@ -5,6 +5,7 @@
 ## 상태 분류
 
 - `SYNTHETIC`: 익명 fixture 또는 fake transport에서 재현됨.
+- `LOCAL_OBSERVED`: 현재 호스트의 제품 코드 경로에서 실행·재개방·통합 테스트로 관측됨.
 - `HISTORICAL_LIVE`: 과거 실제 실행을 sanitize한 기록이며 현재 재실행·완전성을 보장하지 않음.
 - `NEW_LIVE_REQUIRED`: 제품 수락 전에 제한된 실제 계정·채팅에서 새로 관측해야 함.
 - `BLOCKED`: 필요한 사용자 provenance, 인증, 권한 또는 환경이 없음.
@@ -22,9 +23,12 @@
 | Slack send-as-user | NEW_LIVE_REQUIRED | 문서/코드 capability만 확인, live send 없음 | 미검증 |
 | KakaoTalk wrapper 정규화 | SYNTHETIC | `spike-b-kakao-telegram` commit `3a32990` | live auth/read 없음 |
 | Telegram wrapper 정규화 | SYNTHETIC | 같은 commit, stable canonical chat-id 회귀 | live auth/read 없음; MVP 밖 |
-| 원래 Kakao Spike B DB/KDF/schema/AX | BLOCKED | wrapper 확장은 해당 측정을 수행하지 않음 | W13 전 미수행 |
-| SQLCipher 파일/WAL 재개방 | BLOCKED | Spike 0 없음, SQLCipher 미설치 | 실제 메시지 제품 저장 금지 |
-| daemon/protocol/CLI/TUI/MCP/safety | NEW_LIVE_REQUIRED | 현재는 목표 설계만 존재 | 구현·fixture·live gate 필요 |
+| 원래 Kakao Spike B DB/KDF/schema/AX | BLOCKED | privacy-safe harness는 구현됐으나 승인된 live 입력 없음 | 제품 adapter 활성화 금지 |
+| SQLCipher 파일/WAL 재개방 | LOCAL_OBSERVED | SQLCipher 4.19.0, correct/wrong/no-key, 일반 SQLite 거부, FTS, WAL; production path/hash 검증 | 현재 macOS build만 PASS |
+| daemon/store/protocol/CLI/safety | LOCAL_OBSERVED | 단일 owner, UDS 0600, bounded pagination, coverage, read audit, restart Uncertain, global/scope quota | live adapter/send는 별도 gate |
+| OpenTUI 5화면 | SYNTHETIC | native test renderer, interactive key path, 15개 80×24/120×40 capture | 실제 TTY+live daemon 관측 필요 |
+| MCP search/list/propose | SYNTHETIC | 공식 MCP v2 server, agent role, code/approve/direct-send 없음 | live daemon smoke 필요 |
+| Kakao read-only 제품 adapter | SYNTHETIC / BLOCKED | 측정 PASS·stable allowlist 전 reader I/O 거부 | live Spike B 후에만 enable |
 
 ## 유지해야 할 판정 경계
 
@@ -36,7 +40,7 @@
 
 ## 다음 관측 게이트
 
-- Spike 0: SQLCipher dylib, correct/wrong/no-key reopen, ordinary SQLite denial, FTS, WAL.
+- Production smoke: 실제 사용자 keychain과 TTY에서 daemon/CLI/TUI/MCP 연결.
 - Slack: 승인된 안정 chat ID, cursor/page/rate-limit 관측, controlled safe-send receipt.
 - Kakao: 사용자 소유 macOS 환경에서 DB/KDF/schema/AX 측정 후 read-only 제품 경로.
 - Retrieval: 사용자가 실제 확인하려던 Slack·Kakao 질문 10개와 source-message 대조.

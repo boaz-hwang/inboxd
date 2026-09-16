@@ -9,8 +9,9 @@
 전체 MVP 완료에는 카카오 읽기 통합과 두 플랫폼의 실질문 검증도 필요하다.
 MCP는 같은 데몬 API 위의 얇은 클라이언트로 붙인다. 아래 결정은 기본안이며,
 스파이크에서 반례가 확인되면 관련 계약과 검증 기준을 함께 수정한다.
-이 문서는 **목표 설계와 수락 계약**이며 현재 시스템 기술이 아니다. 2026-09-16 현재
-Spike 0은 미관측이고 Spike A만 PARTIAL feasibility evidence가 있다.
+이 문서는 **목표 설계와 수락 계약**이다. 2026-09-16 현재 core/store/protocol/daemon/
+CLI/safety/OpenTUI/MCP와 측정-gated Kakao read adapter는 로컬·합성 경로에서 구현됐다.
+Slack/Kakao live coverage, controlled send, 사용자 확인 실질문은 별도 수락 gate다.
 
 ## 1. 런타임 모델 — 데몬 1개 + 클라이언트 (05-review #1 결정)
 
@@ -274,8 +275,9 @@ thread 뷰, 첨부 인라인, 편집·삭제, 멀티계정 전환, 테마. 04-ro
 
 ## 6. 암호화 (05-review #4 결정)
 
-상태: **NOT OBSERVED.** 아래 엔진 선택은 Spike 0의 파일 재개방·WAL 검증이 통과한
-뒤에만 채택된 것으로 본다. 실패하면 plaintext로 진행하지 않고 대안 엔진을 결정한다.
+상태: **PASS_LOCAL (macOS arm64, SQLCipher 4.19.0).** 파일 재개방·FTS·WAL,
+wrong/no-key·일반 SQLite 거부를 관측했다. production은 고정 Cellar 경로와 SHA-256을
+검증하며 ambient `SQLCIPHER_PATH`를 무시한다. 다른 OS/build는 아직 채택하지 않는다.
 
 - 엔진: SQLCipher. macOS는 `Database.setCustomSQLite(libsqlcipher.dylib)`를 DB 생성
   전에 호출. 다른 OS는 phase 2(해당 API가 no-op).
@@ -314,10 +316,11 @@ MCP는 core·store·safety 재작성 없이 붙이는 것을 목표로 한다. �
 
 ### 현재 단계 판정 (2026-09-16)
 
-- 0: NOT OBSERVED.
-- 1: PARTIAL Spike A only. 암호화 store·daemon API·제품 CLI의 end-to-end 증거가 아니다.
-- 2–6: NOT OBSERVED.
-- B: NOT MEASURED. 별도 KakaoTalk·Telegram wrapper 합성 확장은 B나 6의 대체 증거가 아니다.
+- 0: PASS_LOCAL — provenance-checked SQLCipher 재개방 gate 통과.
+- 1–5: IMPLEMENTED_LOCAL — store·daemon API·CLI·safe-send state machine·5화면 OpenTUI·MCP,
+  bounded pagination/read audit/UDS 0600 포함. 137개 자동 테스트 통과; live platform 증거는 아님.
+- 6: IMPLEMENTED_SYNTHETIC / LIVE_BLOCKED — Kakao 측정 PASS 전 adapter I/O 거부.
+- B: BLOCKED_SAFE_HARNESS — 별도 KakaoTalk·Telegram wrapper 합성 확장은 B나 6의 live 증거가 아니다.
 
 ## 8. 이 문서가 바꾸지 않는 것
 

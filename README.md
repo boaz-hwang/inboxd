@@ -17,7 +17,7 @@
 - `docs/06-architecture.md` — 검토 반영 설계: 데몬 런타임·패키지·store 계약·승인 경계·TUI·빌드 순서
 - `docs/07-evidence-ledger.md` — 합성·과거 live·새 live 필요·blocked 증거와 MVP claim 경계
 
-## 목표 아키텍처 (현재 미구현)
+## 구현 아키텍처와 남은 live gate
 
 ```text
 inboxd daemon (DB write · sync · outbox 실행 · 발송 토큰 · audit 독점)
@@ -42,8 +42,12 @@ inboxd daemon (DB write · sync · outbox 실행 · 발송 토큰 · audit 독�
 - KakaoTalk·Telegram wrapper 확장은 **IMPLEMENTED_SYNTHETIC / LIVE_BLOCKED**다.
   두 계정 모두 미설정이어서 live read를 하지 않았고, 이 결과는 원래 Kakao Spike B의
   DB KDF·schema·AX 측정이나 제품 통합 증거가 아니다.
-- SQLCipher, 제품 daemon/API/CLI, safe-send, Slack TUI, MCP, Kakao 제품 통합은 아직
-  이 문서의 목표 계약이며 관측된 완료 상태가 아니다.
+- SQLCipher store, 단일 daemon/UDS, coverage 동봉 search/inbox, protocol-only CLI,
+  approval/outbox safety, 5화면 OpenTUI, MCP 3개 도구는 로컬 통합 테스트로 구현·관측됐다.
+  `bun run test`는 137개 테스트를 통과한다. 이는 live Slack/Kakao/발송 증거가 아니다.
+- Slack 제품 adapter는 wrapper 한계 때문에 degraded/incomplete coverage만 제공한다.
+  Kakao 제품 adapter는 원래 Spike B 측정이 통과하기 전 I/O를 거부하도록 구현돼 있으며,
+  따라서 Kakao 제품 활성화는 계속 **BLOCKED**다.
 - 10만 건·한국어 25개 fixture는 합성 검증을 통과했지만, 실제 사용자가 확인한 질문
   10개 게이트는 provenance가 없어 **BLOCKED**다.
 

@@ -190,8 +190,9 @@ propose(MCP)→approve(터미널) 구조와 양립한다.
   암호화 증거로 쓰지 않는다. 검증은 파일 재개방 기준: 올바른 키로 본문·FTS 복원,
   키 없음·틀린 키·일반 SQLite로는 스키마도 읽히지 않음, WAL 포함. 실패 시 sync를
   시작하지 않는다. 암호화는 파일 유출 대비이며 키 접근 가능 주체(등급 b)를 막지 않는다.
-  Spike 0의 파일 재개방 검증 전에는 달성으로 주장하지 않는다. 현재 Spike A와
-  multiplatform fixture DB는 disposable plaintext이며 제품 저장소가 아니다.
+  Spike 0은 현재 macOS arm64의 provenance-checked SQLCipher 4.19.0에서 재개방·FTS·WAL·
+  wrong/no-key·일반 SQLite 거부를 통과했다. 기존 Spike A와 multiplatform fixture DB는
+  여전히 disposable plaintext이며 제품 저장소가 아니다. 다른 OS·SQLCipher build는 별도 검증한다.
   Spike 0과 doctor 항목은 06-architecture §6.
 - **읽기 스코프.** 허용 채팅 allowlist 밖 메시지는 수집하지 않는다. 에이전트가 DM 비밀을
   읽어 유출하는 읽기 측 위험을 수집 단계에서 차단한다.

@@ -57,12 +57,13 @@ Slack 읽기·쓰기·재연결 검증을 요구한다. 카카오와 MCP의 독�
 
 | 항목 | 상태 | 증거 경계 |
 |---|---|---|
-| Spike 0 암호화 | NOT OBSERVED | SQLCipher dylib·키체인·WAL·재개방 검증 없음 |
+| Spike 0 암호화 | PASS_LOCAL | SQLCipher 4.19.0 dylib provenance, correct/wrong/no-key, 일반 SQLite 거부, FTS, WAL 재개방 통과 |
 | Spike A Slack | PARTIAL | 과거 제한 live read 89개; 합성 재개·100k·한국어 fixture 통과; wrapper completeness/cursor 미증명 |
 | Spike A 실질문 A5 | BLOCKED | anonymous synthetic trace뿐이며 사용자 확인 provenance 없음 |
-| 원래 Spike B Kakao DB/AX | NOT STARTED | KDF·schema·AX selector·live backfill 미측정 |
+| 원래 Spike B Kakao DB/AX | BLOCKED_SAFE_HARNESS | privacy-safe harness 구현; KDF·schema·AX selector·live backfill은 승인된 환경에서 미측정 |
 | KakaoTalk·Telegram wrapper 확장 | IMPLEMENTED_SYNTHETIC / LIVE_BLOCKED | 계정 미설정; B 또는 제품 통합 단계 6을 대체하지 않음 |
-| 단계 2–6 | NOT OBSERVED | 제품 daemon/store/safety/TUI/MCP/Kakao 통합 증거 없음 |
+| 단계 2–5 | IMPLEMENTED_LOCAL | encrypted store·daemon/UDS·bounded coverage reads·safe outbox·CLI·5화면 OpenTUI·MCP를 137개 테스트로 검증 |
+| 단계 6 Kakao | IMPLEMENTED_SYNTHETIC / LIVE_BLOCKED | 측정 PASS 전 I/O를 거부하는 read-only adapter; live 제품 통합은 미완료 |
 
 ## 스파이크
 
