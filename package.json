@@ -1,0 +1,20 @@
+{
+  "name": "inboxd",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "platforms/*",
+    "contrib/*"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.base.json --noEmit",
+    "lint": "bun run typecheck",
+    "check:boundaries": "bun scripts/check-boundaries.ts",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "latest"
+  }
+}

@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.*
+!.env.example
+*.keychain
+captures/
+manifests/
+.DS_Store
