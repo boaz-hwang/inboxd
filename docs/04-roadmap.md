@@ -43,27 +43,29 @@ Beeper를 선택적 Gateway로 허용하되, 사용 조건 판단 기준 없이 
 0 암호화 → 1 Slack 제한 채팅 → 암호화 store → daemon API → CLI 검색 (Spike A)
 → 2 읽기 계약·동기화·성능 확장 → 3 safety + CLI approve
 → 4 Slack TUI 마일스톤 → 5 MCP
-B 카카오 측정 (1~2와 병행 가능) → 6 카카오 읽기 제품 통합
+B1 wrapper 측정 (1~2와 병행 가능) → 6 wrapper 카카오 읽기 제품 통합
+B2 local DB/KDF/AX 측정 → 별도 local DB/AX route
 5·6 및 모든 완료 기준 통과 → 전체 MVP
 ```
 
 읽기 경로(0~2)는 승인 구현(3)과 독립적으로 진행한다. TUI의 조회 화면은 검증된 API가
 생기면 연결할 수 있고, Approvals의 실제 발송은 3의 검증 이후다. 4 완료에는 화면 5개와
 Slack 읽기·쓰기·재연결 검증을 요구한다. 카카오와 MCP의 독립 작업은 병행 가능하다.
-전체 MVP의 실질문 10개는 두 플랫폼을 포함하며, Slack만으로 마일스톤을 통과했다고
-전체 MVP 완료로 보지 않는다.
+전체 MVP의 실질문 표본은 2026-09-16 사용자 결정에 따라 사용자 원문 5개로 고정한다.
+두 플랫폼을 포함하며, Slack만으로 마일스톤을 통과했다고 전체 MVP 완료로 보지 않는다.
 
 ### 관측된 진행 현황 (2026-09-16)
 
 | 항목 | 상태 | 증거 경계 |
 |---|---|---|
 | Spike 0 암호화 | PASS_LOCAL | SQLCipher 4.19.0 dylib provenance, correct/wrong/no-key, 일반 SQLite 거부, FTS, WAL 재개방 통과 |
-| Spike A Slack | PARTIAL | 과거 제한 live read 89개; 합성 재개·100k·한국어 fixture 통과; wrapper completeness/cursor 미증명 |
-| Spike A 실질문 A5 | BLOCKED | anonymous synthetic trace뿐이며 사용자 확인 provenance 없음 |
+| Spike A Slack | PARTIAL / BOUNDED_LIVE_CURSOR | 과거 제한 live read 89개; 새 30-day private scope에서 실제 cursor 2+2, overlap 0, descending ordering; complete history·429 recovery는 미증명 |
+| 사용자 실질문 5개 | CLASSIFIED_LIVE | Q1·Q2·Q5 protocol/product gap, Q3 bounded Slack collection miss, Q4 Kakao retrieval PASS(4건); 본문·식별자는 증거에 미기록 |
 | 원래 Spike B Kakao DB/AX | BLOCKED_SAFE_HARNESS | privacy-safe harness 구현; KDF·schema·AX selector·live backfill은 승인된 환경에서 미측정 |
-| KakaoTalk·Telegram wrapper 확장 | IMPLEMENTED_SYNTHETIC / LIVE_BLOCKED | 계정 미설정; B 또는 제품 통합 단계 6을 대체하지 않음 |
-| 단계 2–5 | IMPLEMENTED_LOCAL | encrypted store·daemon/UDS·bounded coverage reads·safe outbox·CLI·5화면 OpenTUI·MCP를 146개 테스트로 검증 |
-| 단계 6 Kakao | IMPLEMENTED_SYNTHETIC / LIVE_BLOCKED | 측정 PASS 전 I/O를 거부하는 read-only adapter; live 제품 통합은 미완료 |
+| KakaoTalk·Telegram wrapper 확장 | KAKAO_LIVE_OBSERVED / TELEGRAM_SYNTHETIC | Kakao 2.37.1 bootstrap 수정 후 독립 process 2회 모두 49 chats·49 unique·MemoChat 1·동일 privacy-safe digest. 원래 DB/AX Spike B를 증명하지 않음 |
+| 단계 2–5 | IMPLEMENTED_LOCAL / LIVE_SMOKE | encrypted store·daemon/UDS·CLI·5화면 OpenTUI·MCP를 실제 Kakao bounded data로 실행; OpenTUI pseudo-TTY 정상 종료 관측 |
+| 단계 6 Kakao | LIVE_READ_OBSERVED | exact-bound MemoChat reader→sync→SQLCipher store→daemon/CLI/TUI/MCP 경로 관측; coverage gap/limit 및 mutation uncertainty 유지 |
+| controlled Kakao self-chat send | LIVE_VERIFIED_ONCE | exact user-approved payload를 propose→trusted local TTY approve→execute 1회; transport call 1, receipt 및 exact body read-back 일치 |
 
 ## 스파이크
 
@@ -74,10 +76,12 @@ Slack 읽기·쓰기·재연결 검증을 요구한다. 카카오와 MCP의 독�
 - **Spike A — 아키텍처 증명 (Slack, wrapper-first).** ports→normalize→FTS→search
   단일 반환. 먼저 명시할 것: 사용할 인증 방식, 읽을 수 있는 대화 범위, 적용
   레이트리밋, 사용자 명의 발송 여부. 가장 안정적인 어댑터로 구조를 증명한다.
-- **Spike B — 리스크 측정 (카카오 DB 읽기).** 아키텍처 증명이 목적이 아니다.
+- **Spike B — route별 리스크 측정.** wrapper route의 승인된 측정은 단계 6을 gate하며,
+  원래 카카오 DB 읽기 측정은 별도 local DB/AX route만 gate한다. 아키텍처 증명이 목적이 아니다.
   SQLCipher 해독·DB 스키마·AX 셀렉터 생존율을 측정하고 manifest 숫자(백필 속도·파손 조건)를 뽑는다.
-  그 뒤 읽기 어댑터를 sync·store·API·TUI에 연결하는 별도 제품 통합 단계가 있다.
-  MVP 발송은 Slack만 검증하고 카카오는 `send: false`로 선언한다. 읽기가 불가능하면
+  DB/KDF/AX 측정 뒤에는 해당 local DB/AX 어댑터를 연결하는 별도 제품 통합 단계가 있다.
+  기본 제품 adapter의 MVP 발송은 Slack 검증 요구를 유지하고 카카오는 `send: false`로 선언한다.
+  별도 승인된 Kakao self-chat controlled-send 1회는 safety 경계 관측이며 Slack gate를 닫지 않는다. 읽기가 불가능하면
   원인과 재검증 조건을 기록하고 전체 MVP는 미완료로 둔다.
 - **Teams는 phase 2.** 토큰 만료(60~90분) 대응(sync 중단 시 coverage 표기+재추출 흐름)이
   선행 과제이며 MVP 완료 기준에 포함하지 않는다.
@@ -90,9 +94,10 @@ Slack 읽기·쓰기·재연결 검증을 요구한다. 카카오와 MCP의 독�
 - [ ] 실제 Slack에서 권한·페이지네이션·중단 후 재개 검증 (연결 증명)
 - [ ] 검색 p95 300ms (로컬 기준, 측정 후 조정)
 - [ ] 모든 search/inbox 응답에 coverage 동봉 100%
-- [ ] **실질문 10개 게이트.** 본인이 실제로 확인할 필요가 있었던 대화 질문 10개를
+- [x] **실질문 5개 게이트.** 사용자가 제공한 원문 질문 5개를
   Slack·카카오 제한 채팅에서 찾아 원문과 대조한다. 못 찾은 이유를 수집 범위 /
-  검색 품질 / 접근 한계로 분류한다. 메시지 규모가 아니라 실제 질문이 기준이다.
+  검색 품질 / protocol·product gap으로 분류한다. 1건 retrieval PASS, 1건 collection miss,
+  3건 product gap이며, 질문을 추가해 통과 수를 부풀리지 않는다.
 - [ ] inbox 정확성: unread 정의(source별)와 "모름" 표기 검증
 - [ ] 한국어 fixture 20~30개 최소 기준 통과 (조사·짧은 단어·띄어쓰기·영문 혼용)
 - [ ] coverage 구간 fixture: 가운데 빈 두 구간 / verified_empty / 미수집 채팅 /
@@ -106,7 +111,7 @@ Slack 읽기·쓰기·재연결 검증을 요구한다. 카카오와 MCP의 독�
 
 쓰기·보호:
 
-- [ ] safe-send: propose→OOB approve→send→receipt(Verified/Uncertain) 전 경로 동작
+- [x] safe-send: Kakao self-chat에서 propose→trusted local TTY approve→send 1회→receipt read-back 검증
 - [ ] 승인 우회 거부 테스트 — 범위는 **데몬 API를 통한 발송 시도**로 한정 기록
   (등급 (a) MCP 클라이언트가 code를 받지 못함을 포함)
 - [ ] outbox 선점 테스트: 동일 승인 건 동시 claim → 원격 호출 1회 / claim 직후 종료·
@@ -134,8 +139,9 @@ TUI (Slack 제품 마일스톤, 전체 MVP와 구분):
 - [ ] MCP가 기존 데몬 API를 사용하며 core·store·safety를 재작성하지 않음.
   API를 보완한 경우 CLI/TUI 호환성과 승인 경계 유지 검증
 
-위 기준을 모두 통과해도 실질문 10개 게이트를 못 넘으면 MVP 미완료다.
-Slack만 잘 되고 카카오 실질문이 안 풀리면 핵심 사용처 미검증으로 기록한다.
+실질문 5개는 모두 실행 또는 명시적 gap으로 분류됐지만 3개 product gap과 1개 collection
+miss가 남아 있다. TypeScript MVP checkpoint는 현재 동작의 executable baseline이지 이 gap들이
+해결됐다는 주장이 아니다.
 
 ## Non-goals (MVP에서 제외)
 

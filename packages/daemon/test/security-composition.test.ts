@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, statSync } from "node:fs";
 
-import { createDaemon, createLocalSlackDaemon, defaultApproverTokenPath, readLocalApproverToken } from "../src/main.ts";
+import { createDaemon, createLocalKakaoDaemon, createLocalSlackDaemon, defaultApproverTokenPath, readLocalApproverToken } from "../src/main.ts";
 import { openSqlCipherDatabase } from "../../store/src/sqlcipher.ts";
 import { createDaemonFixture, connectJsonLines } from "./fixtures/daemon-fixture.ts";
 
@@ -53,8 +53,21 @@ describe("daemon closure findings", () => {
     const sender = { capabilities: { send: true as const }, send: async () => ({ state: "sent" as const, receipt: "never" }) };
     await expect(createDaemon({ socketPath: state.socketPath, databasePath: state.databasePath, keyProvider: state.keyProvider, sendTransport: sender })).rejects.toThrow(/quota/i);
     await expect(createDaemon({ socketPath: state.socketPath, databasePath: state.databasePath, keyProvider: state.keyProvider, sendTransport: sender, quotaLimit: Infinity, globalQuotaLimit: 1 })).rejects.toThrow(/finite positive/i);
-    const daemon = await createDaemon({ socketPath: state.socketPath, databasePath: state.databasePath, keyProvider: state.keyProvider, sendTransport: sender, quotaLimit: 1, globalQuotaLimit: 2 });
+    const daemon = await createDaemon({ socketPath: state.socketPath, databasePath: state.databasePath, keyProvider: state.keyProvider, sendTransport: sender, quotaLimit: 1, globalQuotaLimit: 2, allowSend: () => true });
     daemons.push(daemon);
+  });
+
+  test("refuses a send-capable daemon without an explicit allowlist policy", async () => {
+    const state = fixture();
+    const sender = { capabilities: { send: true as const }, send: async () => ({ state: "sent" as const, receipt: "never" }) };
+    await expect(createDaemon({
+      socketPath: state.socketPath,
+      databasePath: state.databasePath,
+      keyProvider: state.keyProvider,
+      sendTransport: sender,
+      quotaLimit: 1,
+      globalQuotaLimit: 1,
+    })).rejects.toThrow(/allowlist policy/i);
   });
 
   test("creates an owner-only local approver token and requires it without exposing it to agents", async () => {
@@ -139,5 +152,130 @@ describe("daemon closure findings", () => {
     await blocked.request("system.hello", { role: "reader" });
     await expect(blocked.request("sync.backfill", { ...chat, from_ts: 10, to_ts: 20 })).rejects.toThrow(/no adapter/i);
     blocked.close();
+  });
+
+  test("wires a measured local Kakao read through the encrypted-store backfill", async () => {
+    const state = fixture();
+    const account = "stable:kakao_account_alpha";
+    const chat = { platform: "kakao", account, chat_id: "stable:kakao_chat_alpha" };
+    const calls: unknown[] = [];
+    const daemon = await createLocalKakaoDaemon({
+      socketPath: state.socketPath,
+      databasePath: state.databasePath,
+      keyProvider: state.keyProvider,
+      kakao: {
+        allowedChats: [{ account, chat_id: chat.chat_id }],
+        measurement: {
+          schema_version: "kakao-contrib-read-measurement/v1",
+          kind: "kakao-read-field-measurement",
+          status: "VALIDATED",
+          observation: "observed",
+          source: "authorized-live-measurement",
+          observed_at: 100,
+          send: false,
+          supported_read_fields: ["account_id", "chat_id", "message_id", "author_id", "ts", "body", "revision"],
+        },
+        max_measurement_age: 100,
+        now: () => 100,
+        reader: async (request) => {
+          calls.push(request);
+          return [{ account_id: account, chat_id: chat.chat_id, message_id: "m1", author_id: "u1", ts: 20, body: "synthetic only", revision: "m1" }];
+        },
+      },
+    });
+    daemons.push(daemon);
+    const client = await connectJsonLines(state.socketPath);
+    await client.request("system.hello", { role: "reader" });
+
+    await expect(client.request("sync.backfill", { platform: "kakao", account: "stable:other", chat_id: chat.chat_id, from_ts: 10, to_ts: 50 })).rejects.toThrow(/allowlist/i);
+    const result = await client.request("sync.backfill", { ...chat, from_ts: 10, to_ts: 150 });
+    expect(result).toMatchObject({ event_count: 1, authoritative: false });
+    expect(calls).toEqual([{ account, chat_id: chat.chat_id, interval: { from_ts: 10, to_ts: 100 }, upper_bound_ts: 100, max_pages: 1 }]);
+    client.close();
+
+    await daemon.stop();
+    const database = openSqlCipherDatabase({ filename: state.databasePath, keyProvider: state.keyProvider });
+    expect((database.query("SELECT count(*) AS count FROM messages").get() as { count: number }).count).toBe(1);
+    expect(database.query("SELECT from_ts, to_ts, reason FROM sync_limits").all()).toEqual([{ from_ts: 10, to_ts: 100, reason: "unsupported" }]);
+    database.close();
+  });
+
+  test("serializes concurrent local Kakao backfills for the same stable chat", async () => {
+    const state = fixture();
+    const account = "stable:kakao_account_alpha";
+    const chat = { platform: "kakao", account, chat_id: "stable:kakao_chat_alpha" };
+    let active = 0;
+    let maxActive = 0;
+    const daemon = await createLocalKakaoDaemon({
+      socketPath: state.socketPath,
+      databasePath: state.databasePath,
+      keyProvider: state.keyProvider,
+      kakao: {
+        allowedChats: [{ account, chat_id: chat.chat_id }],
+        measurement: {
+          schema_version: "kakao-contrib-read-measurement/v1",
+          kind: "kakao-read-field-measurement",
+          status: "VALIDATED",
+          observation: "observed",
+          source: "authorized-live-measurement",
+          observed_at: 100,
+          send: false,
+          supported_read_fields: ["account_id", "chat_id", "message_id", "author_id", "ts", "body", "revision"],
+        },
+        max_measurement_age: 100,
+        now: () => 100,
+        reader: async () => {
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          await Bun.sleep(10);
+          active -= 1;
+          return [];
+        },
+      },
+    });
+    daemons.push(daemon);
+    const client = await connectJsonLines(state.socketPath);
+    await client.request("system.hello", { role: "reader" });
+    await Promise.all([
+      client.request("sync.backfill", { ...chat, from_ts: 10, to_ts: 90 }),
+      client.request("sync.backfill", { ...chat, from_ts: 10, to_ts: 90 }),
+    ]);
+    expect(maxActive).toBe(1);
+    client.close();
+  });
+
+  test("returns a fixed public Kakao error without exposing connector details over UDS", async () => {
+    const state = fixture();
+    const account = "stable:kakao_account_alpha";
+    const chat = { platform: "kakao", account, chat_id: "stable:kakao_chat_alpha" };
+    const daemon = await createLocalKakaoDaemon({
+      socketPath: state.socketPath,
+      databasePath: state.databasePath,
+      keyProvider: state.keyProvider,
+      kakao: {
+        allowedChats: [{ account, chat_id: chat.chat_id }],
+        measurement: {
+          schema_version: "kakao-contrib-read-measurement/v1",
+          kind: "kakao-read-field-measurement",
+          status: "VALIDATED",
+          observation: "observed",
+          source: "authorized-live-measurement",
+          observed_at: 100,
+          send: false,
+          supported_read_fields: ["account_id", "chat_id", "message_id", "author_id", "ts", "body"],
+        },
+        max_measurement_age: 100,
+        now: () => 100,
+        reader: async () => { throw new Error("private connector marker"); },
+      },
+    });
+    daemons.push(daemon);
+    const client = await connectJsonLines(state.socketPath);
+    await client.request("system.hello", { role: "reader" });
+    await expect(client.request("sync.backfill", { ...chat, from_ts: 10, to_ts: 90 }))
+      .rejects.toThrow("Kakao transport read failed");
+    await expect(client.request("sync.backfill", { ...chat, from_ts: 10, to_ts: 90 }))
+      .rejects.not.toThrow("private connector marker");
+    client.close();
   });
 });

@@ -15,7 +15,7 @@ import {
   truncateCells,
   type TuiState,
 } from "../src/index.ts";
-import { readTuiApproverToken } from "../src/main.ts";
+import { readTuiApproverToken, runTuiEntrypoint } from "../src/main.ts";
 
 const fixtures = {
   inbox: [
@@ -37,6 +37,18 @@ function readyState(): TuiState {
 }
 
 describe("five-screen operational model", () => {
+  test("the executable exits zero after a clean renderer teardown", async () => {
+    const exitCodes: number[] = [];
+
+    await runTuiEntrypoint({
+      run: async () => undefined,
+      exit: (code) => { exitCodes.push(code); },
+      report: () => { throw new Error("must not report an error"); },
+    });
+
+    expect(exitCodes).toEqual([0]);
+  });
+
   test("reads only the daemon owner-only approver token beside the socket", () => {
     const directory = mkdtempSync(join(tmpdir(), "inboxd-tui-token-"));
     try {

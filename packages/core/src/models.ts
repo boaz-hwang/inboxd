@@ -18,8 +18,9 @@ export interface AttachmentMeta {
 }
 
 export interface AdapterRevision {
-  readonly source: "adapter";
-  /** Opaque platform ordering token; never replace it with local receipt time. */
+  /** Observation means the platform exposes no trustworthy mutation ordering token. */
+  readonly source: "adapter" | "observation";
+  /** Opaque platform token, or the fixed marker for an unversioned observation. */
   readonly value: string | number;
 }
 
@@ -111,8 +112,11 @@ export function messageKey(value: unknown): MessageKey {
 
 export function adapterRevision(value: unknown): AdapterRevision {
   const input = object(value, "adapter revision");
-  if (input.source !== "adapter") {
-    throw new TypeError("adapter revision source must be 'adapter'");
+  if (input.source !== "adapter" && input.source !== "observation") {
+    throw new TypeError("adapter revision source must be 'adapter' or 'observation'");
+  }
+  if (input.source === "observation" && input.value !== "unversioned") {
+    throw new TypeError("observation revision value must be 'unversioned'");
   }
   if (
     (typeof input.value !== "string" || input.value.trim().length === 0)
@@ -120,7 +124,7 @@ export function adapterRevision(value: unknown): AdapterRevision {
   ) {
     throw new TypeError("adapter revision value must be a non-empty string or finite number");
   }
-  return { source: "adapter", value: input.value };
+  return { source: input.source, value: input.value } as AdapterRevision;
 }
 
 function attachment(value: unknown): AttachmentMeta {

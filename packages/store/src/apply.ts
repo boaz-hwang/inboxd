@@ -29,6 +29,9 @@ function revisionParts(revision: AdapterRevision): { kind: "number" | "string"; 
 }
 
 function compareRevision(stored: StoredMessage, incoming: AdapterRevision): number {
+  // A serialized revisionless reread is newer evidence for a live row, but it
+  // cannot prove that a privacy-preserving tombstone should be resurrected.
+  if (incoming.source === "observation") return stored.deleted_at === null ? 1 : -1;
   const next = revisionParts(incoming);
   if (stored.revision_kind !== next.kind) {
     throw new TypeError("adapter revision type changed for an existing message");

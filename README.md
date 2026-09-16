@@ -30,8 +30,9 @@ inboxd daemon (DB write · sync · outbox 실행 · 발송 토큰 · audit 독�
 핵심 기능 5개: `sync`, `search`, `inbox`, `safe-send`, `doctor/probe`.
 인터페이스는 CLI → **Slack TUI(첫 제품 마일스톤)** → MCP 순.
 먼저 Slack 제한 채팅의 수집부터 CLI 검색까지 검증하고 기능을 확장한다.
-전체 MVP는 카카오 읽기 통합과 Slack·카카오 실질문 10개 검증까지 포함한다.
-카카오 발송은 MVP 범위 밖이다.
+TypeScript MVP checkpoint는 카카오 wrapper 읽기 통합과 사용자가 확정한 Slack·카카오
+실질문 5개 분류를 포함한다. 카카오 기본 send adapter는 여전히 범위 밖이며, 별도 승인된
+self-chat controlled-send 1회는 safety 경계의 관측 증거로만 취급한다.
 상세는 `docs/03-proposal.md`, 빌드 순서는 `docs/06-architecture.md` §7.
 
 ## 현재 관측 상태 (2026-09-16)
@@ -39,17 +40,17 @@ inboxd daemon (DB write · sync · outbox 실행 · 발송 토큰 · audit 독�
 - Slack Spike A는 **PARTIAL**이다. 제한된 두 식별자에서 과거 89개 메시지를 읽은
   기록과 합성 fixture·성능 결과는 있으나, wrapper가 pagination metadata를 버려
   완전 이력·page 내부 중단 복구·authoritative coverage는 증명하지 못했다.
-- KakaoTalk·Telegram wrapper 확장은 **IMPLEMENTED_SYNTHETIC / LIVE_BLOCKED**다.
-  두 계정 모두 미설정이어서 live read를 하지 않았고, 이 결과는 원래 Kakao Spike B의
-  DB KDF·schema·AX 측정이나 제품 통합 증거가 아니다.
+- KakaoTalk wrapper 경로는 bootstrap 수정 뒤 bounded live read와 exact-bound 제품 통합을
+  관측했다. Telegram은 synthetic 상태다. 이 결과는 원래 Kakao Spike B의 DB KDF·schema·AX
+  측정 증거가 아니다.
 - SQLCipher store, 단일 daemon/UDS, coverage 동봉 search/inbox, protocol-only CLI,
-  approval/outbox safety, 5화면 OpenTUI, MCP 3개 도구는 로컬 통합 테스트로 구현·관측됐다.
-  `bun run test`는 146개 테스트를 통과한다. 이는 live Slack/Kakao/발송 증거가 아니다.
+  approval/outbox safety, 5화면 OpenTUI, MCP 도구는 로컬 통합 테스트로 구현·관측됐다.
+  자동 테스트와 live evidence는 별도 증거 축으로 유지한다.
 - Slack 제품 adapter는 wrapper 한계 때문에 degraded/incomplete coverage만 제공한다.
-  Kakao 제품 adapter는 원래 Spike B 측정이 통과하기 전 I/O를 거부하도록 구현돼 있으며,
-  따라서 Kakao 제품 활성화는 계속 **BLOCKED**다.
-- 10만 건·한국어 25개 fixture는 합성 검증을 통과했지만, 실제 사용자가 확인한 질문
-  10개 게이트는 provenance가 없어 **BLOCKED**다.
+  Kakao 제품 adapter는 승인된 wrapper measurement와 exact stable binding이 없으면 I/O를
+  거부한다. 원래 local DB/KDF/AX route 활성화는 계속 **BLOCKED**다.
+- 10만 건·한국어 25개 fixture는 합성 검증이다. 사용자 원문 질문 5개는 live 경계에서
+  모두 분류됐지만 retrieval PASS 1건, collection miss 1건, product gap 3건이다.
 
 ## 보호 범위 (정직하게)
 

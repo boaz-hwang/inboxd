@@ -1,0 +1,229 @@
+--- a/src/platforms/kakaotalk/client.ts
++++ b/src/platforms/kakaotalk/client.ts
+@@ -101,6 +101,7 @@
+ interface SessionState {
+   session: LocoSession
+   loginResult: LoginListResponse
++  needsChatListBootstrap: boolean
+ }
+ 
+ class MemberNameCache {
+@@ -959,7 +960,7 @@
+ 
+       this.nameCache.ingest((loginResult.chatDatas ?? []) as ChatData[])
+ 
+-      return { session, loginResult }
++      return { session, loginResult, needsChatListBootstrap: syncState !== undefined }
+     } catch (error) {
+       session.close()
+       const code = isLoginResponseError(error) ? error.code : 'login_failed'
+@@ -1025,20 +1026,29 @@
+   }
+ 
+   async getChats(options?: { all?: boolean; search?: string; resolveTitles?: boolean }): Promise<KakaoChat[]> {
+-    return this.executeWithReconnect(async ({ session, loginResult }) => {
++    return this.executeWithReconnect(async ({ session, loginResult, needsChatListBootstrap }) => {
+       try {
+         const allChats: ChatData[] = []
+         const seenChatIds = new Set<string>()
+ 
+-        collectChats((loginResult.chatDatas ?? []) as ChatData[], allChats, seenChatIds)
++        if (!needsChatListBootstrap) {
++          collectChats((loginResult.chatDatas ?? []) as ChatData[], allChats, seenChatIds)
++        }
+ 
+         // Paginate via LCHATLIST when explicitly requested (--all / --search) OR when
+         // the login snapshot is empty. New device registrations often return an empty
+         // chatDatas with eof=true because the server has no prior sync state for the
+         // device — LCHATLIST fetches the canonical chat list regardless of device history.
+         const snapshotEmpty = allChats.length === 0
+-        if (options?.all || options?.search || snapshotEmpty) {
+-          let cursor: ChatListResponse = loginResult
++        if (options?.all || options?.search || snapshotEmpty || needsChatListBootstrap) {
++          let cursor: ChatListResponse = needsChatListBootstrap
++            ? {
++                chatDatas: [],
++                lastTokenId: toLongLike(0),
++                lastChatId: toLongLike(0),
++                eof: false,
++              }
++            : loginResult
+           let pages = 0
+           const requireCompleteList = options?.all === true
+ 
+--- a/src/platforms/kakaotalk/client.test.ts
++++ b/src/platforms/kakaotalk/client.test.ts
+@@ -1,4 +1,7 @@
+-import { afterEach, beforeEach, describe, expect, mock, it } from 'bun:test'
++import { afterAll, afterEach, beforeEach, describe, expect, mock, it } from 'bun:test'
++import { mkdtemp, rm } from 'node:fs/promises'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
+ 
+ import { KakaoTalkClient, KakaoTalkError } from './client'
+ 
+@@ -116,8 +119,12 @@
+   eof: true,
+ }
+ 
++const ORIGINAL_CONFIG_DIR = process.env.AGENT_MESSENGER_CONFIG_DIR
++const TEST_CONFIG_DIR = await mkdtemp(join(tmpdir(), 'agent-kakao-client-suite-'))
+ describe('KakaoTalkClient', () => {
+-  beforeEach(() => {
++  beforeEach(async () => {
++    process.env.AGENT_MESSENGER_CONFIG_DIR = TEST_CONFIG_DIR
++    await rm(TEST_CONFIG_DIR, { recursive: true, force: true })
+     resetAllMocks()
+     // Deep-clone so tests that mutate loginResult.chatDatas (e.g. leaveChat)
+     // don't leak into subsequent tests.
+@@ -130,6 +137,12 @@
+   afterEach(() => {
+     expect(mockGetChatInfo).not.toHaveBeenCalled()
+     resetAllMocks()
++  })
++
++  afterAll(async () => {
++    if (ORIGINAL_CONFIG_DIR === undefined) delete process.env.AGENT_MESSENGER_CONFIG_DIR
++    else process.env.AGENT_MESSENGER_CONFIG_DIR = ORIGINAL_CONFIG_DIR
++    await rm(TEST_CONFIG_DIR, { recursive: true, force: true })
+   })
+ 
+   describe('constructor', () => {
+@@ -580,6 +593,99 @@
+       client.close()
+     })
+ 
++    it('rebuilds the complete chat list when a fresh client receives an incremental login delta', async () => {
++      const previousConfigDir = process.env.AGENT_MESSENGER_CONFIG_DIR
++      const configDir = await mkdtemp(join(tmpdir(), 'agent-kakao-sync-bootstrap-'))
++      process.env.AGENT_MESSENGER_CONFIG_DIR = configDir
++      try {
++        const fullSnapshot = {
++          ...structuredClone(DEFAULT_LOGIN_RESULT),
++          revision: 7,
++          lastTokenId: makeLong(900),
++          lastChatId: makeLong(200),
++          lbk: 0,
++        }
++        const incrementalSnapshot = { ...fullSnapshot, chatDatas: [], eof: true }
++        mockLogin.mockResolvedValueOnce(fullSnapshot).mockResolvedValueOnce(incrementalSnapshot)
++        mockGetChatList.mockImplementation(async (lastTokenId, lastChatId) => ({
++          statusCode: 0,
++          body: {
++            ...fullSnapshot,
++            status: 0,
++            chatDatas:
++              lastTokenId.toString() === '0' && lastChatId.toString() === '0'
++                ? structuredClone(DEFAULT_LOGIN_RESULT.chatDatas)
++                : [],
++          },
++        }))
++        const credentials = { oauthToken: 'token', userId: 'user1', deviceUuid: 'incremental-device' }
++
++        const first = await new KakaoTalkClient().login(credentials)
++        const firstChats = await first.getChats({ all: true })
++        first.close()
++        const second = await new KakaoTalkClient().login(credentials)
++        const secondChats = await second.getChats({ all: true })
++        second.close()
++
++        expect(secondChats.map((chat) => chat.chat_id).sort()).toEqual(
++          firstChats.map((chat) => chat.chat_id).sort(),
++        )
++        expect(mockGetChatList).toHaveBeenCalledTimes(1)
++        const [lastTokenId, lastChatId] = mockGetChatList.mock.calls[0]
++        expect([lastTokenId.toString(), lastChatId.toString()]).toEqual(['0', '0'])
++      } finally {
++        if (previousConfigDir === undefined) delete process.env.AGENT_MESSENGER_CONFIG_DIR
++        else process.env.AGENT_MESSENGER_CONFIG_DIR = previousConfigDir
++        await rm(configDir, { recursive: true, force: true })
++      }
++    })
++
++    it('does not treat a non-empty incremental login delta as the complete chat list', async () => {
++      const previousConfigDir = process.env.AGENT_MESSENGER_CONFIG_DIR
++      const configDir = await mkdtemp(join(tmpdir(), 'agent-kakao-partial-bootstrap-'))
++      process.env.AGENT_MESSENGER_CONFIG_DIR = configDir
++      try {
++        const fullSnapshot = {
++          ...structuredClone(DEFAULT_LOGIN_RESULT),
++          revision: 7,
++          lastTokenId: makeLong(900),
++          lastChatId: makeLong(200),
++          lbk: 0,
++        }
++        const changedChat = { ...structuredClone(DEFAULT_LOGIN_RESULT.chatDatas[0]), n: 9 }
++        mockLogin
++          .mockResolvedValueOnce(fullSnapshot)
++          .mockResolvedValueOnce({ ...fullSnapshot, chatDatas: [changedChat], eof: true })
++        mockGetChatList.mockImplementation(async (lastTokenId, lastChatId) => ({
++          statusCode: 0,
++          body: {
++            ...fullSnapshot,
++            status: 0,
++            chatDatas:
++              lastTokenId.toString() === '0' && lastChatId.toString() === '0'
++                ? structuredClone(DEFAULT_LOGIN_RESULT.chatDatas)
++                : [],
++          },
++        }))
++        const credentials = { oauthToken: 'token', userId: 'user1', deviceUuid: 'partial-device' }
++
++        const first = await new KakaoTalkClient().login(credentials)
++        await first.getChats({ all: true })
++        first.close()
++        const second = await new KakaoTalkClient().login(credentials)
++        const chats = await second.getChats({ all: true })
++        second.close()
++
++        expect(chats.map((chat) => chat.chat_id).sort()).toEqual(['100', '200'])
++        const [lastTokenId, lastChatId] = mockGetChatList.mock.calls[0]
++        expect([lastTokenId.toString(), lastChatId.toString()]).toEqual(['0', '0'])
++      } finally {
++        if (previousConfigDir === undefined) delete process.env.AGENT_MESSENGER_CONFIG_DIR
++        else process.env.AGENT_MESSENGER_CONFIG_DIR = previousConfigDir
++        await rm(configDir, { recursive: true, force: true })
++      }
++    })
++
+     it('does not call LCHATLIST when login snapshot has chats', async () => {
+       const client = await new KakaoTalkClient().login({ oauthToken: 'token', userId: 'user1', deviceUuid: 'device1' })
+       await client.getChats()
+--- a/dist/src/platforms/kakaotalk/client.js
++++ b/dist/src/platforms/kakaotalk/client.js
+@@ -751,7 +751,7 @@
+             const newSyncState = mergeSyncState(syncState, loginResult);
+             await saveSyncState(this.deviceUuid, newSyncState);
+             this.nameCache.ingest((loginResult.chatDatas ?? []));
+-            return { session, loginResult };
++            return { session, loginResult, needsChatListBootstrap: syncState !== undefined };
+         }
+         catch (error) {
+             session.close();
+@@ -816,18 +816,22 @@
+         }
+     }
+     async getChats(options) {
+-        return this.executeWithReconnect(async ({ session, loginResult }) => {
++        return this.executeWithReconnect(async ({ session, loginResult, needsChatListBootstrap }) => {
+             try {
+                 const allChats = [];
+                 const seenChatIds = new Set();
+-                collectChats((loginResult.chatDatas ?? []), allChats, seenChatIds);
++                if (!needsChatListBootstrap) {
++                    collectChats((loginResult.chatDatas ?? []), allChats, seenChatIds);
++                }
+                 // Paginate via LCHATLIST when explicitly requested (--all / --search) OR when
+                 // the login snapshot is empty. New device registrations often return an empty
+                 // chatDatas with eof=true because the server has no prior sync state for the
+                 // device — LCHATLIST fetches the canonical chat list regardless of device history.
+                 const snapshotEmpty = allChats.length === 0;
+-                if (options?.all || options?.search || snapshotEmpty) {
+-                    let cursor = loginResult;
++                if (options?.all || options?.search || snapshotEmpty || needsChatListBootstrap) {
++                    let cursor = needsChatListBootstrap
++                        ? { lastTokenId: Long.ZERO, lastChatId: Long.ZERO, eof: false }
++                        : loginResult;
+                     let pages = 0;
+                     const requireCompleteList = options?.all === true;
+                     while (pages < MAX_PAGES) {

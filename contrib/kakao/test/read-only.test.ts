@@ -90,7 +90,7 @@ describe("measurement-gated Kakao read adapter", () => {
       fetch_historical: true,
       send: false,
       watch: false,
-      revision: "adapter",
+      revision: "none",
       read_cursor_comparison: "none",
     });
     expect(adapter.read_limits).toEqual({
@@ -136,12 +136,12 @@ describe("measurement-gated Kakao read adapter", () => {
       {
         kind: "create",
         message: { key: { platform: "kakao", account, chat_id: chat.chat_id, msg_id: "m-in-range" }, ts: 20 },
-        revision: { source: "adapter", value: 21 },
+        revision: { source: "observation", value: "unversioned" },
       },
       {
         kind: "create",
         message: { key: { platform: "kakao", account, chat_id: chat.chat_id, msg_id: "m-before-upper-bound" }, ts: 999 },
-        revision: { source: "adapter", value: 999 },
+        revision: { source: "observation", value: "unversioned" },
       },
     ]);
     expect(result.events).toHaveLength(2);

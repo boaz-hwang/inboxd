@@ -70,7 +70,6 @@ const REQUIRED_READ_FIELDS: readonly KakaoSupportedReadField[] = [
   "author_id",
   "ts",
   "body",
-  "revision",
 ];
 
 const capabilities: GatewayCapabilities = {
@@ -78,7 +77,7 @@ const capabilities: GatewayCapabilities = {
   fetch_historical: true,
   send: false,
   watch: false,
-  revision: "adapter",
+  revision: "none",
   read_cursor_comparison: "none",
 };
 
@@ -153,13 +152,6 @@ function numberField(input: Record<string, unknown>, field: string): number | nu
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-function revisionField(input: Record<string, unknown>): string | number | null {
-  const value = input.revision;
-  return (typeof value === "number" && Number.isFinite(value)) || (typeof value === "string" && value.trim().length > 0)
-    ? value
-    : null;
-}
-
 function normalizeKakaoFixtureEvent(raw: unknown, chat: ChatKey): NormalizedMessageEvent | null {
   if (!isRecord(raw)) return null;
   const account_id = stringField(raw, "account_id");
@@ -168,7 +160,6 @@ function normalizeKakaoFixtureEvent(raw: unknown, chat: ChatKey): NormalizedMess
   const author_id = stringField(raw, "author_id");
   const ts = numberField(raw, "ts");
   const body = stringField(raw, "body");
-  const revision = revisionField(raw);
   if (
     account_id !== chat.account
     || chat_id !== chat.chat_id
@@ -176,7 +167,6 @@ function normalizeKakaoFixtureEvent(raw: unknown, chat: ChatKey): NormalizedMess
     || author_id === null
     || ts === null
     || body === null
-    || revision === null
   ) {
     return null;
   }
@@ -189,7 +179,7 @@ function normalizeKakaoFixtureEvent(raw: unknown, chat: ChatKey): NormalizedMess
       body,
       attachments: [],
     },
-    revision: { source: "adapter", value: revision },
+    revision: { source: "observation", value: "unversioned" },
   });
 }
 
@@ -226,13 +216,18 @@ export function createKakaoReadAdapter(options: KakaoReadAdapterOptions): KakaoR
       assertAllowedChat(request.chat, allowlist);
       if (request.cursor !== undefined) throw new Error("Kakao read denied: cursor resume is not measured");
       const interval = assertInvocationInterval(request.interval, upperBound);
-      const rawEvents = await options.reader({
-        account: request.chat.account,
-        chat_id: request.chat.chat_id,
-        interval,
-        upper_bound_ts: upperBound,
-        max_pages: read_limits.max_pages,
-      });
+      let rawEvents: readonly unknown[];
+      try {
+        rawEvents = await options.reader({
+          account: request.chat.account,
+          chat_id: request.chat.chat_id,
+          interval,
+          upper_bound_ts: upperBound,
+          max_pages: read_limits.max_pages,
+        });
+      } catch {
+        throw new Error("Kakao transport read failed");
+      }
       const events = rawEvents
         .map((raw) => normalizeKakaoFixtureEvent(raw, request.chat))
         .filter((event): event is NormalizedMessageEvent => event !== null)

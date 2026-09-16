@@ -8,6 +8,7 @@ import { daemonStateDirectory, removeStaleSocket } from "./lifecycle.ts";
 import { recoverInterruptedSends } from "./recovery.ts";
 import { createDaemonServer, type DaemonServer, type DaemonServerOptions, type TrustedApproverSessionAuthorizer } from "./server.ts";
 import { ensureLocalApproverToken, matchesLocalApproverToken } from "./approver-token.ts";
+import { createLocalKakaoBackfill, type LocalKakaoBackfillConfig } from "./local-kakao.ts";
 import { createLocalSlackBackfill, type LocalSlackBackfillConfig } from "./local-slack.ts";
 
 export interface DaemonOptions {
@@ -27,6 +28,8 @@ export interface DaemonOptions {
   readonly backfill?: DaemonServerOptions["backfill"];
   /** Explicit non-live Slack read composition; a runner and exact stable allowlist are mandatory. */
   readonly localSlack?: LocalSlackBackfillConfig;
+  /** Explicit measured Kakao read composition; evidence, reader, and exact stable allowlist are mandatory. */
+  readonly localKakao?: LocalKakaoBackfillConfig;
   readonly startSync?: () => void | Promise<void>;
   readonly startPlatform?: () => void | Promise<void>;
   readonly startCredentials?: () => void | Promise<void>;
@@ -62,6 +65,9 @@ function assertConfiguredSendQuotas(options: DaemonOptions): void {
       throw new TypeError(`send-capable daemon requires an explicitly configured finite positive ${name} quota`);
     }
   }
+  if (options.allowSend === undefined) {
+    throw new TypeError("send-capable daemon requires an explicit allowlist policy");
+  }
 }
 
 /** The only composition root that opens the encrypted store and starts external owners. */
@@ -71,7 +77,8 @@ export async function composeDaemon(options: DaemonOptions): Promise<DaemonContr
   let database: Database | undefined;
   let server: DaemonServer | undefined;
   try {
-    if (options.backfill !== undefined && options.localSlack !== undefined) throw new TypeError("configure either backfill or localSlack, not both");
+    const configuredBackfills = [options.backfill, options.localSlack, options.localKakao].filter((value) => value !== undefined);
+    if (configuredBackfills.length > 1) throw new TypeError("configure only one of backfill, localSlack, or localKakao");
     lock = acquireSingleInstanceLock(daemonStateDirectory(options.socketPath));
     const localApproverToken = ensureLocalApproverToken(options.socketPath);
     database = openOwnedStore(options);
@@ -84,7 +91,12 @@ export async function composeDaemon(options: DaemonOptions): Promise<DaemonContr
       transportTimeoutMs: options.transportTimeoutMs,
       allowSend: options.allowSend,
     });
-    const backfill = options.backfill ?? (options.localSlack === undefined ? undefined : createLocalSlackBackfill(database, options.localSlack));
+    const backfill = options.backfill
+      ?? (options.localSlack !== undefined
+        ? createLocalSlackBackfill(database, options.localSlack)
+        : options.localKakao === undefined
+          ? undefined
+          : createLocalKakaoBackfill(database, options.localKakao));
     const authorizeApprover = options.isTrustedApproverSession ?? ((session) => matchesLocalApproverToken(localApproverToken, session.approverToken));
     server = createDaemonServer(database, options.maxQueuedEvents, { safety, isTrustedApproverSession: authorizeApprover, backfill });
     await server.listen(options.socketPath);

@@ -34,9 +34,10 @@
 
 ## 아키텍처
 
-아래는 **목표 계약**이며 현재 구현·운영 증거가 아니다. 2026-09-16 현재 Slack
-wrapper Spike A는 PARTIAL이고, SQLCipher·daemon·제품 CLI/TUI/MCP·safe-send는 아직
-이 계약을 통과하지 않았다.
+아래는 **목표 계약**이다. 2026-09-16 현재 SQLCipher·daemon·제품 CLI/TUI/MCP·safe-send
+상태기계는 local gate를 통과했고 bounded Slack/Kakao read, OpenTUI, controlled Kakao
+self-send를 별도 live evidence로 관측했다. Slack complete history·429 recovery·Slack send,
+원래 Kakao DB/KDF/AX route와 retrieval product gaps는 여전히 미검증 또는 미해결이다.
 
 ```text
 ┌──────────── inboxd daemon (DB write·sync·outbox 실행·발송 토큰·audit 독점) ────────────┐
@@ -84,10 +85,12 @@ Unix domain socket 클라이언트다. 클라이언트는 DB 파일을 열지 �
    `Proposed→Approved→Sending→Verified|Uncertain|Failed`와 claim 원자성은 06-architecture §3.3.
 4. **이벤트 적용 순서.** 메시지 식별 키는 `(platform, account, chat_id, msg_id)`.
    어댑터가 주는 `revision`으로 순서를 정하고 수신 시각으로 대체하지 않는다.
-   tombstone은 create/edit보다 우선하며, 낮은 revision은 무시, 같은 revision은 no-op.
+   tombstone은 create/edit보다 우선하며, genuine adapter revision에서는 낮은 revision을
+   무시하고 같은 revision을 no-op으로 처리한다.
    생성보다 삭제가 먼저 와도 식별 키만으로 tombstone을 남긴다. revision을 못 주는
-   어댑터는 capability에 `revision: none`을 선언한다. 채팅별 재조회를 직렬화하고
-   확인된 범위만 적용하며, 부분 조회의 부재를 삭제로 추론하지 않는다.
+   어댑터는 capability에 `revision: none`을 선언한다. 채팅별 read→apply 전체를 직렬화하고,
+   후속 unversioned observation은 live 행을 교체하되 tombstone을 되살리지 않는다. 확인된
+   범위만 적용하며 부분 조회의 부재를 삭제로 추론하지 않는다.
    상세와 검증 케이스는 06-architecture §3.1.
 
 ## 데이터 모델 (v2 — inbox를 뒷받침하는 최소 집합)
@@ -233,7 +236,8 @@ fake transport가 못 보므로 ② 없이 "검증됨"이라 쓰지 않는다.
   메시지 예시를 먼저 만들고, 조사·짧은 단어·띄어쓰기·영문 혼용 최소 기준을 정한다.
 - 엔진 고도화는 fixture 통과율로 판단한다. 기준 없이 튜닝하지 않는다.
 - 현재 anonymous synthetic fixture는 hybrid 검색으로 25/25를 통과했다. 이는 엔지니어링
-  회귀 증거일 뿐 실제 사용자 질문 품질 증거가 아니며, 실질문 10개 게이트는 BLOCKED다.
+  회귀 증거다. 별도로 사용자 원문 5개를 live MVP 경계에서 분류했고 retrieval PASS 1건,
+  collection miss 1건, product gap 3건을 관측했으므로 검색 품질 전체 통과를 뜻하지 않는다.
 
 ## ToS·법적 위험 (공학이 아니라 소유권 문제)
 

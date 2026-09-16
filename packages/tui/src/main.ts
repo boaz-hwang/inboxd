@@ -14,6 +14,12 @@ export interface RunTuiOptions {
   readonly role?: Extract<ClientRole, "reader" | "approver">;
 }
 
+export interface RunTuiEntrypointOptions {
+  readonly run: () => Promise<void>;
+  readonly exit: (code: number) => unknown;
+  readonly report: (message: string) => unknown;
+}
+
 /** Reads the daemon's owner-only local approver token without importing daemon internals. */
 export function readTuiApproverToken(socketPath: string): string {
   const path = join(dirname(socketPath), "approver.token");
@@ -64,9 +70,21 @@ export async function runTui(options: RunTuiOptions = {}): Promise<void> {
   }
 }
 
+/** Converts renderer completion into an explicit executable exit status. */
+export async function runTuiEntrypoint(options: RunTuiEntrypointOptions = {
+  run: () => runTui(),
+  exit: (code) => process.exit(code),
+  report: (message) => console.error(message),
+}): Promise<void> {
+  try {
+    await options.run();
+    options.exit(0);
+  } catch (error) {
+    options.report(error instanceof Error ? `inboxd-tui: ${error.message}` : "inboxd-tui: failed to start");
+    options.exit(1);
+  }
+}
+
 if (import.meta.main) {
-  void runTui().catch((error) => {
-    console.error(error instanceof Error ? `inboxd-tui: ${error.message}` : "inboxd-tui: failed to start");
-    process.exitCode = 1;
-  });
+  void runTuiEntrypoint();
 }

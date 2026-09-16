@@ -24,6 +24,34 @@ describe("revisioned event application", () => {
     expect(searchMessages(value.database, { chat: value.chat, interval: { from_ts: 0, to_ts: 200 }, query: "edited" }).messages).toHaveLength(1);
   });
 
+  test("replaces a live message on a serialized revisionless observation without resurrecting tombstones", () => {
+    const value = fixture();
+    const observation = (body: string) => ({
+      kind: "create" as const,
+      message: {
+        key: { ...value.chat, msg_id: "revisionless" },
+        author_id: "author",
+        ts: 100,
+        body,
+        attachments: [],
+      },
+      revision: { source: "observation" as const, value: "unversioned" as const },
+    });
+    applySyncBatch(value.database, { events: [observation("first")] });
+    applySyncBatch(value.database, { events: [observation("fresh")] });
+    expect(getMessage(value.database, { ...value.chat, msg_id: "revisionless" })).toMatchObject({ body: "fresh", deleted_at: null });
+
+    applySyncBatch(value.database, { events: [
+      event(value.chat, "create", 1, "deleted", "visible"),
+      event(value.chat, "delete", 2, "deleted"),
+    ] });
+    applySyncBatch(value.database, { events: [{
+      ...observation("must not resurrect"),
+      message: { ...observation("must not resurrect").message, key: { ...value.chat, msg_id: "deleted" } },
+    }] });
+    expect(getMessage(value.database, { ...value.chat, msg_id: "deleted" })).toMatchObject({ body: null, deleted_at: 102 });
+  });
+
   test("keeps a tombstone when create is replayed after deletion or arrives after delete", () => {
     const value = fixture();
     applySyncBatch(value.database, { events: [event(value.chat, "create", 1, "replay", "visible"), event(value.chat, "delete", 2, "replay")] });

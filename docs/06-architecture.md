@@ -95,7 +95,7 @@ packages/
 platforms/
   slack/      wrapper-first 어댑터 (Spike A)
 contrib/
-  kakao/      Spike B 검증 후 제품에 연결하는 읽기 전용 어댑터. 개인 사용 면책
+  kakao/      route별 측정 후 제품에 연결하는 읽기 전용 어댑터. 개인 사용 면책
 spikes/
   0-encryption/  1-...                      스파이크 산출물(manifest, 측정치)
 fixtures/
@@ -113,15 +113,17 @@ fixtures/
 ### 3.1 식별과 적용 순서 (#5)
 
 - 메시지 식별 키: `(platform, account, chat_id, msg_id)`. 이 밖의 키로 upsert하지 않는다.
-- 어댑터는 이벤트마다 `revision`을 제공한다. Slack은 `edited.ts`(없으면 원본 `ts`),
+- genuine revision을 제공하는 어댑터는 이벤트마다 `revision`을 제공한다. Slack은 `edited.ts`(없으면 원본 `ts`),
   삭제 이벤트는 `deleted_at`. revision을 못 주는 어댑터(카카오 DB 폴링)는 capability에
   `revision: none`을 선언한다. 해당 채팅의 재조회는 직렬화하고, 완전하게 읽었다고
-  확인한 범위만 적용한다. 부분 조회에서 보이지 않는 메시지를 삭제로 추론하지 않는다.
+  확인한 범위만 적용한다. 후속 unversioned observation은 live 행을 교체하되 tombstone을
+  되살리지 않는다. 부분 조회에서 보이지 않는 메시지를 삭제로 추론하지 않는다.
   읽기 일관성이나 변경 확인이 불가능하면 `mutations_verified_at`은 미확인으로 남긴다.
   수신 시각으로 원본 변경 순서를 대체하지 않는다.
 - 적용 규칙:
   1. tombstone(`deleted_at` 있음)은 어떤 create/edit보다 우선한다. create가 나중에 와도 되살리지 않는다.
-  2. 같은 키에 낮은 revision이 오면 무시한다. 같은 revision은 멱등(no-op).
+  2. genuine adapter revision은 같은 키의 낮은 revision을 무시하고 같은 revision은 멱등(no-op)이다.
+     `revision: none`의 직렬화된 후속 observation은 live 행만 교체한다.
   3. 생성보다 삭제가 먼저 오면 식별 키만으로 tombstone 행을 만든다(body null).
   4. 채택된 상태와 FTS 갱신은 같은 트랜잭션.
 - 검증 fixture: 동일 이벤트 반복 / 수정 뒤 오래된 백필 / 삭제 뒤 create 재생 /
@@ -304,25 +306,28 @@ wrong/no-key·일반 SQLite 거부를 관측했다. production은 고정 Cellar 
 | 3 | safety + CLI approve | §3.3 상태기계, 바인딩·quota·allowlist·audit, TTY 게이트 | 승인 우회 거부, 동시 claim, 정책 변경, quota 경쟁, 종료 주입과 Uncertain 복구 |
 | 4 | **Slack TUI 마일스톤** | §5 화면 5개 | coverage 표기, 실제 승인 발송, Uncertain 표시, 재연결 후 상태 일치, 초안 평문 저장 없음 |
 | 5 | MCP | propose/search/inbox | 기존 API를 통해 동작, code 미수신·승인 불가. 승인 경계를 약화하지 않음 |
-| B | Spike B 카카오 측정 | `spikes/B/manifest.json`, 읽기 가능 범위·변경 감지·제약 | 1~2와 병행 가능. 아키텍처 증명과 분리 |
-| 6 | 카카오 읽기 제품 통합 | B 결과를 반영한 `contrib/kakao → sync → store → API → TUI`, `send: false` | 허용 채팅 수집·재개, 누락·변경 미확인 표시, Slack·카카오 실질문 10개 대조 |
+| B | route별 카카오 측정 | wrapper와 local DB/KDF/AX 각각의 읽기 가능 범위·변경 감지·제약 | 1~2와 병행 가능. 각 측정은 해당 route만 gate하며 아키텍처 증명과 분리 |
+| 6 | 카카오 읽기 제품 통합 | 승인된 wrapper 측정을 반영한 `contrib/kakao → sync → store → API → TUI`, `send: false` | 허용 채팅 bounded 수집, 누락·변경 미확인 표시, Slack·카카오 사용자 원문 5개 분류 |
 
-4번은 Slack 기반 제품 마일스톤이며 전체 MVP 완료가 아니다. 6번은 B와 읽기 계약
-검증 이후 진행하며, 독립적인 어댑터 작업은 TUI/MCP 작업과 병행할 수 있다.
+4번은 Slack 기반 제품 마일스톤이며 전체 MVP 완료가 아니다. 6번 wrapper 통합은 승인된
+wrapper 측정과 읽기 계약 검증 이후 진행한다. 원래 DB/KDF/AX 측정은 별도 local DB/AX
+route만 gate한다. 독립적인 어댑터 작업은 TUI/MCP 작업과 병행할 수 있다.
 전체 MVP는 MCP와 카카오 통합을 포함해 04-roadmap의 모든 완료 기준을 충족해야 한다.
-카카오 측정이 실패하면 Slack TUI 성과는 유지하되 전체 MVP는 미완료로 기록한다.
+선택한 카카오 route의 측정이 실패하면 해당 route를 활성화하지 않는다. 다른 route의
+측정 증거로 대체하지 않으며 Slack TUI 성과는 유지한다.
 MCP는 core·store·safety 재작성 없이 붙이는 것을 목표로 한다. 부족한 API 계약은
 실제 요구에 맞게 보완하고 모든 클라이언트의 호환성을 검증한다.
 
 ### 현재 단계 판정 (2026-09-16)
 
 - 0: PASS_LOCAL — provenance-checked SQLCipher 재개방 gate 통과.
-- 1–5: IMPLEMENTED_LOCAL — store·daemon API·CLI·safe-send state machine·5화면 OpenTUI·MCP,
-  bounded pagination/read audit/UDS 0600 포함. 146개 자동 테스트 통과; live platform 증거는 아님.
-- 6: IMPLEMENTED_SYNTHETIC / LIVE_BLOCKED — Kakao 측정 PASS 전 adapter I/O 거부.
-- B: BLOCKED_SAFE_HARNESS — 별도 KakaoTalk·Telegram wrapper 합성 확장은 B나 6의 live 증거가 아니다.
+- 1–5: IMPLEMENTED_LOCAL / BOUNDED_LIVE_SMOKE — store·daemon API·CLI·safe-send state machine·
+  5화면 OpenTUI·MCP, bounded pagination/read audit/UDS 0600 포함. 자동 gate와 live 관측은 분리한다.
+- 6: WRAPPER_LIVE_READ_OBSERVED — exact-bound wrapper read를 sync/store/API/TUI/MCP까지 관측;
+  revision은 `none`, same-chat reread는 직렬화하며 authoritative history는 주장하지 않는다.
+- B: ORIGINAL_DB_AX_BLOCKED — local DB/KDF/schema/AX route는 미측정이며 wrapper 경로 증거로 대체하지 않는다.
 
 ## 8. 이 문서가 바꾸지 않는 것
 
 03-proposal의 철학·핵심 기능 5개·UnifiedMessage v2·safe-send 정책·보존 정책 OPEN·
-ToS 격리·언어 선택. 04-roadmap의 소유 범위 게이트·Spike A/B 목적·실질문 10개 게이트.
+ToS 격리·언어 선택. 04-roadmap의 소유 범위 게이트·Spike A/B 목적·사용자 원문 5개 게이트.
