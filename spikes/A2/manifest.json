@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "slack-wrapper-spike-a2/v1",
+  "kind": "slack-wrapper-read",
+  "status": "BLOCKED",
+  "observation": "not_observed",
+  "send": false,
+  "scope": { "mode": "fixture-only", "approved_ids": "redacted" },
+  "redaction": { "bodies": "redacted", "secrets": "redacted", "identifiers": "redacted" },
+  "result": "not_observed"
+}

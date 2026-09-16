@@ -1,0 +1,7 @@
+[
+  { "channel_id": "stable:chat_alpha", "message_id": "m-in-range", "author_id": "stable:user_alpha", "ts": 20, "body": "fixture message one", "edited_ts": 21 },
+  { "channel_id": "stable:chat_alpha", "message_id": "m-before-upper-bound", "author_id": "stable:user_beta", "ts": 99, "body": "fixture message two" },
+  { "channel_id": "stable:chat_alpha", "message_id": "m-at-upper-bound", "author_id": "stable:user_gamma", "ts": 100, "body": "must be filtered" },
+  { "channel_id": "stable:chat_alpha", "message_id": "m-before-interval", "author_id": "stable:user_delta", "ts": 9, "body": "must be filtered" },
+  { "channel_id": "stable:other_chat", "message_id": "m-other-chat", "author_id": "stable:user_epsilon", "ts": 50, "body": "must be filtered" }
+]
