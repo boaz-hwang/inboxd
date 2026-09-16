@@ -145,6 +145,41 @@ function metadata(intentId: string, payload: IntentPayload): Record<string, unkn
   return { intent_id: intentId, actor: payload.actor, scope: payload.scope, payload_hash: payload.payload_hash, expires_at: payload.expires_at };
 }
 
+const defaultPendingPageLimit = 50;
+const maximumPendingPageLimit = 100;
+const pendingCursorScope = "safety.intent.listPending:v1";
+interface PendingCursor { readonly v: 1; readonly scope: string; readonly created_at: number; readonly id: string; }
+export interface PendingIntentPageInput { readonly limit?: number; readonly cursor?: string; }
+export interface PendingIntentPage { readonly intents: readonly PendingIntent[]; readonly next_cursor?: string; }
+
+function pendingPageLimit(value: number | undefined): number {
+  if (value === undefined) return defaultPendingPageLimit;
+  if (!Number.isSafeInteger(value) || value < 1 || value > maximumPendingPageLimit) {
+    throw new Error(`limit must be an integer from 1 to ${maximumPendingPageLimit}`);
+  }
+  return value;
+}
+
+function encodePendingCursor(row: { readonly created_at: number; readonly id: string }): string {
+  return Buffer.from(JSON.stringify({ v: 1, scope: pendingCursorScope, created_at: row.created_at, id: row.id } satisfies PendingCursor)).toString("base64url");
+}
+
+function decodePendingCursor(value: string | undefined): PendingCursor | undefined {
+  if (value === undefined) return undefined;
+  if (value.length === 0 || value.length > 4_096 || !/^[A-Za-z0-9_-]+$/.test(value)) throw new Error("cursor is malformed");
+  let decoded: unknown;
+  try { decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8")); } catch { throw new Error("cursor is malformed"); }
+  if (decoded === null || typeof decoded !== "object" || Array.isArray(decoded)) throw new Error("cursor is malformed");
+  const cursor = decoded as Partial<PendingCursor>;
+  const createdAt = cursor.created_at;
+  const id = cursor.id;
+  if (cursor.v !== 1 || cursor.scope !== pendingCursorScope || typeof createdAt !== "number" || !Number.isFinite(createdAt) || typeof id !== "string" || id.length === 0) {
+    throw new Error("cursor does not match pending intents");
+  }
+  if (encodePendingCursor({ created_at: createdAt, id }) !== value) throw new Error("cursor is malformed");
+  return { v: 1, scope: pendingCursorScope, created_at: createdAt, id };
+}
+
 /**
  * SQLCipher protects persistent proposal contents and approval codes. Audit records intentionally
  * retain only identifiers, scope, hashes, and timestamps: never a message body or raw code.
@@ -295,17 +330,32 @@ export function createSafetyService(database: Database, options: SafetyOptions =
       return { intent_id: intentId, expires_at: expiresAt };
     },
 
+    /** Legacy in-process convenience surface; protocol consumers use listPendingPage. */
     listPending(): readonly PendingIntent[] {
-      const rows = database.query("SELECT id, payload_json FROM intents ORDER BY created_at, id").all() as { id: string; payload_json: string }[];
-      return rows.flatMap((row) => {
+      return this.listPendingPage().intents;
+    },
+
+    /** A bounded stable page over the actionable/uncertain state set. */
+    listPendingPage(input: PendingIntentPageInput = {}): PendingIntentPage {
+      const limit = pendingPageLimit(input.limit);
+      const cursor = decodePendingCursor(input.cursor);
+      const cursorWhere = cursor === undefined ? "" : " AND (created_at > ? OR (created_at = ? AND id > ?))";
+      const rows = database.query(`SELECT id, created_at, payload_json FROM intents
+        WHERE json_extract(payload_json, '$.state') IN ('Proposed', 'Approved', 'Sending', 'Uncertain')${cursorWhere}
+        ORDER BY created_at, id LIMIT ?`).all(...(cursor === undefined ? [] : [cursor.created_at, cursor.created_at, cursor.id]), limit + 1) as { id: string; created_at: number; payload_json: string }[];
+      const page = rows.slice(0, limit).flatMap((row) => {
         const payload = expireIfNecessary(row.id, decode<IntentPayload>(row.payload_json));
         if (payload.state !== "Proposed" && payload.state !== "Approved" && payload.state !== "Sending" && payload.state !== "Uncertain") return [];
         const summary = proposedSummary(row.id, payload);
         if (payload.state === "Sending" || payload.state === "Uncertain") return [summary];
         const approval = loadApproval(row.id);
-        if (approval === undefined) return [];
-        return [{ ...summary, approval_code: approval.payload.code }];
+        return approval === undefined ? [] : [{ ...summary, approval_code: approval.payload.code }];
       });
+      const cursorRow = rows.slice(0, limit).at(-1);
+      return {
+        intents: page,
+        ...(rows.length > limit && cursorRow !== undefined ? { next_cursor: encodePendingCursor(cursorRow) } : {}),
+      };
     },
 
     getIntent(intentId: string): IntentSummary | undefined {

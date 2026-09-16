@@ -24,6 +24,8 @@ export interface ReconnectingProtocolClientOptions {
   connect: () => Promise<ProtocolTransport>;
   role: ClientRole;
   isTTY?: () => boolean;
+  /** Optional local secret for an approver-only system.hello handshake. */
+  approverToken?: string;
   maxQueuedEvents?: number;
   onEvent?: (event: ProtocolEvent) => void;
 }
@@ -40,6 +42,7 @@ export class ReconnectingProtocolClient {
   private readonly connectTransport: () => Promise<ProtocolTransport>;
   private readonly role: ClientRole;
   private readonly isTTY: () => boolean;
+  private readonly approverToken: string | undefined;
   private readonly maxQueuedEvents: number | undefined;
   private readonly onEvent: (event: ProtocolEvent) => void;
   private readonly pending = new Map<string, PendingRequest>();
@@ -59,6 +62,7 @@ export class ReconnectingProtocolClient {
     this.connectTransport = options.connect;
     this.role = options.role;
     this.isTTY = options.isTTY ?? defaultTTYProbe;
+    this.approverToken = options.approverToken;
     this.maxQueuedEvents = options.maxQueuedEvents;
     this.onEvent = options.onEvent ?? (() => {});
   }
@@ -102,7 +106,7 @@ export class ReconnectingProtocolClient {
     transport.onMessage((message) => this.handleMessage(message, generation));
     transport.onClose(() => this.handleClose(generation));
 
-    await this.sendRequest("system.hello", createHandshake(this.role, this.isTTY), generation);
+    await this.sendRequest("system.hello", createHandshake(this.role, this.isTTY, this.approverToken), generation);
     if (generation !== this.activeGeneration || this.stopped) return;
     await this.sendRequest("subscribe", subscriptionParams(this.topics), generation);
     if (generation !== this.activeGeneration || this.stopped) return;

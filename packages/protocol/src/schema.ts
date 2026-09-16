@@ -111,14 +111,28 @@ export function parseRole(value: unknown): ClientRole {
   return role as ClientRole;
 }
 
+export function approverTokenFromHandshake(params: JsonObject): string | undefined {
+  const token = params.approver_token;
+  if (token === undefined) return undefined;
+  if (typeof token !== "string" || token.length < 1 || token.length > 4_096) {
+    throw new ProtocolSchemaError("approver token must be a non-empty string");
+  }
+  return token;
+}
+
 export function createHandshake(
   role: ClientRole,
   isTTY: () => boolean = () => Boolean((globalThis as { process?: { stdout?: { isTTY?: boolean } } }).process?.stdout?.isTTY),
+  approverToken?: string,
 ): JsonObject {
   if (role === "approver" && !isTTY()) {
     throw new ProtocolSchemaError("approver role requires a local TTY");
   }
-  return { role };
+  if (approverToken !== undefined && role !== "approver") {
+    throw new ProtocolSchemaError("approver token may only be supplied by an approver");
+  }
+  if (approverToken !== undefined) approverTokenFromHandshake({ approver_token: approverToken });
+  return { role, ...(approverToken === undefined ? {} : { approver_token: approverToken }) };
 }
 
 export function parseRequest(value: unknown, role?: ClientRole): ProtocolRequest {
@@ -127,7 +141,13 @@ export function parseRequest(value: unknown, role?: ClientRole): ProtocolRequest
   const method = requestMethod(frame.method);
   assertApprovalAccess(method, role);
   const params = object(frame.params, "request params");
-  if (method === "system.hello") parseRole(params.role);
+  if (method === "system.hello") {
+    const declaredRole = parseRole(params.role);
+    if (params.approver_token !== undefined) {
+      if (declaredRole !== "approver") throw new ProtocolSchemaError("approver token may only be supplied by an approver");
+      approverTokenFromHandshake(params);
+    }
+  }
   return {
     type: "request",
     id: nonEmptyString(frame.id, "request id"),

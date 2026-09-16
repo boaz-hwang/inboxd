@@ -53,6 +53,30 @@ describe("safety intent approval and outbox", () => {
     expect(JSON.stringify(audit)).not.toContain("654321");
   });
 
+  test("pages pending proposed, approved, sending, and uncertain intents with a scoped opaque cursor", async () => {
+    const { database } = fixture();
+    let sequence = 0;
+    const service = createSafetyService(database, { now: () => 1_000, approvalCode: () => "654321", id: () => `id-${++sequence}` });
+    const proposed = proposal(service, "proposed");
+    const approved = proposal(service, "approved");
+    const sending = proposal(service, "sending");
+    const uncertain = proposal(service, "uncertain");
+    await approve(service, approved.intent_id);
+    for (const [intentId, state] of [[sending.intent_id, "Sending"], [uncertain.intent_id, "Uncertain"]] as const) {
+      const row = database.query("SELECT payload_json FROM intents WHERE id = ?").get(intentId) as { payload_json: string };
+      database.run("UPDATE intents SET payload_json = ? WHERE id = ?", [JSON.stringify({ ...JSON.parse(row.payload_json), state }), intentId]);
+    }
+
+    const first = service.listPendingPage({ limit: 2 });
+    expect(first.intents.map((intent) => intent.state)).toEqual(["Proposed", "Approved"]);
+    expect(first.next_cursor).toMatch(/^[A-Za-z0-9_-]+$/);
+    const second = service.listPendingPage({ limit: 2, cursor: first.next_cursor });
+    expect(second.intents.map((intent) => intent.state)).toEqual(["Sending", "Uncertain"]);
+    const wrongScope = Buffer.from(JSON.stringify({ v: 1, scope: "other", created_at: 1_000, id: approved.intent_id })).toString("base64url");
+    expect(() => service.listPendingPage({ cursor: wrongScope })).toThrow(/cursor/i);
+    expect(() => service.listPendingPage({ limit: 101 })).toThrow(/100/);
+  });
+
   test("binds approval to intent hash actor scope and expiry then consumes it exactly once", async () => {
     const { database } = fixture();
     let now = 1_000;

@@ -6,7 +6,7 @@ import type { Database } from "bun:sqlite";
 import { getMessage, inboxMessages, searchMessages } from "../../store/src/queries.ts";
 import { createSafetyService, type SafetyService, type SendScope } from "../../safety/src/index.ts";
 import { encodeJsonLine, JsonLinesDecoder } from "../../protocol/src/framing.ts";
-import { parseRequest, parseRole, type ClientRole, type ProtocolEvent, type ProtocolEventMethod, type ProtocolMethod, type ProtocolResponse } from "../../protocol/src/schema.ts";
+import { approverTokenFromHandshake, parseRequest, parseRole, type ClientRole, type ProtocolEvent, type ProtocolEventMethod, type ProtocolMethod, type ProtocolResponse } from "../../protocol/src/schema.ts";
 import { SubscriptionQueue } from "../../protocol/src/subscriptions.ts";
 
 export interface DaemonServer {
@@ -15,7 +15,7 @@ export interface DaemonServer {
   publish(event: ProtocolEvent): void;
 }
 
-export type TrustedApproverSessionAuthorizer = (session: { readonly socket: Socket; readonly role: "approver" }) => boolean;
+export type TrustedApproverSessionAuthorizer = (session: { readonly socket: Socket; readonly role: "approver"; readonly approverToken?: string }) => boolean;
 
 export interface DaemonServerOptions {
   readonly safety?: SafetyService;
@@ -81,6 +81,27 @@ function page(params: Record<string, unknown>): { limit?: number; cursor?: strin
   const cursor = params.cursor === undefined ? undefined : string(params.cursor, "cursor");
   if (cursor !== undefined && (cursor.length > 4_096 || !/^[A-Za-z0-9_-]+$/.test(cursor))) throw new BadRequestError("cursor is malformed");
   return { ...(limit === undefined ? {} : { limit }), ...(cursor === undefined ? {} : { cursor }) };
+}
+
+const chatCursorScope = "chat.list:v1";
+interface ChatCursor { readonly v: 1; readonly scope: string; readonly platform: string; readonly account: string; readonly chat_id: string; }
+function encodeChatCursor(row: Omit<ChatCursor, "v" | "scope">): string {
+  const { platform, account, chat_id } = row;
+  return Buffer.from(JSON.stringify({ v: 1, scope: chatCursorScope, platform, account, chat_id } satisfies ChatCursor)).toString("base64url");
+}
+function decodeChatCursor(value: string | undefined): ChatCursor | undefined {
+  if (value === undefined) return undefined;
+  let decoded: unknown;
+  try { decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8")); } catch { throw new BadRequestError("cursor is malformed"); }
+  if (decoded === null || typeof decoded !== "object" || Array.isArray(decoded)) throw new BadRequestError("cursor is malformed");
+  const cursor = decoded as Partial<ChatCursor>;
+  const fields = [cursor.platform, cursor.account, cursor.chat_id];
+  if (cursor.v !== 1 || cursor.scope !== chatCursorScope || fields.some((field) => typeof field !== "string" || field.length === 0)) {
+    throw new BadRequestError("cursor does not match chat.list");
+  }
+  const stable: ChatCursor = { v: 1, scope: chatCursorScope, platform: cursor.platform!, account: cursor.account!, chat_id: cursor.chat_id! };
+  if (encodeChatCursor(stable) !== value) throw new BadRequestError("cursor is malformed");
+  return stable;
 }
 function scope(value: unknown): SendScope {
   const parsed = object(value, "scope");
@@ -168,7 +189,7 @@ export function createDaemonServer(database: Database, maxQueuedEvents?: number,
     if (method === "system.hello") {
       const role = parseRole(params.role);
       connection.role = role;
-      connection.trustedApprover = role === "approver" && authorizeApprover({ socket: connection.socket, role });
+      connection.trustedApprover = role === "approver" && authorizeApprover({ socket: connection.socket, role, approverToken: approverTokenFromHandshake(params) });
       return { protocol: "inboxd", ready: true };
     }
     if (!connection.role) throw new Error("system.hello is required before API requests");
@@ -176,9 +197,16 @@ export function createDaemonServer(database: Database, maxQueuedEvents?: number,
       case "system.ping": return { pong: true };
       case "system.status": return { ready: true, owner: "daemon" };
       case "chat.list": {
-        const rows = database.query("SELECT platform, account, chat_id, display_name FROM chats ORDER BY platform, account, chat_id").all();
-        auditRead(connection, "read.chat_list", "all-chats", rows.length);
-        return { chats: rows };
+        const requested = page(params);
+        const limit = requested.limit ?? 50;
+        const cursor = decodeChatCursor(requested.cursor);
+        const cursorWhere = cursor === undefined ? "" : " WHERE (platform > ? OR (platform = ? AND account > ?) OR (platform = ? AND account = ? AND chat_id > ?))";
+        const rows = database.query(`SELECT platform, account, chat_id, display_name FROM chats${cursorWhere} ORDER BY platform, account, chat_id LIMIT ?`)
+          .all(...(cursor === undefined ? [] : [cursor.platform, cursor.platform, cursor.account, cursor.platform, cursor.account, cursor.chat_id]), limit + 1) as { platform: string; account: string; chat_id: string; display_name: string | null }[];
+        const chats = rows.slice(0, limit);
+        const final = chats.at(-1);
+        auditRead(connection, "read.chat_list", "all-chats", chats.length);
+        return { chats, ...(rows.length > limit && final !== undefined ? { next_cursor: encodeChatCursor(final) } : {}) };
       }
       case "message.inbox": {
         const key = chat(params);
@@ -215,7 +243,9 @@ export function createDaemonServer(database: Database, maxQueuedEvents?: number,
       }
       case "safety.intent.listPending": {
         assertTrustedApprover(connection);
-        return { intents: safety.listPending() };
+        const found = safety.listPendingPage(page(params));
+        auditRead(connection, "read.safety_intent_list", "pending-intents", found.intents.length);
+        return { intents: found.intents, ...(found.next_cursor === undefined ? {} : { next_cursor: found.next_cursor }) };
       }
       case "safety.intent.approve": {
         assertTrustedApprover(connection);
