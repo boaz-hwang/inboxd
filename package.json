@@ -8,10 +8,11 @@
     "contrib/*"
   ],
   "scripts": {
+    "build:native": "bun scripts/build-native.ts",
     "typecheck": "tsc -p tsconfig.base.json --noEmit",
     "lint": "bun run typecheck",
     "check:boundaries": "bun scripts/check-boundaries.ts",
-    "test": "NODE_ENV=test SQLCIPHER_PATH=\"$(brew --prefix sqlcipher)/lib/libsqlcipher.dylib\" bun test"
+    "test": "bun run build:native && NODE_ENV=test SQLCIPHER_PATH=\"$(brew --prefix sqlcipher)/lib/libsqlcipher.dylib\" bun test"
   },
   "devDependencies": {
     "@types/bun": "latest",

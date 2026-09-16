@@ -17,6 +17,6 @@ export type ReadAdapterDecision =
  * needs a direct adapter with observable pagination/cursor semantics.
  */
 export function decideReadAdapterWidening(request: ReadContractRequest): ReadAdapterDecision {
-  if (request.authoritative_history) return { decision: "direct_cursor_adapter_required" };
-  return { decision: "degraded_adapter_allowed" };
+  return coreCall("sync.decideReadAdapterWidening", request);
 }
+import { coreCall } from "../../native/src/index.ts";

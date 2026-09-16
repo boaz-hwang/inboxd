@@ -16,12 +16,33 @@
 - `docs/05-architecture-review.md` — 설계 비판 검토 (2026-09-16): 유지 항목과 보완할 계약·검증 과제
 - `docs/06-architecture.md` — 검토 반영 설계: 데몬 런타임·패키지·store 계약·승인 경계·TUI·빌드 순서
 - `docs/07-evidence-ledger.md` — 합성·과거 live·새 live 필요·blocked 증거와 MVP claim 경계
+- `docs/08-rust-core-refactor.md` — Rust core / TypeScript edge 책임과 회귀 검증
+
+## 개발
+
+Rust 코어는 메시지·coverage 규칙, SQL 저장·검색, 승인·quota·복구를 담당한다.
+TypeScript는 기존 SQLCipher 연결·키체인, 비동기 어댑터, UDS와 CLI/TUI/MCP를 담당한다.
+코어는 같은 데몬 안에서 동기 FFI로 호출하며 DB 형식과 공개 프로토콜을 유지한다.
+
+```sh
+bun install
+bun run build:native
+bun run typecheck
+bun run check:boundaries
+bun run test
+cargo test --locked
+```
+
+빌드에는 `rust-toolchain.toml`의 Rust 도구 체인과 Bun이 필요하다. 테스트는 기존
+macOS Homebrew SQLCipher를 사용한다. 빌드된 네이티브 라이브러리는
+`packages/native/native/`에 놓이며 실행 시 Cargo가 필요하지 않다.
+Rust 수정 뒤에는 다시 빌드한다(`bun run test`는 빌드를 포함한다).
 
 ## 구현 아키텍처와 남은 live gate
 
 ```text
 inboxd daemon (DB write · sync · outbox 실행 · 발송 토큰 · audit 독점)
-  platform adapters (thin) → normalize → store (SQLCipher + FTS5)
+  TS platform adapters → Rust domain/store/safety → TS SQLCipher I/O
     → search / inbox (coverage 동봉) → safe-send (propose→approve[OOB]→send→receipt)
   ▲ Unix domain socket
   cli (TTY, approve) · tui (TTY, approve) · mcp (agent, propose만)

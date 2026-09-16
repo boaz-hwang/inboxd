@@ -1,8 +1,7 @@
 import { readdir } from "node:fs/promises";
 import { join, relative } from "node:path";
 
-const root = join(import.meta.dir, "..", "packages", "tui");
-const prohibited = /(?:@inboxd\/(?:store|sync|safety|daemon)|(?:\.\.\/)+(?:store|sync|safety|daemon)|platforms[\\/])/;
+const clientPackages = ["cli", "tui", "mcp"] as const;
 const source = /\.(?:ts|tsx|js|jsx|mjs|cjs)$/;
 
 async function walk(dir: string): Promise<string[]> {
@@ -16,18 +15,40 @@ async function walk(dir: string): Promise<string[]> {
   return files;
 }
 
+function forbidden(specifier: string): boolean {
+  return specifier === "bun:sqlite" || specifier === "bun:ffi"
+    || /(?:^|\/)packages\/(?:native|store|sync|safety|daemon)(?:\/|$)/.test(specifier)
+    || /(?:^|\.\.\/)(?:native|store|sync|safety|daemon)(?:\/|$)/.test(specifier)
+    || /(?:^|\/)platforms(?:\/|$)|(?:^|\/)contrib(?:\/|$)/.test(specifier)
+    || /^@inboxd\/(?:native|store|sync|safety|daemon)$/.test(specifier);
+}
+
+function inboxdCore(specifier: string): boolean {
+  return specifier === "@inboxd/core" || /(?:^|\/)packages\/core(?:\/|$)|(?:^|\.\.\/)core(?:\/|$)/.test(specifier);
+}
+
 const violations: string[] = [];
-for (const file of await walk(root)) {
-  const text = await Bun.file(file).text();
-  for (const [index, line] of text.split("\n").entries()) {
-    if (/\b(?:import|export)\b|\brequire\s*\(/.test(line) && prohibited.test(line)) {
-      violations.push(`${relative(join(import.meta.dir, ".."), file)}:${index + 1}: ${line.trim()}`);
+const parser = new Bun.Transpiler({ loader: "ts" });
+for (const packageName of clientPackages) {
+  const root = join(import.meta.dir, "..", "packages", packageName, "src");
+  for (const file of await walk(root)) {
+    const text = await Bun.file(file).text();
+    for (const entry of parser.scanImports(text)) {
+      const specifier = entry.path;
+      // scanImports intentionally omits `import type`, so core types remain
+      // shareable while static and dynamic runtime imports are rejected.
+      const runtimeCore = inboxdCore(specifier);
+      if (specifier !== undefined && (forbidden(specifier) || runtimeCore)) {
+        const index = text.indexOf(specifier);
+        const line = text.slice(0, Math.max(index, 0)).split("\n").length;
+        violations.push(`${relative(join(import.meta.dir, ".."), file)}:${line}: ${specifier}`);
+      }
     }
   }
 }
 if (violations.length) {
-  console.error("TUI boundary violations detected:");
+  console.error("Client boundary violations detected:");
   console.error(violations.join("\n"));
   process.exit(1);
 }
-console.log("TUI import boundaries: OK");
+console.log("CLI/TUI/MCP import boundaries: OK");

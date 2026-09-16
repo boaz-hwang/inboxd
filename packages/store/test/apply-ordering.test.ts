@@ -94,4 +94,24 @@ describe("revisioned event application", () => {
     expect(getMessage(value.database, { ...value.chat, msg_id: "atomic" })).toBeNull();
     expect(readSyncState(value.database, value.chat)).toBeNull();
   });
+
+  test("rejects malformed batch collections without advancing any durable state", () => {
+    for (const field of ["events", "coverage", "limits"] as const) {
+      const value = fixture();
+      const batch = {
+        events: [event(value.chat, "create", 1, `invalid-${field}`, "must not commit")],
+        sync: { chat: value.chat, cursor: `cursor-${field}`, updated_at: 10 },
+        coverage: [{ chat: value.chat, interval: { from_ts: 0, to_ts: 100 }, kind: "backfill", collected_at: 10, mutations_verified_at: null }],
+        limits: [{ chat: value.chat, interval: { from_ts: 0, to_ts: 100 }, reason: "unknown", observed_at: 10 }],
+        [field]: { invalid: true },
+      } as unknown as Parameters<typeof applySyncBatch>[1];
+
+      expect(() => applySyncBatch(value.database, batch)).toThrow(TypeError);
+      expect(readSyncState(value.database, value.chat)).toBeNull();
+      expect(value.database.query("SELECT count(*) AS count FROM messages").get()).toEqual({ count: 0 });
+      expect(value.database.query("SELECT count(*) AS count FROM messages_fts").get()).toEqual({ count: 0 });
+      expect(value.database.query("SELECT count(*) AS count FROM sync_coverage").get()).toEqual({ count: 0 });
+      expect(value.database.query("SELECT count(*) AS count FROM sync_limits").get()).toEqual({ count: 0 });
+    }
+  });
 });

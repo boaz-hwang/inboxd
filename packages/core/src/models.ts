@@ -1,5 +1,7 @@
 export type Timestamp = number;
 
+import { coreCall } from "../../native/src/index.ts";
+
 export interface ChatKey {
   readonly platform: string;
   readonly account: string;
@@ -68,123 +70,19 @@ export type NormalizedMessageEvent =
   | EditMessageEvent
   | DeleteMessageEvent;
 
-type UnknownRecord = Record<string, unknown>;
-
-function isRecord(value: unknown): value is UnknownRecord {
-  return typeof value === "object" && value !== null;
-}
-
-function nonEmptyString(value: unknown, field: string): string {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new TypeError(`${field} must be a non-empty string`);
-  }
-  return value;
-}
-
-function timestamp(value: unknown, field: string): Timestamp {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new TypeError(`${field} must be a finite timestamp`);
-  }
-  return value;
-}
-
-function object(value: unknown, field: string): UnknownRecord {
-  if (!isRecord(value)) throw new TypeError(`${field} must be an object`);
-  return value;
-}
-
 export function chatKey(value: unknown): ChatKey {
-  const input = object(value, "chat key");
-  return {
-    platform: nonEmptyString(input.platform, "platform"),
-    account: nonEmptyString(input.account, "account"),
-    chat_id: nonEmptyString(input.chat_id, "chat_id"),
-  };
+  return coreCall("domain.chatKey", value);
 }
 
 export function messageKey(value: unknown): MessageKey {
-  const input = object(value, "message key");
-  return {
-    ...chatKey(input),
-    msg_id: nonEmptyString(input.msg_id, "msg_id"),
-  };
+  return coreCall("domain.messageKey", value);
 }
 
 export function adapterRevision(value: unknown): AdapterRevision {
-  const input = object(value, "adapter revision");
-  if (input.source !== "adapter" && input.source !== "observation") {
-    throw new TypeError("adapter revision source must be 'adapter' or 'observation'");
-  }
-  if (input.source === "observation" && input.value !== "unversioned") {
-    throw new TypeError("observation revision value must be 'unversioned'");
-  }
-  if (
-    (typeof input.value !== "string" || input.value.trim().length === 0)
-    && (typeof input.value !== "number" || !Number.isFinite(input.value))
-  ) {
-    throw new TypeError("adapter revision value must be a non-empty string or finite number");
-  }
-  return { source: input.source, value: input.value } as AdapterRevision;
-}
-
-function attachment(value: unknown): AttachmentMeta {
-  const input = object(value, "attachment");
-  const size = input.size;
-  if (typeof size !== "number" || !Number.isFinite(size) || size < 0) {
-    throw new TypeError("attachment size must be a non-negative finite number");
-  }
-  return {
-    filename: nonEmptyString(input.filename, "attachment filename"),
-    mime: nonEmptyString(input.mime, "attachment mime"),
-    size,
-  };
-}
-
-function normalizedMessage(value: unknown, revision: AdapterRevision): UnifiedMessage {
-  const input = object(value, "message");
-  if (!Array.isArray(input.attachments)) throw new TypeError("message attachments must be an array");
-  return {
-    key: messageKey(input.key),
-    author_id: nonEmptyString(input.author_id, "author_id"),
-    ts: timestamp(input.ts, "message ts"),
-    body: nonEmptyString(input.body, "message body"),
-    attachments: input.attachments.map(attachment),
-    adapter_revision: revision,
-    ...(input.parent_id === undefined ? {} : { parent_id: messageKey(input.parent_id) }),
-    ...(input.edited_at === undefined ? {} : { edited_at: timestamp(input.edited_at, "edited_at") }),
-    ...(input.deleted_at === undefined ? {} : { deleted_at: timestamp(input.deleted_at, "deleted_at") }),
-  };
-}
-
-function tombstone(value: unknown): MessageTombstone {
-  const input = object(value, "tombstone");
-  if (input.body !== null) throw new TypeError("tombstone body must be null");
-  return {
-    key: messageKey(input.key),
-    body: null,
-    deleted_at: timestamp(input.deleted_at, "deleted_at"),
-  };
+  return coreCall("domain.adapterRevision", value);
 }
 
 /** Validates platform-normalized events before they enter the store boundary. */
 export function normalizeMessageEvent(value: unknown): NormalizedMessageEvent {
-  const input = object(value, "message event");
-  const revision = adapterRevision(input.revision);
-
-  switch (input.kind) {
-    case "create":
-      return { kind: "create", message: normalizedMessage(input.message, revision), revision };
-    case "edit":
-      return {
-        kind: "edit",
-        key: messageKey(input.key),
-        body: nonEmptyString(input.body, "edit body"),
-        edited_at: timestamp(input.edited_at, "edited_at"),
-        revision,
-      };
-    case "delete":
-      return { kind: "delete", tombstone: tombstone(input.tombstone), revision };
-    default:
-      throw new TypeError("message event kind must be create, edit, or delete");
-  }
+  return coreCall("domain.normalizeMessageEvent", value);
 }

@@ -33,6 +33,10 @@
         "zod": "^4.6.5",
       },
     },
+    "packages/native": {
+      "name": "@inboxd/native",
+      "version": "0.0.0",
+    },
     "packages/protocol": {
       "name": "@inboxd/protocol",
       "version": "0.0.0",
@@ -71,6 +75,8 @@
     "@inboxd/kakao": ["@inboxd/kakao@workspace:contrib/kakao"],
 
     "@inboxd/mcp": ["@inboxd/mcp@workspace:packages/mcp"],
+
+    "@inboxd/native": ["@inboxd/native@workspace:packages/native"],
 
     "@inboxd/protocol": ["@inboxd/protocol@workspace:packages/protocol"],
 

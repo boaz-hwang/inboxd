@@ -148,7 +148,7 @@ export function createCliHandlers(options: CliHandlerOptions): CliHandlers {
     daemonStatus: () => call("system.status", {}),
     chatList: () => call("chat.list", {}),
     inbox: (chat) => call("message.inbox", { chat }),
-    get: (message) => call("message.get", { ...message }),
+    get: ({ msg_id, ...chat }) => call("message.get", { chat, msg_id }),
     search: (input) => call("message.search", { chat: input.chat, interval: input.interval, query: input.query }),
     syncStatus: () => call("sync.status", {}),
     backfill: (input) => call("sync.backfill", { ...input }),

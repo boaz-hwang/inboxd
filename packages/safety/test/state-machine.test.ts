@@ -6,6 +6,7 @@ import { migrateDatabase, openSqlCipherDatabase } from "../../store/src/index.ts
 import {
   ApprovalRejectedError,
   createSafetyService,
+  IntentNotEligibleError,
   QuotaExceededError,
   type SendTransport,
   type SendScope,
@@ -69,6 +70,7 @@ describe("safety intent approval and outbox", () => {
 
     const first = service.listPendingPage({ limit: 2 });
     expect(first.intents.map((intent) => intent.state)).toEqual(["Proposed", "Approved"]);
+    expect(first.next_cursor).toBe("eyJ2IjoxLCJzY29wZSI6InNhZmV0eS5pbnRlbnQubGlzdFBlbmRpbmc6djEiLCJjcmVhdGVkX2F0IjoxMDAwLCJpZCI6ImlkLTMifQ");
     expect(first.next_cursor).toMatch(/^[A-Za-z0-9_-]+$/);
     const second = service.listPendingPage({ limit: 2, cursor: first.next_cursor });
     expect(second.intents.map((intent) => intent.state)).toEqual(["Sending", "Uncertain"]);
@@ -172,6 +174,7 @@ describe("safety intent approval and outbox", () => {
     await expect(service.execute(first.intent_id)).resolves.toEqual(expect.objectContaining({ state: "Sent" }));
     await expect(service.execute(second.intent_id)).rejects.toThrow(/quota/i);
     expect(calls).toBe(1);
+    expect(database.query("SELECT used FROM quota WHERE scope = ?").get('{"account":"account-1","chat_id":"chat-1","platform":"slack"}')).toEqual({ used: 1 });
 
     let falseCalls = 0;
     const disabled = createSafetyService(database, {
@@ -230,5 +233,98 @@ describe("safety intent approval and outbox", () => {
     expect(rejected).toHaveLength(1);
     expect(rejected[0]?.reason).toBeInstanceOf(QuotaExceededError);
     expect(calls).toBe(1);
+  });
+
+  test("claims an approved intent once and evaluates denial policy on the fresh transactional payload", async () => {
+    const { database } = fixture();
+    let calls = 0;
+    let policyState: string | undefined;
+    const service = createSafetyService(database, {
+      now: () => 1_000,
+      approvalCode: () => "654321",
+      allowSend(input) {
+        policyState = (database.query("SELECT json_extract(payload_json, '$.state') AS state FROM intents WHERE json_extract(payload_json, '$.body') = ?").get(input.body) as { state: string }).state;
+        return input.body !== "denied";
+      },
+      transport: { capabilities: { send: true }, send: async () => { calls++; return { state: "sent", receipt: `r-${calls}` }; } },
+    });
+    const allowed = proposal(service, "allowed");
+    await approve(service, allowed.intent_id);
+    const duplicate = await Promise.allSettled([service.execute(allowed.intent_id), service.execute(allowed.intent_id)]);
+    expect(duplicate.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(duplicate.filter((result) => result.status === "rejected")[0]?.reason).toBeInstanceOf(IntentNotEligibleError);
+    expect(policyState).toBe("Approved");
+    expect(calls).toBe(1);
+
+    const denied = proposal(service, "denied");
+    await approve(service, denied.intent_id);
+    await expect(service.execute(denied.intent_id)).resolves.toEqual(expect.objectContaining({ state: "Failed" }));
+    expect(calls).toBe(1);
+  });
+
+  test("releases both quota reservations after a definite failed send", async () => {
+    const { database } = fixture();
+    let calls = 0;
+    const service = createSafetyService(database, {
+      now: () => 1_000,
+      approvalCode: () => "654321",
+      quotaLimit: 1,
+      globalQuotaLimit: 1,
+      transport: { capabilities: { send: true }, send: async () => ++calls === 1 ? { state: "failed", reason: "safe failure" } : { state: "sent", receipt: "second" } },
+    });
+    const first = proposal(service, "first");
+    const second = proposal(service, "second");
+    await approve(service, first.intent_id);
+    await approve(service, second.intent_id);
+    await expect(service.execute(first.intent_id)).resolves.toEqual(expect.objectContaining({ state: "Failed" }));
+    await expect(service.execute(second.intent_id)).resolves.toEqual(expect.objectContaining({ state: "Sent" }));
+    expect(calls).toBe(2);
+  });
+
+  test("honors a preexisting v1 canonical scope counter atomically", async () => {
+    const { database } = fixture();
+    let calls = 0;
+    const service = createSafetyService(database, {
+      now: () => 1_000,
+      approvalCode: () => "654321",
+      quotaLimit: 1,
+      globalQuotaLimit: 2,
+      transport: { capabilities: { send: true }, send: async () => { calls++; return { state: "sent", receipt: "never" }; } },
+    });
+    const created = proposal(service, "legacy quota");
+    await approve(service, created.intent_id);
+    database.run("INSERT INTO quota (scope, used, updated_at) VALUES (?, 1, 999)", ['{"account":"account-1","chat_id":"chat-1","platform":"slack"}']);
+
+    await expect(service.execute(created.intent_id)).rejects.toBeInstanceOf(QuotaExceededError);
+    expect(service.getIntent(created.intent_id)?.state).toBe("Approved");
+    expect(database.query("SELECT used FROM quota WHERE scope = '__global__'").get()).toBeNull();
+    expect(calls).toBe(0);
+  });
+
+  test("consumes a persisted v1 approval produced by the TypeScript implementation", async () => {
+    const { database } = fixture();
+    database.run("INSERT INTO intents (id, kind, payload_json, created_at) VALUES (?, 'send', ?, ?)", [
+      "legacy-1",
+      '{"actor":"agent:alpha","scope":{"platform":"slack","account":"account-1","chat_id":"chat-1"},"body":"legacy body","parent_id":"p-1","state":"Proposed","expires_at":901234.75,"payload_hash":"e92a60968c05534ead736b1769a60c6b5ad0607a710c0b445b7aef645b07d3f9"}',
+      1234.5,
+    ]);
+    database.run("INSERT INTO approvals (id, intent_id, approved_at, payload_json) VALUES ('legacy-2', 'legacy-1', NULL, ?)", [
+      '{"code":"654321","code_hash":"64ded9f666f8e1078d7c21201aa6cad5b1bdad422b4c0f8c1e288175d905c5ad","bound_hash":"1bc0f40a3d34cac1ee3bae791761814ea6249ffbb787348c92b9d9db0c35bcf4","actor":"agent:alpha","scope":{"platform":"slack","account":"account-1","chat_id":"chat-1"},"expires_at":901234.75}',
+    ]);
+    const service = createSafetyService(database, { now: () => 1234.5 });
+    await expect(service.approve({ intentId: "legacy-1", code: "654321", actor: "agent:alpha", scope })).resolves.toEqual(expect.objectContaining({ state: "Approved", parent_id: "p-1" }));
+  });
+
+  test("keeps v1 cursor bytes compatible for genuine private-use scalar IDs", () => {
+    const { database } = fixture();
+    const ids = ["a\u{F0000}", "approval-1", "z", "approval-2"];
+    const service = createSafetyService(database, { now: () => 1_000, approvalCode: () => "654321", id: () => ids.shift()! });
+    const first = proposal(service, "first-pua");
+    const second = proposal(service, "second-pua");
+    expect(first.intent_id).toBe("a\u{F0000}");
+    const page = service.listPendingPage({ limit: 1 });
+    const expected = Buffer.from(JSON.stringify({ v: 1, scope: "safety.intent.listPending:v1", created_at: 1_000, id: "a\u{F0000}" })).toString("base64url");
+    expect(page.next_cursor).toBe(expected);
+    expect(service.listPendingPage({ limit: 1, cursor: page.next_cursor }).intents[0]?.intent_id).toBe(second.intent_id);
   });
 });

@@ -99,7 +99,7 @@ describe("protocol-only CLI handlers", () => {
     await respondToCall(transport, cli.inbox({ platform: "slack", account: "a", chat_id: "c" }), { messages: [] });
     expect(lastRequest(transport)).toMatchObject({ method: "message.inbox" });
     await respondToCall(transport, cli.get({ platform: "slack", account: "a", chat_id: "c", msg_id: "m" }), { message: null });
-    expect(lastRequest(transport)).toMatchObject({ method: "message.get" });
+    expect(lastRequest(transport)).toMatchObject({ method: "message.get", params: { chat: { platform: "slack", account: "a", chat_id: "c" }, msg_id: "m" } });
     await respondToCall(transport, cli.search({ chat: { platform: "slack", account: "a", chat_id: "c" }, interval: { from_ts: 0, to_ts: 1 }, query: "hello" }), { messages: [], coverage: { covered: [], gaps: [], limits: [] } });
     expect(lastRequest(transport)).toMatchObject({ method: "message.search" });
     await respondToCall(transport, cli.syncStatus(), { state: "idle" });

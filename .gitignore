@@ -1,5 +1,7 @@
 node_modules/
 dist/
+target/
+packages/native/native/
 *.db
 *.db-wal
 *.db-shm

@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { coreCall } from "../../native/src/index.ts";
 
 import { applySyncBatch, diagnoseStore, migrateDatabase, openSqlCipherDatabase, type ApplySyncBatchInput, type SqlCipherKeyProvider } from "../../store/src/index.ts";
 import { createSafetyService, type SafetyOptions, type SendTransport } from "../../safety/src/index.ts";
@@ -59,15 +60,16 @@ function openOwnedStore(options: DaemonOptions): Database {
 }
 
 function assertConfiguredSendQuotas(options: DaemonOptions): void {
-  if (options.sendTransport?.capabilities.send !== true) return;
-  for (const [name, value] of [["per-scope", options.quotaLimit], ["global", options.globalQuotaLimit]] as const) {
-    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-      throw new TypeError(`send-capable daemon requires an explicitly configured finite positive ${name} quota`);
-    }
-  }
-  if (options.allowSend === undefined) {
-    throw new TypeError("send-capable daemon requires an explicit allowlist policy");
-  }
+  const send_capable = options.sendTransport?.capabilities.send === true;
+  // Non-finite values must remain invalid for a sender, but are irrelevant for
+  // a read-only daemon. Convert only these configuration fields so JSON never
+  // silently turns Infinity/NaN into null before Rust validates the policy.
+  coreCall("domain.validateSendConfiguration", {
+    send_capable,
+    quota_limit: send_capable && Number.isFinite(options.quotaLimit) ? options.quotaLimit : null,
+    global_quota_limit: send_capable && Number.isFinite(options.globalQuotaLimit) ? options.globalQuotaLimit : null,
+    has_allow_send: options.allowSend !== undefined,
+  });
 }
 
 /** The only composition root that opens the encrypted store and starts external owners. */

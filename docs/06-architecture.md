@@ -1,5 +1,10 @@
 # 06 — Architecture: TUI까지의 설계 (2026-09-16)
 
+언어·패키지 구현은 [08 — Rust core refactor](08-rust-core-refactor.md)에서 갱신한다.
+단일 Bun 데몬과 공개 UDS 계약은 유지하며, domain/store/safety 정책·트랜잭션은
+Rust 코어로 옮긴다. SQLCipher 드라이버와 비동기 I/O는 TypeScript에 둔다.
+아래의 사용자 동작·저장·승인 계약은 계속 적용된다.
+
 05-review의 6개 보완점을 결정으로 바꾸고, 첫 사용자 인터페이스인 TUI까지 도달하는
 구조를 정한다. 03-proposal의 철학·기능·스키마는 유지하고, 이 문서는 **누가 무엇을
 소유하고, 저장소가 어떤 계약을 지키고, 어떤 순서로 쌓는지**를 정한다.

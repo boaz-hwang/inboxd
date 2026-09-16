@@ -38,7 +38,9 @@ describe("message queries with evidence", () => {
 
     const first = inboxMessages(value.database, { chat: value.chat, interval: { from_ts: 0, to_ts: 200 }, limit: 2 });
     expect(first.messages.map((message) => message.msg_id)).toEqual(["a", "b"]);
-    expect(first.next_cursor).toEqual(expect.any(String));
+    // Frozen from the pre-Rust TypeScript implementation: existing clients can
+    // resume an in-flight page across the core upgrade.
+    expect(first.next_cursor).toBe("eyJ2IjoxLCJzY29wZSI6IntcImNoYXRcIjp7XCJwbGF0Zm9ybVwiOlwidGVzdC1wbGF0Zm9ybVwiLFwiYWNjb3VudFwiOlwiYWNjb3VudC0xXCIsXCJjaGF0X2lkXCI6XCJjaGF0LTFcIn0sXCJpbnRlcnZhbFwiOntcImZyb21fdHNcIjowLFwidG9fdHNcIjoyMDB9fSIsInRzIjoxMDAsIm1zZ19pZCI6ImIifQ");
 
     const second = inboxMessages(value.database, { chat: value.chat, interval: { from_ts: 0, to_ts: 200 }, limit: 2, cursor: first.next_cursor });
     expect(second.messages.map((message) => message.msg_id)).toEqual(["c"]);
