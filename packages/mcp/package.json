@@ -2,5 +2,9 @@
   "name": "@inboxd/mcp",
   "version": "0.0.0",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.0.0",
+    "zod": "^4.6.5"
+  }
 }
