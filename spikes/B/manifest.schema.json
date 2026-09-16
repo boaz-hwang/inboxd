@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://inboxd.local/spikes/kakao-original-b/manifest.schema.json",
+  "title": "Privacy-safe Kakao original Spike B measurement manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "status",
+    "observation",
+    "send",
+    "scope",
+    "redaction",
+    "measurements"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "kakao-original-spike-b/v1" },
+    "kind": { "const": "kakao-original-measurement" },
+    "status": { "const": "BLOCKED" },
+    "observation": { "const": "not_observed" },
+    "send": { "const": false },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "stableChatAllowlist"],
+      "properties": {
+        "mode": { "const": "synthetic-only" },
+        "stableChatAllowlist": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "maxItems": 0
+        }
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bodies", "secrets", "paths"],
+      "properties": {
+        "bodies": { "const": "redacted" },
+        "secrets": { "const": "redacted" },
+        "paths": { "const": "redacted" }
+      }
+    },
+    "measurements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "source", "result"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "source": { "const": "synthetic" },
+          "result": { "const": "not_observed" },
+          "reason": { "type": "string", "maxLength": 240 }
+        }
+      }
+    }
+  }
+}
