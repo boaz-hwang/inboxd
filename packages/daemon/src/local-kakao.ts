@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { createKakaoReadAdapter, type KakaoReadAdapterOptions } from "../../../contrib/kakao/src/index.ts";
+import { recordAccountIdentity, recordUnreadState } from "../../store/src/apply.ts";
 import { syncHistoricalIntoStore } from "../../sync/src/orchestrator.ts";
 
 export type LocalKakaoBackfillConfig = KakaoReadAdapterOptions;
@@ -22,7 +23,13 @@ export function createLocalKakaoBackfill(database: Database, config: LocalKakaoB
     const operation = previous.catch(() => {}).then(async () => {
       const result = await syncHistoricalIntoStore({
         database,
-        adapter: { fetchHistorical },
+        adapter: { fetchHistorical: async (input) => {
+          const fetched = await fetchHistorical(input);
+          const observed_at = config.now();
+          recordAccountIdentity(database, { platform: input.chat.platform, account: input.chat.account, status: "unknown", source: "unknown", reason: "unsupported", observed_at });
+          recordUnreadState(database, { chat: input.chat, status: "unknown", source: "unknown", count: null, reason: "unsupported", observed_at });
+          return fetched;
+        } },
         chat: request.chat,
         interval: request.interval,
         now: config.now,

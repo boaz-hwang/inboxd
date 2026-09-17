@@ -1,0 +1,24 @@
+INBOXD · connected · slack                                                      
+1 INBOX | 2 SEARCH | 3 CHAT | ● APPROVALS | 5 DOCTOR                            
+DETAIL (in place)                                                               
+Evidence rail: partial · 1 chats / 1 gaps / 1 limits · connected                
+Approvals                                                                       
+Delivery: session observations                                                  
+Uncertain: outcome unknown; do not resend                                       
+> ● Code unavailable 10m slack:work:ops 승인 대기 제안                          
+ ○ Uncertain expired slack:work:ops 자동 재전송 금지                            
+Queue: UNCERTAIN — do not resend automatically                                  
+Approve [disabled: Code unavailable]                                            
+! approval code unavailable after reconnect — re-proposal required              
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+1–5 j/k ↑↓ Enter / n-more b c a Esc ? q                                         

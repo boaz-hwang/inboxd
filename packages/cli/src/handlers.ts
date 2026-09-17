@@ -2,6 +2,7 @@ import {
   ReconnectingProtocolClient,
   type ClientRole,
   type JsonObject,
+  type RecentMessagesParams,
   type ProtocolMethod,
   type ProtocolTransport,
 } from "../../protocol/src/index.ts";
@@ -64,6 +65,8 @@ export interface CliHandlers {
   daemonStatus(): Promise<JsonObject>;
   chatList(): Promise<JsonObject>;
   inbox(chat: ChatKey): Promise<JsonObject>;
+  recent(input: RecentMessagesParams): Promise<JsonObject>;
+  evidence(input: RecentMessagesParams): Promise<JsonObject>;
   get(message: ChatKey & { readonly msg_id: string }): Promise<JsonObject>;
   search(input: SearchInput): Promise<JsonObject>;
   syncStatus(): Promise<JsonObject>;
@@ -101,9 +104,9 @@ function approvalCodePresent(value: unknown): boolean {
 }
 
 /** JSON output that preserves every protocol result field, including empty coverage evidence. */
-export function formatCliResult(result: JsonObject, role: CliRole = "reader"): string {
-  if (role !== "approver" && approvalCodePresent(result)) {
-    throw new Error("approval code cannot be printed by this role");
+export function formatCliResult(result: JsonObject, _role: CliRole = "reader"): string {
+  if (approvalCodePresent(result)) {
+    throw new Error("approval code cannot be printed as CLI JSON");
   }
   return JSON.stringify(result);
 }
@@ -148,6 +151,8 @@ export function createCliHandlers(options: CliHandlerOptions): CliHandlers {
     daemonStatus: () => call("system.status", {}),
     chatList: () => call("chat.list", {}),
     inbox: (chat) => call("message.inbox", { chat }),
+    recent: (input) => call("message.recent", { ...input }),
+    evidence: (input) => call("message.evidence", { ...input }),
     get: ({ msg_id, ...chat }) => call("message.get", { chat, msg_id }),
     search: (input) => call("message.search", { chat: input.chat, interval: input.interval, query: input.query }),
     syncStatus: () => call("sync.status", {}),

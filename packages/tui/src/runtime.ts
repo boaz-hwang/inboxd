@@ -29,6 +29,9 @@ function actionKey(event: OpenTuiKeyEvent): string {
     case "up": return "ArrowUp";
     case "down": return "ArrowDown";
     case "backspace": return "Backspace";
+    case "pagedown": return "PageDown";
+    case "pageup": return "PageUp";
+    case "home": return "Home";
     default: return event.sequence.length === 1 ? event.sequence : event.name;
   }
 }

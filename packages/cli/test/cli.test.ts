@@ -7,7 +7,9 @@ import {
   createAgentHandlers,
   createCliHandlers,
   formatCliResult,
+  runCli,
 } from "../src/index.ts";
+import type { CliHandlers } from "../src/index.ts";
 
 class FakeTransport implements ProtocolTransport {
   readonly sent: ProtocolMessage[] = [];
@@ -82,6 +84,13 @@ describe("protocol-only CLI handlers", () => {
     scope: { platform: "slack", account: "a", chat_id: "c" },
   };
 
+  test("dispatcher rejects code-bearing approval argv before protocol I/O", async () => {
+    let approvalCalls = 0;
+    const handlers = { role: "approver", approve: async () => { approvalCalls += 1; return {}; } } as unknown as CliHandlers;
+    await expect(runCli(["safety", "approve", JSON.stringify(approval)], { handlers })).rejects.toThrow(/owner-local TUI/i);
+    expect(approvalCalls).toBe(0);
+  });
+
   test("has no store, sqlite, or database-path dependency", async () => {
     const sources = ["handlers.ts", "index.ts", "transport.ts"];
     const text = await Promise.all(sources.map((name) => Bun.file(`${import.meta.dir}/../src/${name}`).text()));
@@ -110,6 +119,20 @@ describe("protocol-only CLI handlers", () => {
     expect(lastRequest(transport)).toMatchObject({ method: "auth.status" });
     await respondToCall(transport, cli.sendStatus("send-1"), { state: "queued" });
     expect(lastRequest(transport)).toMatchObject({ method: "send.status", params: { id: "send-1" } });
+  });
+
+  test("aggregate handlers preserve scope, sender, opaque cursors and complete evidence", async () => {
+    const transport = new FakeTransport();
+    const cli = await started(transport);
+    const input = { chats: [{ platform: "slack", account: "a", chat_id: "c" }], interval: { from_ts: 0, to_ts: 10 }, sender: "self" as const, limit: 1, cursor: "opaque_123" };
+    const metadata = { coverage: [], identities: [], unread: [], next_cursor: "opaque_next" };
+    const recent = { messages: [], ...metadata };
+    expect(await respondToCall(transport, cli.recent(input), recent)).toEqual(recent);
+    expect(lastRequest(transport)).toMatchObject({ method: "message.recent", params: input });
+    const evidence = { kind: "recent_messages_evidence", query: { ...input, order: "latest" }, evidence: [], ...metadata };
+    expect(await respondToCall(transport, cli.evidence(input), evidence)).toEqual(evidence);
+    expect(lastRequest(transport)).toMatchObject({ method: "message.evidence", params: input });
+    expect(JSON.parse(formatCliResult(evidence))).toEqual(evidence);
   });
 
   test("prints coverage and limits even for zero-hit searches", () => {
@@ -144,6 +167,8 @@ describe("protocol-only CLI handlers", () => {
     const agent = createAgentHandlers({ connect: async () => transport, isTTY: () => false });
     expect("listPending" in agent).toBe(false);
     expect(() => formatCliResult({ approval_code: "123456" }, "agent")).toThrow(/approval code/i);
+    expect(() => formatCliResult({ nested: { approval_code: "123456" } }, "approver")).toThrow(/approval code/i);
+    expect("claimApprovalCode" in agent).toBe(false);
     const connecting = agent.connect();
     await ready(transport);
     await connecting;

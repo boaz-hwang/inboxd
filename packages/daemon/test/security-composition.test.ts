@@ -93,11 +93,16 @@ describe("daemon closure findings", () => {
     const denied = await connectJsonLines(state.socketPath);
     await denied.request("system.hello", { role: "approver", approver_token: "wrong-token" });
     await expect(denied.request("safety.intent.listPending")).rejects.toThrow(/trusted local approver/i);
+    await expect(denied.request("safety.intent.claimApprovalCode", { intent_id: created.intent_id })).rejects.toThrow(/trusted local approver/i);
     denied.close();
 
     const approver = await trustedApprover(state.socketPath, token);
     const pending = await approver.request("safety.intent.listPending", { limit: 1 });
-    expect(pending.intents).toEqual([expect.objectContaining({ intent_id: created.intent_id, approval_code: "654321" })]);
+    expect(pending.intents).toEqual([expect.objectContaining({ intent_id: created.intent_id })]);
+    expect(JSON.stringify(pending)).not.toContain("654321");
+    expect(await approver.request("safety.intent.claimApprovalCode", { intent_id: created.intent_id })).toEqual({ code: "654321" });
+    expect(await approver.request("safety.intent.claimApprovalCode", { intent_id: created.intent_id })).toEqual({ unavailable: true });
+    expect((await approver.request("safety.intent.listPending")).intents).toEqual([]);
     approver.close();
 
     await daemon.stop();
@@ -132,7 +137,7 @@ describe("daemon closure findings", () => {
     });
     daemons.push(daemon);
     const client = await connectJsonLines(state.socketPath);
-    await client.request("system.hello", { role: "reader" });
+    await client.request("system.hello", { role: "approver", approver_token: readLocalApproverToken(state.socketPath) });
     await expect(client.request("sync.backfill", { platform: "slack", account: "stable:other", chat_id: chat.chat_id, from_ts: 10, to_ts: 50 })).rejects.toThrow(/allowlist/i);
     const result = await client.request("sync.backfill", { ...chat, from_ts: 10, to_ts: 150 });
     expect(result).toMatchObject({ event_count: 1, authoritative: false });
@@ -149,7 +154,7 @@ describe("daemon closure findings", () => {
     const plain = await createDaemon({ socketPath: unconfigured.socketPath, databasePath: unconfigured.databasePath, keyProvider: unconfigured.keyProvider });
     daemons.push(plain);
     const blocked = await connectJsonLines(unconfigured.socketPath);
-    await blocked.request("system.hello", { role: "reader" });
+    await blocked.request("system.hello", { role: "approver", approver_token: readLocalApproverToken(unconfigured.socketPath) });
     await expect(blocked.request("sync.backfill", { ...chat, from_ts: 10, to_ts: 20 })).rejects.toThrow(/no adapter/i);
     blocked.close();
   });
@@ -185,7 +190,7 @@ describe("daemon closure findings", () => {
     });
     daemons.push(daemon);
     const client = await connectJsonLines(state.socketPath);
-    await client.request("system.hello", { role: "reader" });
+    await client.request("system.hello", { role: "approver", approver_token: readLocalApproverToken(state.socketPath) });
 
     await expect(client.request("sync.backfill", { platform: "kakao", account: "stable:other", chat_id: chat.chat_id, from_ts: 10, to_ts: 50 })).rejects.toThrow(/allowlist/i);
     const result = await client.request("sync.backfill", { ...chat, from_ts: 10, to_ts: 150 });
@@ -198,6 +203,63 @@ describe("daemon closure findings", () => {
     expect((database.query("SELECT count(*) AS count FROM messages").get() as { count: number }).count).toBe(1);
     expect(database.query("SELECT from_ts, to_ts, reason FROM sync_limits").all()).toEqual([{ from_ts: 10, to_ts: 100, reason: "unsupported" }]);
     database.close();
+  });
+
+  test("composes Slack and Kakao readers in one owner and reports observed diagnostics", async () => {
+    const state = fixture();
+    const slack = { platform: "slack", account: "stable:slack_account", chat_id: "stable:slack_chat" };
+    const kakao = { platform: "kakao", account: "stable:kakao_account", chat_id: "stable:kakao_chat" };
+    let slackCalls = 0;
+    let kakaoCalls = 0;
+    const daemon = await createDaemon({
+      socketPath: state.socketPath,
+      databasePath: state.databasePath,
+      keyProvider: state.keyProvider,
+      localSlack: {
+        allowedChats: [{ account: slack.account, chat_id: slack.chat_id }],
+        now: () => 100,
+        runner: async () => { slackCalls++; return []; },
+      },
+      localKakao: {
+        allowedChats: [{ account: kakao.account, chat_id: kakao.chat_id }],
+        measurement: {
+          schema_version: "kakao-contrib-read-measurement/v1",
+          kind: "kakao-read-field-measurement",
+          status: "VALIDATED",
+          observation: "observed",
+          source: "authorized-live-measurement",
+          observed_at: 100,
+          send: false,
+          supported_read_fields: ["account_id", "chat_id", "message_id", "author_id", "ts", "body"],
+        },
+        max_measurement_age: 100,
+        now: () => 100,
+        reader: async () => { kakaoCalls++; return []; },
+      },
+    });
+    daemons.push(daemon);
+    const client = await connectJsonLines(state.socketPath);
+    await client.request("system.hello", { role: "approver", approver_token: readLocalApproverToken(state.socketPath) });
+
+    await client.request("sync.backfill", { ...slack, from_ts: 10, to_ts: 90 });
+    await client.request("sync.backfill", { ...kakao, from_ts: 10, to_ts: 90 });
+    await expect(client.request("sync.backfill", { platform: "other", account: slack.account, chat_id: slack.chat_id, from_ts: 10, to_ts: 90 })).rejects.toThrow(/configured adapter/i);
+    expect({ slackCalls, kakaoCalls }).toEqual({ slackCalls: 1, kakaoCalls: 1 });
+
+    const status = await client.request("system.status");
+    expect(status).toMatchObject({
+      ready: true,
+      owner: "daemon",
+      configured_platforms: ["slack", "kakao"],
+      encryption: { ready: true },
+      endpoint: { kind: "uds", permissions: "owner-only" },
+      isolation: { grade: "b", protected: false },
+    });
+    expect(status.auth).toEqual({ slack: "unknown", kakao: "unknown" });
+    expect(status.sync).toEqual({ slack: { state: "success", active_jobs: 0 }, kakao: { state: "success", active_jobs: 0 } });
+    expect(await client.request("auth.status")).toEqual({ authenticated: false, platforms: status.auth });
+    expect(await client.request("sync.status")).toEqual({ state: "success", platforms: status.sync });
+    client.close();
   });
 
   test("serializes concurrent local Kakao backfills for the same stable chat", async () => {
@@ -235,7 +297,7 @@ describe("daemon closure findings", () => {
     });
     daemons.push(daemon);
     const client = await connectJsonLines(state.socketPath);
-    await client.request("system.hello", { role: "reader" });
+    await client.request("system.hello", { role: "approver", approver_token: readLocalApproverToken(state.socketPath) });
     await Promise.all([
       client.request("sync.backfill", { ...chat, from_ts: 10, to_ts: 90 }),
       client.request("sync.backfill", { ...chat, from_ts: 10, to_ts: 90 }),
@@ -271,7 +333,7 @@ describe("daemon closure findings", () => {
     });
     daemons.push(daemon);
     const client = await connectJsonLines(state.socketPath);
-    await client.request("system.hello", { role: "reader" });
+    await client.request("system.hello", { role: "approver", approver_token: readLocalApproverToken(state.socketPath) });
     await expect(client.request("sync.backfill", { ...chat, from_ts: 10, to_ts: 90 }))
       .rejects.toThrow("Kakao transport read failed");
     await expect(client.request("sync.backfill", { ...chat, from_ts: 10, to_ts: 90 }))

@@ -26,6 +26,12 @@ export interface CoverageLimit {
   readonly resolved_at?: Timestamp;
 }
 
+/** Caller-selected scopes, including configured chats with no collected rows. */
+export interface AggregateCoverageTarget {
+  readonly chats: readonly ChatKey[];
+  readonly interval: HalfOpenInterval;
+}
+
 export interface CoverageTarget {
   readonly chat: ChatKey;
   readonly interval: HalfOpenInterval;

@@ -1,40 +1,40 @@
-INBOXD · connected · slack                                                                                             │
-● INBOX | 2 SEARCH | 3 CHAT | 4 APPROVALS | 5 DOCTOR                                                                   │
-LIST 40%                                        │DETAIL 60%                                                            │
-Evidence rail: partial · 1 chats / 1 gaps / 1 l…│Context rail: INBOX · focus 2/2                                       │
-Status rail: connected · generation 1/1         │Detail — Inbox                                                        │
-Inbox                                           │Context: 1 of 2 · partial · 1 chats / 1 gaps / 1 limits               │
- ● 운영 09:41 한국어/CJK 경계 텍스트 가나다라마…│ID: slack:work:ops                                                    │
-> ○ 개발 09:38 다음 점검 항목                   │Author: 운영                                                          │
-                                                │Time: 09:41                                                           │
-                                                │Message: 한국어/CJK 경계 텍스트 가나다라마바사아자차카타파하漢字かな… │
-                                                │Back: Esc                                                             │
-                                                                                                                       │
-                                                                                                                       │
-                                                                                                                       │
-                                                                                                                       │
-                                                                                                                       │
-                                                                                                                       │
-                                                                                                                       │
-                                                                                                                       │
-                                                                                                                       │
-                                                                                                                       │
-                                                                                                                       │
-                                                                                                                       │
-                                                                                                                       │
-                                                                                                                       │
-                                                                                                                       │
-                                                                                                                       │
-                                                                                                                       │
-                                                                                                                       │
-                                                                                                                       │
-                                                                                                                       │
-                                                                                                                       │
-                                                                                                                       │
-                                                                                                                       │
-                                                                                                                       │
-                                                                                                                       │
-                                                                                                                       │
-                                                                                                                       │
-                                                                                                                       │
-1–5 j/k ↑↓ Enter / n-more b c a Esc ? q                                                                                │
+INBOXD · connected · slack                                                                                              
+● INBOX | 2 SEARCH | 3 CHAT | 4 APPROVALS | 5 DOCTOR                                                                    
+LIST 40%                                        │DETAIL 60%                                                             
+Evidence rail: partial · 1 chats / 1 gaps / 1 l…│Context rail: INBOX · focus 2/2                                        
+Status rail: connected · generation 1/1         │Detail — Inbox                                                         
+Inbox                                           │Context: 1 of 2 · partial · 1 chats / 1 gaps / 1 limits                
+ ● 운영 Unread: ? (unknown) 09:41 한국어/CJK 경…│ID: slack:work:ops                                                     
+> ○ 개발 09:38 다음 점검 항목                   │Chat: slack:work:ops                                                   
+                                                │Unread: ? (unknown)                                                    
+                                                │Unread reason: unobserved                                              
+                                                │Coverage: partial · 1 chats / 1 gaps / 1 limits                        
+                                                │Self: ? (unknown)                                                      
+                                                │Author: 운영                                                           
+                                                │Time: 09:41                                                            
+                                                │Message: 한국어/CJK 경계 텍스트 가나다라마바사아자차카타파하漢字かなカ 
+                                                │ナ — whole grapheme clipping evidence (edited)                         
+                                                │Back: Esc · PgUp/PgDn scroll · Home top (1–10/10)                      
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+1–5 j/k ↑↓ Enter / n-more b c a Esc ? q                                                                                 

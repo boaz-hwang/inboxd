@@ -2,6 +2,33 @@ export type Timestamp = number;
 
 import { coreCall } from "../../native/src/index.ts";
 
+export interface AccountKey {
+  readonly platform: string;
+  readonly account: string;
+}
+
+/** Identity is never inferred from message authors or display names. */
+export type AccountIdentity = AccountKey & (
+  | { readonly status: "known"; readonly source: "authenticated_adapter"; readonly self_id: string; readonly observed_at: Timestamp }
+  | { readonly status: "unknown"; readonly source: "unknown"; readonly reason: "unsupported" | "unavailable" | "unobserved"; readonly observed_at: Timestamp | null }
+);
+
+/** A local estimate is not a platform-reported count; unknown is never zero. */
+export type UnreadState = { readonly chat: ChatKey } & (
+  | { readonly status: "known"; readonly source: "platform"; readonly count: number; readonly observed_at: Timestamp }
+  | { readonly status: "known"; readonly source: "local_estimate"; readonly count: number; readonly observed_at: Timestamp;
+      readonly basis: { readonly read_cursor: string; readonly interval: { readonly from_ts: Timestamp; readonly to_ts: Timestamp } } }
+  | { readonly status: "unknown"; readonly source: "unknown"; readonly count: null; readonly reason: "unsupported" | "unavailable" | "unobserved"; readonly observed_at: Timestamp | null }
+);
+
+/** Validates adapter evidence; unobserved defaults are produced by retrieval, not ingestion. */
+export function accountIdentity(value: unknown): AccountIdentity {
+  return coreCall("domain.accountIdentity", value);
+}
+export function unreadState(value: unknown): UnreadState {
+  return coreCall("domain.unreadState", value);
+}
+
 export interface ChatKey {
   readonly platform: string;
   readonly account: string;

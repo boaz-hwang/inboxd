@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
-import type { Coverage, CoverageTarget } from "../../core/src/coverage.ts";
-import type { MessageKey } from "../../core/src/models.ts";
+import type { AggregateCoverageTarget, Coverage, CoverageTarget } from "../../core/src/coverage.ts";
+import type { AccountIdentity, MessageKey, UnreadState } from "../../core/src/models.ts";
 import { coreCall } from "../../native/src/index.ts";
 
 export interface StoredMessage {
@@ -13,6 +13,34 @@ export interface SearchMessagesInput extends CoverageTarget, PageInput { readonl
 export interface SearchMessagesResult { readonly messages: readonly StoredMessage[]; readonly coverage: Coverage; readonly next_cursor?: string; }
 export interface InboxMessagesInput extends CoverageTarget, PageInput {}
 export interface InboxMessagesResult { readonly messages: readonly StoredMessage[]; readonly coverage: Coverage; readonly next_cursor?: string; }
+
+export interface RecentMessagesInput extends AggregateCoverageTarget, PageInput {
+  readonly sender?: "all" | "self";
+}
+export interface RecentMessagesResult {
+  readonly messages: readonly StoredMessage[];
+  readonly coverage: readonly Coverage[];
+  readonly identities: readonly AccountIdentity[];
+  readonly unread: readonly UnreadState[];
+  readonly next_cursor?: string;
+}
+export interface RecentEvidencePacket extends Omit<RecentMessagesResult, "messages"> {
+  readonly kind: "recent_messages_evidence";
+  readonly query: AggregateCoverageTarget & { readonly sender: "all" | "self"; readonly order: "latest"; readonly limit: number };
+  readonly evidence: readonly {
+    readonly source: { readonly operation: "store.getMessage"; readonly key: MessageKey };
+    readonly message: StoredMessage;
+  }[];
+}
+
+/** Latest-first, then binary platform/account/chat/message key; never a global implicit scope. */
+export function recentMessages(database: Database, input: RecentMessagesInput): RecentMessagesResult {
+  return coreCall("store.recentMessages", input, database);
+}
+/** Q1 is local, deterministic evidence retrieval, not a hosted-model summary. */
+export function recentEvidence(database: Database, input: RecentMessagesInput): RecentEvidencePacket {
+  return coreCall("store.recentEvidence", input, database);
+}
 
 export function getMessage(database: Database, key: MessageKey): StoredMessage | null {
   return coreCall("store.getMessage", key, database);

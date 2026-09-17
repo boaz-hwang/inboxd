@@ -66,7 +66,10 @@ export async function connectJsonLines(socketPath: string): Promise<JsonLineClie
         const receive = (frame: Record<string, unknown>) => {
           if (frame.type === "response" && frame.id === id) {
             if (frame.ok === true) resolve(frame.result as Record<string, unknown>);
-            else reject(new Error(String((frame.error as { message?: unknown } | undefined)?.message)));
+            else {
+              const error = frame.error as { message?: unknown; code?: unknown } | undefined;
+              reject(Object.assign(new Error(String(error?.message)), { code: error?.code }));
+            }
             return;
           }
           waiters.push(receive);

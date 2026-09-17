@@ -452,7 +452,7 @@ fn propose(input: &Value, host: &dyn Host) -> CoreResult<Value> {
     );
     let code = host_string(host, "host.approvalCode", "approval code")?;
     let approval = json!({
-        "code": code, "code_hash": hash(host, json!(code))?,
+        "code_hash": hash(host, json!(code))?,
         "bound_hash": bound_hash(host, &intent_id, &payload)?,
         "actor": payload.get("actor").cloned().unwrap(), "scope": payload.get("scope").cloned().unwrap(), "expires_at": expires,
     });
@@ -464,6 +464,49 @@ fn propose(input: &Value, host: &dyn Host) -> CoreResult<Value> {
         Ok(())
     })?;
     Ok(json!({"intent_id":intent_id,"expires_at":expires}))
+}
+
+fn initialize(host: &dyn Host) -> CoreResult<Value> {
+    let sql = SqlHost::new(host);
+    sql.transaction(|sql| {
+        // Legacy approvals must never be a recovery source for raw codes.
+        sql.run("UPDATE approvals SET payload_json = json_remove(payload_json, '$.code', '$.approval_code', '$.approvalCode')", &[])?;
+        for row in sql.all("SELECT id, payload_json FROM intents WHERE json_extract(payload_json, '$.state') = 'Proposed'", &[])? {
+            let id = string(object(&row, "intent row")?, "id")?;
+            let payload = row_payload(host, &row)?;
+            let expired = mark_intent(sql, host, id, &payload, "Expired", Some("approval_code_unavailable"))?;
+            audit(sql, host, "intent.expired", id, metadata(id, &expired))?;
+        }
+        Ok(Value::Null)
+    })
+}
+
+fn claim_approval_code(input: &Value, host: &dyn Host) -> CoreResult<Value> {
+    let args = object(input, "safety.claimApprovalCode input")?;
+    let id = string(args, "intent_id")?;
+    let sql = SqlHost::new(host);
+    let Some(payload) = load_intent(&sql, host, id)? else {
+        return Ok(json!({"available": false}));
+    };
+    let payload = expire_if_needed(&sql, host, id, payload)?;
+    if payload.get("state") != Some(&json!("Proposed")) {
+        return Ok(json!({"available": false}));
+    }
+    if args.get("code_available") != Some(&json!(true)) {
+        sql.transaction(|sql| {
+            let expired = mark_intent(
+                sql,
+                host,
+                id,
+                &payload,
+                "Expired",
+                Some("approval_code_unavailable"),
+            )?;
+            audit(sql, host, "intent.expired", id, metadata(id, &expired))
+        })?;
+        return Ok(json!({"available": false}));
+    }
+    Ok(json!({"available": true}))
 }
 
 fn list_pending(input: &Value, host: &dyn Host) -> CoreResult<Value> {
@@ -509,16 +552,7 @@ fn list_pending(input: &Value, host: &dyn Host) -> CoreResult<Value> {
         if !matches!(state, "Proposed" | "Approved" | "Sending" | "Uncertain") {
             continue;
         }
-        let mut item = summary(id, &payload).as_object().unwrap().clone();
-        if !matches!(state, "Sending" | "Uncertain") {
-            let Some(approval) = load_approval(&sql, host, id)? else {
-                continue;
-            };
-            if let Some(code) = approval.payload.get("code") {
-                item.insert("approval_code".into(), code.clone());
-            }
-        }
-        intents.push(Value::Object(item));
+        intents.push(summary(id, &payload));
     }
     let mut result = json!({"intents":intents}).as_object().unwrap().clone();
     if rows.len() > limit as usize {
@@ -733,26 +767,74 @@ fn finalize(input: &Value, host: &dyn Host) -> CoreResult<Value> {
     let sql = SqlHost::new(host);
     sql.transaction(|sql| {
         let payload = load_intent(sql, host, id)?.ok_or_else(|| ineligible("intent is missing"))?;
+        if payload.get("state") != Some(&json!("Sending")) {
+            return Err(ineligible("send is no longer active"));
+        }
         let mut state_payload = payload.clone();
         if let Some(receipt) = transport.get("receipt") { state_payload.insert("receipt".into(), receipt.clone()); }
         let reason = transport.get("reason").and_then(Value::as_str);
+        let send_update = sql.run("UPDATE sends SET state = ?, payload_json = ? WHERE intent_id = ? AND state = 'Sending'", &[json!(state), json!(stringify(host, Value::Object(transport.clone()))?), json!(id)])?;
+        if send_update.get("changes").and_then(Value::as_u64) != Some(1) {
+            return Err(ineligible("send is no longer active"));
+        }
         let updated = mark_intent(sql, host, id, &state_payload, state, reason)?;
-        sql.run("UPDATE sends SET state = ?, payload_json = ? WHERE intent_id = ? AND state = 'Sending'", &[json!(state), json!(stringify(host, Value::Object(transport.clone()))?), json!(id)])?;
         if state == "Failed" { release_quota(sql, host, payload.get("scope").unwrap_or(&Value::Null))?; }
         audit(sql, host, &format!("send.{}", state.to_lowercase()), id, metadata(id, &updated))?;
         Ok(summary(id, &updated))
     })
 }
 
+/// Only an independently read, exactly bound destination message can verify Sent.
+fn verify_receipt(input: &Value, host: &dyn Host) -> CoreResult<Value> {
+    let args = object(input, "safety.verifyReceipt input")?;
+    let id = string(args, "intent_id")?;
+    let sql = SqlHost::new(host);
+    sql.transaction(|sql| {
+        let payload = load_intent(sql, host, id)?.ok_or_else(|| ineligible("intent is missing"))?;
+        if payload.get("state") != Some(&json!("Sent")) {
+            return Err(ineligible("only a Sent intent can be verified"));
+        }
+        let evidence = args.get("evidence").unwrap_or(&Value::Null);
+        let receipt = payload
+            .get("receipt")
+            .and_then(Value::as_str)
+            .filter(|v| !v.is_empty());
+        if receipt.is_none()
+            || evidence.get("receipt").and_then(Value::as_str) != receipt
+            || !equal_scopes(
+                evidence.get("scope").unwrap_or(&Value::Null),
+                payload.get("scope").unwrap_or(&Value::Null),
+            )
+            || evidence.get("body") != payload.get("body")
+            || evidence.get("parent_id") != payload.get("parent_id")
+        {
+            return Ok(summary(id, &payload));
+        }
+        let changed = sql.run(
+            "UPDATE sends SET state = 'Verified' WHERE intent_id = ? AND state = 'Sent'",
+            &[json!(id)],
+        )?;
+        if changed.get("changes").and_then(Value::as_u64) != Some(1) {
+            return Err(ineligible("send is no longer Sent"));
+        }
+        let updated = mark_intent(sql, host, id, &payload, "Verified", None)?;
+        audit(sql, host, "send.verified", id, metadata(id, &updated))?;
+        Ok(summary(id, &updated))
+    })
+}
+
 pub fn dispatch(op: &str, input: &Value, host: &dyn Host) -> CoreResult<Value> {
     match op {
+        "safety.initialize" => initialize(host),
         "safety.propose" => propose(input, host),
+        "safety.claimApprovalCode" => claim_approval_code(input, host),
         "safety.listPendingPage" => list_pending(input, host),
         "safety.getIntent" => get_intent(input, host),
         "safety.approve" => approve(input, host),
         "safety.reject" => reject_intent(input, host),
         "safety.claim" => claim(input, host),
         "safety.finalize" => finalize(input, host),
+        "safety.verifyReceipt" => verify_receipt(input, host),
         _ => Err(error(
             "RangeError",
             format!("unknown safety operation: {op}"),

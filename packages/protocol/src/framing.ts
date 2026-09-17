@@ -6,13 +6,14 @@ export class JsonLinesFrameError extends Error {
 }
 
 const encoder = new TextEncoder();
-const decoder = new TextDecoder();
+
 
 export interface JsonLinesOptions {
   maxLineBytes?: number;
 }
 
 export class JsonLinesDecoder {
+  private readonly decoder = new TextDecoder();
   private readonly maxLineBytes: number;
   private buffer = "";
 
@@ -24,7 +25,7 @@ export class JsonLinesDecoder {
   }
 
   push(chunk: string | Uint8Array): unknown[] {
-    this.buffer += typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true });
+    this.buffer += typeof chunk === "string" ? chunk : this.decoder.decode(chunk, { stream: true });
     if (encoder.encode(this.buffer).byteLength > this.maxLineBytes && !this.buffer.includes("\n")) {
       throw new JsonLinesFrameError(`frame exceeds maximum line size of ${this.maxLineBytes} bytes`);
     }

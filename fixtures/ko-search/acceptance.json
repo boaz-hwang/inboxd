@@ -1,0 +1,339 @@
+{
+  "description": "Anonymous synthetic O5 acceptance corpus; literal substring search, not linguistic normalization or a real-user quality claim.",
+  "messages": [
+    {
+      "id": "ko-one",
+      "body": "봄 소풍을 준비해요"
+    },
+    {
+      "id": "ko-two",
+      "body": "안녕 반가워요"
+    },
+    {
+      "id": "ko-three",
+      "body": "회의록을 공유합니다"
+    },
+    {
+      "id": "ko-space",
+      "body": "내일 일정 확인 부탁해요"
+    },
+    {
+      "id": "mixed-api",
+      "body": "오늘 API 배포 완료"
+    },
+    {
+      "id": "mixed-version",
+      "body": "서비스 배포 v2 준비"
+    },
+    {
+      "id": "ko-substring",
+      "body": "새로운슬랙봇설정 안내"
+    },
+    {
+      "id": "ko-compound",
+      "body": "자동토큰갱신실패 알림"
+    },
+    {
+      "id": "mixed-issue",
+      "body": "버그 #42 수정했습니다"
+    },
+    {
+      "id": "ascii-case",
+      "body": "암호화 SQLCipher 설정"
+    },
+    {
+      "id": "ascii-colon",
+      "body": "TODO: 문서 번역"
+    },
+    {
+      "id": "apostrophe",
+      "body": "O'Reilly 도서 구입"
+    },
+    {
+      "id": "url",
+      "body": "문서 https://example.invalid/guide 참고"
+    },
+    {
+      "id": "mention",
+      "body": "담당자 민수@example.invalid 확인"
+    },
+    {
+      "id": "percent",
+      "body": "진행률 100% 완료"
+    },
+    {
+      "id": "wildcards",
+      "body": "리터럴 %_ 기호입니다"
+    },
+    {
+      "id": "backslash",
+      "body": "경로 C:\\자료\\파일 참고"
+    },
+    {
+      "id": "emoji-one",
+      "body": "축하 😀 축하"
+    },
+    {
+      "id": "emoji-two",
+      "body": "인사 😀나 환영"
+    },
+    {
+      "id": "emoji-three",
+      "body": "표식 😀나다 끝"
+    },
+    {
+      "id": "jamo",
+      "body": "자모 ㄱㄴㄷ 순서"
+    },
+    {
+      "id": "hangul",
+      "body": "연습 가나다 순서"
+    },
+    {
+      "id": "quotes",
+      "body": "오늘 \"안건\" 결정"
+    },
+    {
+      "id": "hyphen",
+      "body": "식별자 foo-bar 참고"
+    },
+    {
+      "id": "decimal",
+      "body": "앱 버전2.0 출시"
+    },
+    {
+      "id": "decoy-wildcards",
+      "body": "리터럴 xX 기호와 진행률 100x 완료"
+    },
+    {
+      "id": "decoy-phrase",
+      "body": "일정 먼저 확인, API 나중에 배포"
+    },
+    {
+      "id": "decoy-quotes",
+      "body": "오늘 안건 결정"
+    },
+    {
+      "id": "decoy-slash",
+      "body": "경로 C:/자료/파일 참고"
+    },
+    {
+      "id": "decoy-reversed",
+      "body": "bar-foo 식별자"
+    }
+  ],
+  "positive_cases": [
+    {
+      "name": "ko-one",
+      "query": "봄",
+      "expected_ids": [
+        "ko-one"
+      ]
+    },
+    {
+      "name": "ko-two",
+      "query": "안녕",
+      "expected_ids": [
+        "ko-two"
+      ]
+    },
+    {
+      "name": "ko-three",
+      "query": "회의록",
+      "expected_ids": [
+        "ko-three"
+      ]
+    },
+    {
+      "name": "ko-space",
+      "query": "일정 확",
+      "expected_ids": [
+        "ko-space"
+      ]
+    },
+    {
+      "name": "mixed-api",
+      "query": "API 배포",
+      "expected_ids": [
+        "mixed-api"
+      ]
+    },
+    {
+      "name": "mixed-version",
+      "query": "배포 v2",
+      "expected_ids": [
+        "mixed-version"
+      ]
+    },
+    {
+      "name": "ko-substring",
+      "query": "슬랙봇",
+      "expected_ids": [
+        "ko-substring"
+      ]
+    },
+    {
+      "name": "ko-compound",
+      "query": "토큰갱신",
+      "expected_ids": [
+        "ko-compound"
+      ]
+    },
+    {
+      "name": "mixed-issue",
+      "query": "버그 #42",
+      "expected_ids": [
+        "mixed-issue"
+      ]
+    },
+    {
+      "name": "ascii-case",
+      "query": "sqlcipher",
+      "expected_ids": [
+        "ascii-case"
+      ]
+    },
+    {
+      "name": "ascii-colon",
+      "query": "TODO:",
+      "expected_ids": [
+        "ascii-colon"
+      ]
+    },
+    {
+      "name": "apostrophe",
+      "query": "O'Reilly",
+      "expected_ids": [
+        "apostrophe"
+      ]
+    },
+    {
+      "name": "url",
+      "query": "https://",
+      "expected_ids": [
+        "url"
+      ]
+    },
+    {
+      "name": "mention",
+      "query": "민수@",
+      "expected_ids": [
+        "mention"
+      ]
+    },
+    {
+      "name": "percent",
+      "query": "100%",
+      "expected_ids": [
+        "percent"
+      ]
+    },
+    {
+      "name": "wildcards",
+      "query": "%_",
+      "expected_ids": [
+        "wildcards"
+      ]
+    },
+    {
+      "name": "backslash",
+      "query": "\\",
+      "expected_ids": [
+        "backslash"
+      ]
+    },
+    {
+      "name": "emoji-one",
+      "query": "😀",
+      "expected_ids": [
+        "emoji-one",
+        "emoji-two",
+        "emoji-three"
+      ]
+    },
+    {
+      "name": "emoji-two",
+      "query": "😀나",
+      "expected_ids": [
+        "emoji-two",
+        "emoji-three"
+      ]
+    },
+    {
+      "name": "emoji-three",
+      "query": "😀나다",
+      "expected_ids": [
+        "emoji-three"
+      ]
+    },
+    {
+      "name": "jamo",
+      "query": "ㄱㄴㄷ",
+      "expected_ids": [
+        "jamo"
+      ]
+    },
+    {
+      "name": "hangul",
+      "query": "가나다",
+      "expected_ids": [
+        "hangul"
+      ]
+    },
+    {
+      "name": "quotes",
+      "query": "\"안건\"",
+      "expected_ids": [
+        "quotes"
+      ]
+    },
+    {
+      "name": "hyphen",
+      "query": "foo-bar",
+      "expected_ids": [
+        "hyphen"
+      ]
+    },
+    {
+      "name": "decimal",
+      "query": "버전2.0",
+      "expected_ids": [
+        "decimal"
+      ]
+    }
+  ],
+  "negative_cases": [
+    {
+      "name": "absent-korean",
+      "query": "존재하지않는문구"
+    },
+    {
+      "name": "absent-mixed",
+      "query": "없는 API v99"
+    },
+    {
+      "name": "literal-fts-or",
+      "query": "회의록 OR 안녕"
+    },
+    {
+      "name": "literal-fts-prefix",
+      "query": "회의*"
+    },
+    {
+      "name": "literal-fts-column",
+      "query": "body:회의록"
+    },
+    {
+      "name": "literal-sql-injection",
+      "query": "' OR 1=1 --"
+    },
+    {
+      "name": "reversed-phrase",
+      "query": "확인 일정"
+    },
+    {
+      "name": "literal-escaped-wildcard",
+      "query": "\\%"
+    }
+  ]
+}

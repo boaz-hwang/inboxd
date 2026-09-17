@@ -3,12 +3,21 @@ use serde_json::{Map, Value, json};
 use crate::domain;
 use crate::{CoreError, CoreResult, Host, SqlHost};
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 3;
 
 pub const INITIAL_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS chats (
   platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL,
   display_name TEXT, PRIMARY KEY (platform, account, chat_id)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS unread_evidence (
+  platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL,
+  evidence_json TEXT NOT NULL, observed_at REAL NOT NULL,
+  PRIMARY KEY (platform, account, chat_id)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS account_self (
+  platform TEXT NOT NULL, account TEXT NOT NULL, evidence_json TEXT NOT NULL, observed_at REAL NOT NULL,
+  PRIMARY KEY (platform, account)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS identities (
   platform TEXT NOT NULL, account TEXT NOT NULL, identity_id TEXT NOT NULL,
@@ -37,6 +46,11 @@ CREATE TABLE IF NOT EXISTS read_cursors (
 CREATE TABLE IF NOT EXISTS sync_state (
   platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL,
   cursor TEXT NOT NULL, updated_at REAL NOT NULL,
+  PRIMARY KEY (platform, account, chat_id)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS sync_page_sequence (
+  platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL CHECK (sequence > 0 AND sequence <= 9007199254740991),
   PRIMARY KEY (platform, account, chat_id)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS sync_coverage (
@@ -149,8 +163,13 @@ fn remove_from_fts(sql: &SqlHost<'_>, key: &Value) -> CoreResult<()> {
     Ok(())
 }
 
-fn index_message(sql: &SqlHost<'_>, key: &Value, body: &Value) -> CoreResult<()> {
-    remove_from_fts(sql, key)?;
+fn index_message(sql: &SqlHost<'_>, key: &Value, body: &Value, replacing: bool) -> CoreResult<()> {
+    // Fresh keys have no FTS row: scanning UNINDEXED key columns for every new
+    // message makes initial ingestion quadratic. Replacements still remove it
+    // inside the same transaction as the message write.
+    if replacing {
+        remove_from_fts(sql, key)?;
+    }
     let mut params = key_params(key)?;
     params.push(body.clone());
     sql.run("INSERT INTO messages_fts (platform, account, chat_id, msg_id, body) VALUES (?, ?, ?, ?, ?)", &params)?;
@@ -240,8 +259,8 @@ fn apply_event(sql: &SqlHost<'_>, host: &dyn Host, event: &Value) -> CoreResult<
         }
         let (revision_kind, revision_value) = revision_parts(host, field(event, "revision"))?;
         let tombstone = object(field(event, "tombstone"), "tombstone")?;
-        remove_from_fts(sql, &key)?;
         if existing.is_some() {
+            remove_from_fts(sql, &key)?;
             let mut params = vec![
                 field(tombstone, "deleted_at").clone(),
                 Value::String(revision_kind.into()),
@@ -279,7 +298,7 @@ fn apply_event(sql: &SqlHost<'_>, host: &dyn Host, event: &Value) -> CoreResult<
         ];
         params.extend(key_params(&key)?);
         sql.run("UPDATE messages SET body = ?, edited_at = ?, revision_kind = ?, revision_value = ? WHERE platform = ? AND account = ? AND chat_id = ? AND msg_id = ?", &params)?;
-        index_message(sql, &key, field(event, "body"))?;
+        index_message(sql, &key, field(event, "body"), true)?;
         return Ok(());
     }
     let message = object(field(event, "message"), "message")?;
@@ -315,7 +334,7 @@ fn apply_event(sql: &SqlHost<'_>, host: &dyn Host, event: &Value) -> CoreResult<
       author_id = excluded.author_id, ts = excluded.ts, body = excluded.body,
       parent_platform = excluded.parent_platform, parent_account = excluded.parent_account, parent_chat_id = excluded.parent_chat_id, parent_msg_id = excluded.parent_msg_id,
       attachments_json = excluded.attachments_json, edited_at = excluded.edited_at, revision_kind = excluded.revision_kind, revision_value = excluded.revision_value"#, &params)?;
-    index_message(sql, &key, field(message, "body"))?;
+    index_message(sql, &key, field(message, "body"), existing.is_some())?;
     Ok(())
 }
 
@@ -349,7 +368,7 @@ fn persist_limit(sql: &SqlHost<'_>, limit: &Value) -> CoreResult<()> {
         field(limit, "observed_at").clone(),
         limit.get("resolved_at").cloned().unwrap_or(Value::Null),
     ]);
-    sql.run("INSERT INTO sync_limits (platform, account, chat_id, from_ts, to_ts, reason, observed_at, resolved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(platform, account, chat_id, from_ts, to_ts, reason) DO UPDATE SET observed_at = MIN(sync_limits.observed_at, excluded.observed_at), resolved_at = COALESCE(excluded.resolved_at, sync_limits.resolved_at)", &params)?;
+    sql.run("INSERT INTO sync_limits (platform, account, chat_id, from_ts, to_ts, reason, observed_at, resolved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(platform, account, chat_id, from_ts, to_ts, reason) DO UPDATE SET observed_at = MIN(sync_limits.observed_at, excluded.observed_at), resolved_at = CASE WHEN excluded.reason = 'rate_limit' AND excluded.resolved_at IS NULL AND excluded.observed_at >= sync_limits.resolved_at THEN NULL ELSE COALESCE(excluded.resolved_at, sync_limits.resolved_at) END", &params)?;
     Ok(())
 }
 
@@ -370,6 +389,44 @@ fn apply_sync_batch(host: &dyn Host, input: &Value) -> CoreResult<Value> {
     let limits = optional_collection(input, "limits")?;
     let sql = SqlHost::new(host);
     sql.transaction(|sql| {
+        // BEGIN IMMEDIATE + per-chat CAS defines committed page order, including
+        // timestamp ties. Provider cursor equality is not a sequence (ABA/retries).
+        let committed_page = input.contains_key("expected_page_sequence");
+        if !committed_page && (input.contains_key("identity") || input.contains_key("unread")) {
+            return Err(CoreError::new("Error", "Trusted metadata requires a sync page sequence"));
+        }
+        if let Some(sync) = input.get("sync") {
+            let sync = object(sync, "sync cursor")?;
+            let chat = domain::chat_key(field(sync, "chat"))?;
+            if !committed_page && !sql.get("SELECT sequence FROM sync_page_sequence WHERE platform = ? AND account = ? AND chat_id = ?", &chat_params(&chat)?)?.is_null() {
+                return Err(CoreError::new("Error", "Tracked cursor requires a sync page sequence"));
+            }
+            if let Some(identity) = input.get("identity") {
+                let identity = domain::account_identity(identity)?;
+                if identity["platform"] != chat["platform"] || identity["account"] != chat["account"] {
+                    return Err(CoreError::new("Error", "Identity page scope mismatch"));
+                }
+            }
+            if let Some(unread) = input.get("unread") {
+                if domain::unread_state(unread)?["chat"] != chat {
+                    return Err(CoreError::new("Error", "Unread page scope mismatch"));
+                }
+            }
+        }
+        if let Some(expected) = input.get("expected_page_sequence") {
+            let expected = expected.as_u64().filter(|v| *v < 9_007_199_254_740_991)
+                .ok_or_else(|| CoreError::new("Error", "Invalid sync page sequence"))?;
+            let sync = object(field(input, "sync"), "sync cursor")?;
+            let mut params = chat_params(field(sync, "chat"))?;
+            let row = sql.get("SELECT sequence FROM sync_page_sequence WHERE platform = ? AND account = ? AND chat_id = ?", &params)?;
+            if row["sequence"].as_u64().unwrap_or(0) != expected {
+                return Err(CoreError::new("Error", "Stale sync page"));
+            }
+            params.push(json!(expected + 1));
+            sql.run("INSERT INTO sync_page_sequence (platform, account, chat_id, sequence) VALUES (?, ?, ?, ?) ON CONFLICT(platform, account, chat_id) DO UPDATE SET sequence = excluded.sequence", &params)?;
+        }
+        if let Some(identity) = input.get("identity") { persist_account_identity(host, identity, committed_page)?; }
+        if let Some(unread) = input.get("unread") { persist_unread_state(host, unread, committed_page)?; }
         for event in events {
             apply_event(sql, host, event)?;
         }
@@ -392,9 +449,12 @@ fn read_sync_state(host: &dyn Host, input: &Value) -> CoreResult<Value> {
     if row.is_null() {
         return Ok(Value::Null);
     }
-    Ok(
-        json!({ "chat": input, "cursor": row["cursor"].clone(), "updated_at": row["updated_at"].clone() }),
-    )
+    let sequence = SqlHost::new(host).get("SELECT sequence FROM sync_page_sequence WHERE platform = ? AND account = ? AND chat_id = ?", &chat_params(input)?)?;
+    let mut result = json!({ "chat": input, "cursor": row["cursor"].clone(), "updated_at": row["updated_at"].clone() });
+    if let Some(sequence) = sequence["sequence"].as_u64() {
+        result["page_sequence"] = json!(sequence);
+    }
+    Ok(result)
 }
 
 fn migrate(host: &dyn Host) -> CoreResult<Value> {
@@ -619,7 +679,8 @@ fn query_messages(host: &dyn Host, input: &Value, search: bool) -> CoreResult<Va
     let cursor = decode_cursor(host, input.get("cursor"), &scope)?;
     let chat = field(input, "chat");
     let interval = object(field(input, "interval"), "interval")?;
-    let mut params = chat_params(chat)?;
+    let chat_query_params = chat_params(chat)?;
+    let mut params = chat_query_params.clone();
     params.extend([
         field(interval, "from_ts").clone(),
         field(interval, "to_ts").clone(),
@@ -642,8 +703,24 @@ fn query_messages(host: &dyn Host, input: &Value, search: bool) -> CoreResult<Va
             "m.platform = ? AND m.account = ? AND m.chat_id = ? AND m.ts >= ? AND m.ts < ? AND m.deleted_at IS NULL{cursor_where}"
         );
         if length >= 3 {
-            sql_text.push_str(&format!(" JOIN messages_fts ON messages_fts.platform = m.platform AND messages_fts.account = m.account AND messages_fts.chat_id = m.chat_id AND messages_fts.msg_id = m.msg_id WHERE {where_clause} AND messages_fts MATCH ?"));
-            params.push(Value::String(fts_phrase(&query)));
+            // CROSS JOIN fixes the FTS virtual table as the outer loop. Without
+            // this, SQLite can choose the timestamp index first and execute an
+            // FTS lookup for every message in a large chat.
+            sql_text = "SELECT m.platform, m.account, m.chat_id, m.msg_id, m.author_id, m.ts, m.body, m.edited_at, m.deleted_at, m.revision_kind, m.revision_value FROM messages_fts CROSS JOIN messages m".to_owned();
+            sql_text.push_str(&format!(" WHERE messages_fts MATCH ? AND messages_fts.platform = ? AND messages_fts.account = ? AND messages_fts.chat_id = ? AND m.platform = messages_fts.platform AND m.account = messages_fts.account AND m.chat_id = messages_fts.chat_id AND m.msg_id = messages_fts.msg_id AND m.ts >= ? AND m.ts < ? AND m.deleted_at IS NULL{cursor_where}"));
+            params = vec![Value::String(fts_phrase(&query))];
+            params.extend(chat_query_params);
+            params.extend([
+                field(interval, "from_ts").clone(),
+                field(interval, "to_ts").clone(),
+            ]);
+            if let Some(cursor) = &cursor {
+                params.extend([
+                    cursor["ts"].clone(),
+                    cursor["ts"].clone(),
+                    cursor["msg_id"].clone(),
+                ]);
+            }
         } else {
             sql_text.push_str(&format!(
                 " WHERE {where_clause} AND m.body LIKE ? ESCAPE '\\'"
@@ -669,6 +746,193 @@ fn query_messages(host: &dyn Host, input: &Value, search: bool) -> CoreResult<Va
     if let Some(cursor) = next_cursor {
         result["next_cursor"] = Value::String(cursor);
     }
+    Ok(result)
+}
+
+fn record_unread_state(host: &dyn Host, input: &Value) -> CoreResult<Value> {
+    persist_unread_state(host, input, false)
+}
+
+fn persist_unread_state(host: &dyn Host, input: &Value, committed_page: bool) -> CoreResult<Value> {
+    let evidence = domain::unread_state(input)?;
+    let mut params = chat_params(&evidence["chat"])?;
+    params.extend([
+        json!(json_stringify(host, evidence.clone())?),
+        evidence["observed_at"].clone(),
+        json!(i32::from(committed_page)),
+    ]);
+    SqlHost::new(host).run("INSERT INTO unread_evidence (platform, account, chat_id, evidence_json, observed_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(platform, account, chat_id) DO UPDATE SET evidence_json = excluded.evidence_json, observed_at = excluded.observed_at WHERE excluded.observed_at > unread_evidence.observed_at OR (? = 1 AND excluded.observed_at = unread_evidence.observed_at)", &params)?;
+    Ok(Value::Null)
+}
+
+fn unread_for(host: &dyn Host, chat: &Value) -> CoreResult<Value> {
+    let row = SqlHost::new(host).get("SELECT evidence_json FROM unread_evidence WHERE platform = ? AND account = ? AND chat_id = ?", &chat_params(chat)?)?;
+    if let Some(text) = row["evidence_json"].as_str() {
+        return json_parse(host, text);
+    }
+    Ok(
+        json!({ "chat": chat, "status": "unknown", "source": "unknown", "count": null, "reason": "unobserved", "observed_at": null }),
+    )
+}
+
+fn record_account_identity(host: &dyn Host, input: &Value) -> CoreResult<Value> {
+    persist_account_identity(host, input, false)
+}
+
+fn persist_account_identity(
+    host: &dyn Host,
+    input: &Value,
+    committed_page: bool,
+) -> CoreResult<Value> {
+    let evidence = domain::account_identity(input)?;
+    SqlHost::new(host).run("INSERT INTO account_self (platform, account, evidence_json, observed_at) VALUES (?, ?, ?, ?) ON CONFLICT(platform, account) DO UPDATE SET evidence_json = excluded.evidence_json, observed_at = excluded.observed_at WHERE excluded.observed_at > account_self.observed_at OR (? = 1 AND excluded.observed_at = account_self.observed_at)", &[
+        evidence["platform"].clone(), evidence["account"].clone(), json!(json_stringify(host, evidence.clone())?), evidence["observed_at"].clone(), json!(i32::from(committed_page)),
+    ])?;
+    Ok(Value::Null)
+}
+
+fn account_identity_for(host: &dyn Host, chat: &Value) -> CoreResult<Value> {
+    let row = SqlHost::new(host).get(
+        "SELECT evidence_json FROM account_self WHERE platform = ? AND account = ?",
+        &[chat["platform"].clone(), chat["account"].clone()],
+    )?;
+    if let Some(text) = row["evidence_json"].as_str() {
+        return json_parse(host, text);
+    }
+    Ok(
+        json!({ "platform": chat["platform"], "account": chat["account"], "status": "unknown", "source": "unknown", "reason": "unobserved", "observed_at": null }),
+    )
+}
+
+fn recent_messages(host: &dyn Host, input: &Value) -> CoreResult<Value> {
+    let input = object(input, "recent messages input")?;
+    let mut chats = field(input, "chats")
+        .as_array()
+        .ok_or_else(|| CoreError::new("TypeError", "chats must be an explicit array"))?
+        .iter()
+        .map(domain::chat_key)
+        .collect::<CoreResult<Vec<_>>>()?;
+    if chats.is_empty() || chats.len() > 100 {
+        return Err(CoreError::new(
+            "RangeError",
+            "chats must contain from 1 to 100 explicit scopes",
+        ));
+    }
+    if !matches!(
+        input.get("sender").map(Value::as_str),
+        None | Some(Some("all" | "self"))
+    ) {
+        return Err(CoreError::new("TypeError", "sender must be all or self"));
+    }
+    chats.sort_by_key(|chat| {
+        ["platform", "account", "chat_id"].map(|key| chat[key].as_str().unwrap().to_owned())
+    });
+    chats.dedup();
+    let interval = field(input, "interval");
+    let interval = domain::half_open_interval(
+        interval["from_ts"].as_f64().unwrap_or(f64::NAN),
+        interval["to_ts"].as_f64().unwrap_or(f64::NAN),
+    )?;
+    let limit = page_limit(input.get("limit"))?;
+    let bindings = chats
+        .iter()
+        .map(|chat| account_identity_for(host, chat))
+        .collect::<CoreResult<Vec<_>>>()?;
+    let mut identities = bindings.clone();
+    identities.dedup();
+    // Scope is derived in the canonical core, never accepted from the caller.
+    let scope = host_string(
+        host,
+        "host.canonicalSha256",
+        json!({
+            "kind": "recent:v1", "chats": chats, "interval": interval,
+            "sender": input.get("sender").cloned().unwrap_or(json!("all")),
+            "identities": if input.get("sender").and_then(Value::as_str) == Some("self") { json!(identities) } else { Value::Null },
+        }),
+    )?;
+    let cursor = if let Some(raw) = input.get("cursor") {
+        let raw = string(raw, "cursor")?;
+        if raw.len() > 4096 {
+            return Err(CoreError::new("Error", "cursor is malformed"));
+        }
+        let parsed = base64url_decode(host, &raw)
+            .and_then(|text| json_parse(host, &text))
+            .map_err(|_| CoreError::new("Error", "cursor is malformed"))?;
+        if parsed["v"] != json!(1)
+            || parsed["scope"] != scope
+            || !parsed["ts"].as_f64().is_some_and(f64::is_finite)
+            || domain::message_key(&parsed).is_err()
+            || base64url_encode(host, &json_stringify(host, parsed.clone())?)? != raw
+        {
+            return Err(CoreError::new("Error", "cursor does not match this query"));
+        }
+        Some(parsed)
+    } else {
+        None
+    };
+    let mut params = Vec::new();
+    let mut scopes = Vec::new();
+    let mut coverage = Vec::new();
+    let mut unread = Vec::new();
+    for (chat, identity) in chats.iter().zip(&bindings) {
+        unread.push(unread_for(host, chat)?);
+        if input.get("sender").and_then(Value::as_str) != Some("self") {
+            scopes.push("(platform = ? AND account = ? AND chat_id = ?)");
+            params.extend(chat_params(chat)?);
+        } else if identity["status"] == "known" {
+            scopes.push("(platform = ? AND account = ? AND chat_id = ? AND author_id = ?)");
+            params.extend(chat_params(chat)?);
+            params.push(identity["self_id"].clone());
+        }
+        coverage.push(coverage_for(
+            host,
+            &json!({ "chat": chat, "interval": interval }),
+        )?);
+    }
+    params.extend([interval["from_ts"].clone(), interval["to_ts"].clone()]);
+    let cursor_where = if let Some(cursor) = &cursor {
+        params.extend([
+            cursor["ts"].clone(),
+            cursor["ts"].clone(),
+            cursor["platform"].clone(),
+            cursor["account"].clone(),
+            cursor["chat_id"].clone(),
+            cursor["msg_id"].clone(),
+        ]);
+        " AND (ts < ? OR (ts = ? AND (platform, account, chat_id, msg_id) > (?, ?, ?, ?)))"
+    } else {
+        ""
+    };
+    params.push(json!(limit + 1));
+    let rows = SqlHost::new(host).all(&format!(
+        "SELECT platform, account, chat_id, msg_id, author_id, ts, body, edited_at, deleted_at, revision_kind, revision_value FROM messages WHERE ({}) AND ts >= ? AND ts < ? AND deleted_at IS NULL{cursor_where} ORDER BY ts DESC, platform, account, chat_id, msg_id LIMIT ?",
+        if scopes.is_empty() { "0".into() } else { scopes.join(" OR ") }
+    ), &params)?;
+    let mut result = json!({ "messages": rows.iter().take(limit).cloned().map(message_from_row).collect::<Vec<_>>(), "coverage": coverage, "identities": identities, "unread": unread });
+    if rows.len() > limit {
+        let row = &rows[limit - 1];
+        let mut payload = domain::message_key(row)?;
+        payload["v"] = json!(1);
+        payload["scope"] = json!(scope);
+        payload["ts"] = row["ts"].clone();
+        result["next_cursor"] = json!(base64url_encode(host, &json_stringify(host, payload)?)?);
+    }
+    Ok(result)
+}
+
+fn recent_evidence(host: &dyn Host, input: &Value) -> CoreResult<Value> {
+    let mut result = recent_messages(host, input)?;
+    let messages = result.as_object_mut().unwrap().remove("messages").unwrap();
+    result["kind"] = json!("recent_messages_evidence");
+    result["evidence"] = json!(messages.as_array().unwrap().iter().map(|message| {
+        Ok(json!({ "source": { "operation": "store.getMessage", "key": domain::message_key(message)? }, "message": message }))
+    }).collect::<CoreResult<Vec<_>>>()?);
+    result["query"] = json!({
+        "chats": result["coverage"].as_array().unwrap().iter().map(|coverage| coverage["target"]["chat"].clone()).collect::<Vec<_>>(),
+        "interval": result["coverage"][0]["target"]["interval"],
+        "sender": input.get("sender").cloned().unwrap_or(json!("all")),
+        "order": "latest", "limit": page_limit(input.get("limit"))?,
+    });
     Ok(result)
 }
 
@@ -804,6 +1068,10 @@ pub fn dispatch(op: &str, input: &Value, host: &dyn Host) -> Option<CoreResult<V
         "store.readSyncState" => read_sync_state(host, input),
         "store.coverageFor" => coverage_for(host, input),
         "store.getMessage" => get_message(host, input),
+        "store.recordUnreadState" => record_unread_state(host, input),
+        "store.recordAccountIdentity" => record_account_identity(host, input),
+        "store.recentEvidence" => recent_evidence(host, input),
+        "store.recentMessages" => recent_messages(host, input),
         "store.inboxMessages" => query_messages(host, input, false),
         "store.searchMessages" => query_messages(host, input, true),
         "daemon.recoverInterruptedSends" => recover_interrupted_sends(host),

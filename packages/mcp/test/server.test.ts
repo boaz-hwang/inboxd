@@ -55,8 +55,8 @@ async function nextRequest(transport: FakeProtocolTransport, index: number): Pro
 }
 
 describe("inboxd MCP agent server", () => {
-  test("exposes exactly the three permitted tools", () => {
-    expect(MCP_TOOL_NAMES).toEqual(["inbox_search", "inbox_list", "send_propose"]);
+  test("exposes only read tools and approval-gated proposal", () => {
+    expect(MCP_TOOL_NAMES).toEqual(["inbox_search", "inbox_list", "inbox_recent", "inbox_evidence", "send_propose"]);
     const requester = new FakeRequester();
     const handlers = createToolHandlers(requester);
     const server = createMcpServer(requester) as unknown as { _registeredTools: Record<string, unknown> };
@@ -65,6 +65,23 @@ describe("inboxd MCP agent server", () => {
     expect(Object.keys(handlers)).not.toContain("send_approve");
     expect(Object.keys(handlers)).not.toContain("send_direct");
     expect(Object.keys(handlers)).not.toContain("approval_list");
+  });
+
+  test("aggregate tools reject malformed scope before any protocol request", async () => {
+    const requester = new FakeRequester();
+    const tools = createToolHandlers(requester);
+    const input = { chats: [chat], interval };
+    for (const tool of [tools.inbox_recent, tools.inbox_evidence]) {
+      for (const invalid of [
+        {}, { chats: [chat] }, { interval }, { ...input, chats: [] },
+        { ...input, interval: { from_ts: 10, to_ts: 10 } },
+        { ...input, cursor: "not a cursor" }, { ...input, cursor: "x".repeat(4097) },
+        { ...input, sender: "guess" }, { ...input, limit: 101 },
+        { ...input, identities: [] }, { ...input, unread: [] },
+        { ...input, chats: [{ ...chat, self_id: "spoof" }] },
+      ]) await expect(tool(invalid)).rejects.toBeInstanceOf(McpInputError);
+    }
+    expect(requester.calls).toEqual([]);
   });
 
   test("search validates Zod-shaped input before any protocol request", async () => {
@@ -157,7 +174,10 @@ describe("inboxd MCP agent server", () => {
     expect(text).not.toMatch(/\b(?:import|export)\b[^\n]*(?:store|sqlite|platforms|daemon\/src|safety\/src)/i);
   });
 
-  test("constructs an official MCP server and stdio transport without hanging", async () => {
+  // @modelcontextprotocol/server@2.0.0 exports only the server-side stdio transport;
+  // @modelcontextprotocol/client is not installed and manifest changes are out of scope.
+  // This is construction coverage, not a claimed MCP stdio client round trip.
+  test("constructs an official MCP server and server-side stdio transport", async () => {
     const requester = new FakeRequester();
     const server = createMcpServer(requester);
     expect(server).toBeInstanceOf(McpServer);

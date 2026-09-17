@@ -9,6 +9,8 @@
   ],
   "scripts": {
     "build:native": "bun scripts/build-native.ts",
+    "daemon": "bun packages/daemon/src/bin.ts",
+    "cli": "bun packages/cli/src/bin.ts",
     "typecheck": "tsc -p tsconfig.base.json --noEmit",
     "lint": "bun run typecheck",
     "check:boundaries": "bun scripts/check-boundaries.ts",

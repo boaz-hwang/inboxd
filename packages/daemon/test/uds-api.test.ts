@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { createDaemon } from "../src/main.ts";
+import { createDaemon, readLocalApproverToken } from "../src/main.ts";
 import { createDaemonFixture, connectJsonLines } from "./fixtures/daemon-fixture.ts";
 import { openSqlCipherDatabase } from "../../store/src/sqlcipher.ts";
 
@@ -13,6 +13,57 @@ afterEach(async () => {
 function fixture() { const value = createDaemonFixture(); fixtures.push(value); return value; }
 
 describe("UDS JSON-lines API", () => {
+  test("denies backfill before adapter invocation unless independently authorized as owner", async () => {
+    const state = fixture();
+    let calls = 0;
+    const daemon = await createDaemon({ socketPath: state.socketPath, databasePath: state.databasePath, keyProvider: state.keyProvider,
+      isTrustedApproverSession: session => session.approverToken === "test-owner",
+      backfill: async () => { calls++; return { accepted: true }; },
+    });
+    daemons.push(daemon);
+    const client = await connectJsonLines(state.socketPath);
+    const request = { platform: "test", account: "one", chat_id: "room", from_ts: 0, to_ts: 20 };
+    try {
+      for (const role of ["reader", "agent", "mcp", "approver"]) {
+        await client.request("system.hello", { role });
+        await expect(client.request("sync.backfill", request)).rejects.toThrow(/approver/i);
+        expect(calls).toBe(0);
+      }
+      await client.request("system.hello", { role: "approver", approver_token: "test-owner" });
+      expect(await client.request("sync.backfill", request)).toEqual({ accepted: true });
+      expect(calls).toBe(1);
+    } finally { client.close(); }
+  });
+  test("aggregate UDS rejects invalid scope and mismatched opaque cursors as BAD_REQUEST", async () => {
+    const state = fixture();
+    const daemon = await createDaemon({ socketPath: state.socketPath, databasePath: state.databasePath, keyProvider: state.keyProvider });
+    daemons.push(daemon);
+    const chat = { platform: "test", account: "one", chat_id: "room" };
+    const interval = { from_ts: 0, to_ts: 100 };
+    daemon.apply({ events: ["a", "b"].map(msg_id => ({ kind: "create", message: { key: { ...chat, msg_id }, author_id: "a", ts: 10, body: "synthetic", attachments: [] }, revision: { source: "adapter", value: 1 } })) });
+    const client = await connectJsonLines(state.socketPath);
+    try {
+      await client.request("system.hello", { role: "agent" });
+      for (const method of ["message.recent", "message.evidence"]) {
+        const input = { chats: [chat], interval, limit: 1 };
+        const first = await client.request(method, input);
+        expect(first.next_cursor).toEqual(expect.any(String));
+        for (const params of [{}, { chats: [chat] }, { ...input, chats: [] }, { ...input, identities: [] }, { ...input, unread: [] }, { ...input, limit: 101 }]) {
+          await expect(client.request(method, params)).rejects.toMatchObject({ code: "BAD_REQUEST" });
+        }
+        for (const params of [
+          { ...input, cursor: "garbage" },
+          { ...input, cursor: first.next_cursor, interval: { from_ts: 1, to_ts: 100 } },
+          { ...input, cursor: first.next_cursor, chats: [{ ...chat, account: "other" }] },
+          { ...input, cursor: first.next_cursor, sender: "self" },
+        ]) await expect(client.request(method, params)).rejects.toMatchObject({ code: "BAD_REQUEST" });
+      }
+      for (const method of ["store.recordAccountIdentity", "store.recordUnreadState"]) {
+        await expect(client.request(method, {})).rejects.toMatchObject({ code: "BAD_REQUEST" });
+      }
+      expect(await client.request("message.inbox", { chat })).toMatchObject({ messages: [{ msg_id: "a" }, { msg_id: "b" }] });
+    } finally { client.close(); }
+  });
   test("serves inbox, search, and status without exposing database ownership", async () => {
     const state = fixture();
     const daemon = await createDaemon({ socketPath: state.socketPath, databasePath: state.databasePath, keyProvider: state.keyProvider });
@@ -95,7 +146,7 @@ describe("UDS JSON-lines API", () => {
     });
     daemons.push(daemon);
     const client = await connectJsonLines(state.socketPath);
-    await client.request("system.hello", { role: "reader" });
+    await client.request("system.hello", { role: "approver", approver_token: readLocalApproverToken(state.socketPath) });
     const chat = { platform: "test", account: "one", chat_id: "room" };
     await client.request("message.inbox", { chat, interval: { from_ts: 0, to_ts: 20 } });
     const accepted = await client.request("sync.backfill", { ...chat, from_ts: 0, to_ts: 20 });
@@ -116,7 +167,7 @@ describe("UDS JSON-lines API", () => {
     const daemon = await createDaemon({ socketPath: state.socketPath, databasePath: state.databasePath, keyProvider: state.keyProvider });
     daemons.push(daemon);
     const client = await connectJsonLines(state.socketPath);
-    await client.request("system.hello", { role: "reader" });
+    await client.request("system.hello", { role: "approver", approver_token: readLocalApproverToken(state.socketPath) });
     await expect(client.request("sync.backfill", { platform: "test", account: "one", chat_id: "room", from_ts: 0, to_ts: 20 })).rejects.toThrow("no adapter");
     client.close();
   });

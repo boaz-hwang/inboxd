@@ -2,6 +2,16 @@ import { describe, expect, test } from "bun:test";
 import { JsonLinesDecoder, encodeJsonLine } from "../src/index.ts";
 
 describe("JSON-lines framing", () => {
+  test("isolates interleaved split multibyte streams per connection", () => {
+    const first = new JsonLinesDecoder();
+    const second = new JsonLinesDecoder();
+    const a = new TextEncoder().encode('"한"\n');
+    const b = new TextEncoder().encode('"🙂"\n');
+    expect(first.push(a.slice(0, 2))).toEqual([]);
+    expect(second.push(b.slice(0, 3))).toEqual([]);
+    expect(first.push(a.slice(2))).toEqual(["한"]);
+    expect(second.push(b.slice(3))).toEqual(["🙂"]);
+  });
   test("decodes complete newline-delimited JSON frames across chunks", () => {
     const decoder = new JsonLinesDecoder({ maxLineBytes: 128 });
     expect(decoder.push('{"type":"event",')).toEqual([]);

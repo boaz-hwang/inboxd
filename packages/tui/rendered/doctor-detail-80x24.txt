@@ -1,24 +1,24 @@
-INBOXD · connected · slack                                                     │
-1 INBOX | 2 SEARCH | 3 CHAT | 4 APPROVALS | ● DOCTOR                           │
-DETAIL (in place)                                                              │
-Evidence rail: partial · 1 chats / 1 gaps / 1 limits · connected               │
-Detail — Doctor                                                                │
-Context: 1 of 3 · partial · 1 chats / 1 gaps / 1 limits                        │
-ID: encryption                                                                 │
-State: SQLCipher healthy                                                       │
-Back: Esc                                                                      │
-! doctor selection opened                                                      │
-                                                                               │
-                                                                               │
-                                                                               │
-                                                                               │
-                                                                               │
-                                                                               │
-                                                                               │
-                                                                               │
-                                                                               │
-                                                                               │
-                                                                               │
-                                                                               │
-                                                                               │
-1–5 j/k ↑↓ Enter / n-more b c a Esc ? q                                        │
+INBOXD · connected · slack                                                      
+1 INBOX | 2 SEARCH | 3 CHAT | 4 APPROVALS | ● DOCTOR                            
+DETAIL (in place)                                                               
+Evidence rail: partial · 1 chats / 1 gaps / 1 limits · connected                
+Detail — Doctor                                                                 
+Context: 1 of 4 · partial · 1 chats / 1 gaps / 1 limits                         
+ID: encryption                                                                  
+Cipher: fixture-version                                                         
+Schema: 2                                                                       
+State: SQLCipher ready=true                                                     
+Back: Esc · PgUp/PgDn scroll · Home top (1–4/4)                                 
+! doctor selection opened                                                       
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+1–5 j/k ↑↓ Enter / n-more b c a Esc ? q                                         

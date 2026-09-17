@@ -1,28 +1,31 @@
 # inboxd
 
-깨져도 진단되고 데이터는 남는 층. 멀티메신저 로컬-퍼스트 런타임.
+깨져도 진단되고 데이터는 남는 멀티메신저 로컬-퍼스트 런타임.
 
-- 읽기 진실원인 = 서버 API가 아니라 로컬 인덱스
-- 쓰기는 승인 없이는 제안일 뿐 (기본 deny, 아웃오브밴드 승인)
-- 어댑터는 교체품, 진단이 복구보다 먼저
-- "결과 없음"과 "모름"을 구분한다 (모든 검색 응답에 coverage 동봉)
+- 로컬 암호화 인덱스가 검색 경로다.
+- 쓰기는 승인 없이는 제안일 뿐이다. 기본 deny, 아웃오브밴드 승인.
+- `결과 없음`과 `모름`을 구분한다. 조회 응답은 coverage/evidence를 함께 낸다.
+- 어댑터는 교체 가능하며 진단이 복구보다 먼저다.
+
+## 현재 상태 — 2026-09-17
+
+**offline-ready / live-blocked.** 현재 dirty working tree에서 Rust core/TypeScript edge, SQLCipher store, daemon/UDS, CLI/MCP/OpenTUI, bounded local reader composition, outbox crash handling, and O5 scale/search gates가 로컬에서 관측됐다. 이는 Slack/Kakao 실제 계정 read/send를 이번에 실행했다는 뜻이 아니다.
+
+- Bun **379 pass / 1 intentional opt-in skip / 0 fail**, Rust **4 pass**.
+- typecheck, boundary check, Clippy, format check, diff hygiene pass; deterministic OpenTUI captures **62**.
+- O5: encrypted production `applySyncBatch`가 anonymous 100k messages를 **9982.744 ms**에 ingest; real UDS 700 samples p50 **29.346125 ms**, p95 **72.681875 ms**, worst per-query p95 **75.873917 ms** (≤300).
+- Korean/mixed fixture acceptance는 **25 positive / 8 negative** cases다. fixture evidence는 live account/user-question evidence가 아니다.
+- Fresh live Slack/Kakao read, same five live retrieval intents, and a separately approved Slack send are still pending fresh user authorization. Normal Kakao compose/send and Kakao authoritative `sender=self` are unsupported.
 
 ## 문서
 
-- `docs/01-background.md` — 출발점과 문제 정의, 범위
-- `docs/02-prior-art.md` — 선행 프로젝트 6종 소스코드 해부 (커밋 핀 포함)
-- `docs/03-proposal.md` — 핵심 기능·아키텍처·스키마·프라이버시
-- `docs/04-roadmap.md` — 순서와 MVP 완료 기준
-- `docs/05-architecture-review.md` — 설계 비판 검토 (2026-09-16): 유지 항목과 보완할 계약·검증 과제
-- `docs/06-architecture.md` — 검토 반영 설계: 데몬 런타임·패키지·store 계약·승인 경계·TUI·빌드 순서
-- `docs/07-evidence-ledger.md` — 합성·과거 live·새 live 필요·blocked 증거와 MVP claim 경계
-- `docs/08-rust-core-refactor.md` — Rust core / TypeScript edge 책임과 회귀 검증
+- `docs/03-proposal.md` — product/runtime/safety contract and evidence boundary
+- `docs/04-roadmap.md` — completed offline criteria versus pending live criteria
+- `docs/06-architecture.md` — daemon, schema v3, UDS, reader composition and receipt contract
+- `docs/07-evidence-ledger.md` — local, historical live and pending-live evidence matrix
+- `docs/08-rust-core-refactor.md` — Rust refactor historical/current checkpoints
 
-## 개발
-
-Rust 코어는 메시지·coverage 규칙, SQL 저장·검색, 승인·quota·복구를 담당한다.
-TypeScript는 기존 SQLCipher 연결·키체인, 비동기 어댑터, UDS와 CLI/TUI/MCP를 담당한다.
-코어는 같은 데몬 안에서 동기 FFI로 호출하며 DB 형식과 공개 프로토콜을 유지한다.
+## Build and local gate
 
 ```sh
 bun install
@@ -31,51 +34,46 @@ bun run typecheck
 bun run check:boundaries
 bun run test
 cargo test --locked
+cargo clippy --locked -- -D warnings
+cargo fmt --all -- --check
+git diff --check
 ```
 
-빌드에는 `rust-toolchain.toml`의 Rust 도구 체인과 Bun이 필요하다. 테스트는 기존
-macOS Homebrew SQLCipher를 사용한다. 빌드된 네이티브 라이브러리는
-`packages/native/native/`에 놓이며 실행 시 Cargo가 필요하지 않다.
-Rust 수정 뒤에는 다시 빌드한다(`bun run test`는 빌드를 포함한다).
+The 100k acceptance is deliberately opt-in because it is a long local benchmark:
 
-## 구현 아키텍처와 남은 live gate
-
-```text
-inboxd daemon (DB write · sync · outbox 실행 · 발송 토큰 · audit 독점)
-  TS platform adapters → Rust domain/store/safety → TS SQLCipher I/O
-    → search / inbox (coverage 동봉) → safe-send (propose→approve[OOB]→send→receipt)
-  ▲ Unix domain socket
-  cli (TTY, approve) · tui (TTY, approve) · mcp (agent, propose만)
+```sh
+INBOXD_RUN_100K_ACCEPTANCE=1 NODE_ENV=test \
+SQLCIPHER_PATH="$(brew --prefix sqlcipher)/lib/libsqlcipher.dylib" \
+bun test packages/store/test/performance-100k.test.ts
 ```
 
-핵심 기능 5개: `sync`, `search`, `inbox`, `safe-send`, `doctor/probe`.
-인터페이스는 CLI → **Slack TUI(첫 제품 마일스톤)** → MCP 순.
-먼저 Slack 제한 채팅의 수집부터 CLI 검색까지 검증하고 기능을 확장한다.
-TypeScript MVP checkpoint는 카카오 wrapper 읽기 통합과 사용자가 확정한 Slack·카카오
-실질문 5개 분류를 포함한다. 카카오 기본 send adapter는 여전히 범위 밖이며, 별도 승인된
-self-chat controlled-send 1회는 safety 경계의 관측 증거로만 취급한다.
-상세는 `docs/03-proposal.md`, 빌드 순서는 `docs/06-architecture.md` §7.
+## Explicit daemon startup
 
-## 현재 관측 상태 (2026-09-16)
+The daemon does **not** auto-start from a client. Create an owner-only, non-symlink JSON config with absolute state/database/socket paths and then run:
 
-- Slack Spike A는 **PARTIAL**이다. 제한된 두 식별자에서 과거 89개 메시지를 읽은
-  기록과 합성 fixture·성능 결과는 있으나, wrapper가 pagination metadata를 버려
-  완전 이력·page 내부 중단 복구·authoritative coverage는 증명하지 못했다.
-- KakaoTalk wrapper 경로는 bootstrap 수정 뒤 bounded live read와 exact-bound 제품 통합을
-  관측했다. Telegram은 synthetic 상태다. 이 결과는 원래 Kakao Spike B의 DB KDF·schema·AX
-  측정 증거가 아니다.
-- SQLCipher store, 단일 daemon/UDS, coverage 동봉 search/inbox, protocol-only CLI,
-  approval/outbox safety, 5화면 OpenTUI, MCP 도구는 로컬 통합 테스트로 구현·관측됐다.
-  자동 테스트와 live evidence는 별도 증거 축으로 유지한다.
-- Slack 제품 adapter는 wrapper 한계 때문에 degraded/incomplete coverage만 제공한다.
-  Kakao 제품 adapter는 승인된 wrapper measurement와 exact stable binding이 없으면 I/O를
-  거부한다. 원래 local DB/KDF/AX route 활성화는 계속 **BLOCKED**다.
-- 10만 건·한국어 25개 fixture는 합성 검증이다. 사용자 원문 질문 5개는 live 경계에서
-  모두 분류됐지만 retrieval PASS 1건, collection miss 1건, product gap 3건이다.
+```sh
+chmod 600 /absolute/path/inboxd-config.json
+bun run daemon -- --config /absolute/path/inboxd-config.json
+# or: inboxd-daemon --config /absolute/path/inboxd-config.json
+```
 
-## 보호 범위 (정직하게)
+The daemon requires config ownership by the current user and rejects group/other-readable files. It takes a PID-file lock with exclusive `wx` creation and PID liveness recovery; it does not use `flock`. Database, socket and state directory are daemon-owned and owner-only; clients are UDS-only.
 
-MVP는 **MCP 도구만 쓰는 에이전트**의 오발송을 막는다. 승인 code는 TTY 승인 클라이언트에만
-전달되고 발송 토큰은 데몬만 갖는다. 로컬 셸·파일 접근이 있는 에이전트는 승인 클라이언트로
-접속하고 키체인을 읽을 수 있으므로 MVP는 그 경우를 보호한다고 주장하지 않는다.
-DB 암호화는 파일 유출 대비이지 같은 사용자로 도는 프로세스를 막는 장치가 아니다.
+Reader config contains exact stable Slack/Kakao allowlisted scopes plus binding identifiers. Binding factories are supplied by a trusted injected host registry; config cannot discover credentials or create arbitrary provider clients. A configured chat may appear in discovery before collection, but its coverage is `unknown` until observed sync evidence exists.
+
+## Safety semantics
+
+`Proposed → Approved → Sending → Sent → Verified` is intentionally two-stage after transport I/O:
+
+- a transport receipt is `Sent`, not delivery verification;
+- `Verified` requires an independent trusted read-back matching exact destination scope, receipt, body, and reply/thread parent;
+- `Uncertain` is terminal until human/re-observation and is never auto-retried;
+- quota remains consumed for `Sent`, `Verified`, and `Uncertain`; only proven-not-sent failure releases it.
+
+Raw approval codes are never durable: only a verifier is stored, pending-list/CLI JSON are code-free, the owner-local TUI can claim a code once into process-private memory, and restart or lost delivery expires/requires re-proposal. CLI argv approval is rejected. MCP/agent clients cannot receive approval codes. A claimed approver role also needs trusted local approver-session authorization; `sync.backfill` additionally requires that trusted owner session. Streaming JSON decoders own connection-local UTF-8 state. The protection claim does not cover same-user shell/file/Keychain access.
+
+## Historical live boundary
+
+The historical five-question record is retained: Q1/Q2/Q5 product gaps, Q3 Slack collection miss, Q4 Kakao retrieval. It was not rerun by the current offline gate. Likewise, the historical Kakao controlled send is not a new authorization or a current live send result.
+
+No commit, push, PR, merge or deployment is represented by this README.

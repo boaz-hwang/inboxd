@@ -16,6 +16,7 @@ import {
   type TuiState,
 } from "../src/index.ts";
 import { readTuiApproverToken, runTuiEntrypoint } from "../src/main.ts";
+import type { JsonObject } from "../../protocol/src/schema.ts";
 
 const fixtures = {
   inbox: [
@@ -33,7 +34,7 @@ function readyState(): TuiState {
   state = reduce(state, { type: "querySucceeded", generation: 1, screen: "inbox", data: fixtures.inbox, coverage: { chats: 3, gaps: 1, freshness: "fresh" } });
   state = reduce(state, { type: "querySucceeded", generation: 1, screen: "search", data: fixtures.search, coverage: { chats: 3, gaps: 1, freshness: "partial" } });
   state = reduce(state, { type: "querySucceeded", generation: 1, screen: "approvals", data: fixtures.approvals });
-  return state;
+  return { ...state, sendCapable: true };
 }
 
 describe("five-screen operational model", () => {
@@ -182,8 +183,110 @@ describe("five-screen operational model", () => {
     expect(chat).toContain("── coverage gap: 1 · partial ──");
   });
 
-  test("requires code for uncertain approvals and disables actions while degraded", () => {
+  test("active approval input remains visible in a narrow activated detail", () => {
+    let state = reduce(readyState(), { type: "querySucceeded", generation: 1, screen: "approvals", data: [{ id: "p", state: "Proposed", body: "long message ".repeat(100) }] });
+    state = reduce(state, { type: "switchScreen", screen: "approvals" });
+    for (const key of ["Enter", "a", "1", "2", "3", "4"]) state = reduce(state, { type: "key", key });
+    for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
+      const text = renderScreen(state, size);
+      expect(text).toContain("Approval code [memory-only]");
+      expect(text).toContain("••••_");
+      expect(text).toContain("Enter submit · Esc cancel");
+      expect(text).not.toContain("1234");
+    }
+  });
+
+  test("active compose remains visible with separate submit and cancel controls in detail", () => {
+    let state = reduce(readyState(), { type: "switchScreen", screen: "chat" });
+    for (const key of ["Enter", "c", "x"]) state = reduce(state, { type: "key", key });
+    state = { ...state, draft: "long draft ".repeat(50) };
+    for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
+      const text = renderScreen(state, size);
+      expect(text).toContain("Compose proposal:");
+      expect(text).toContain("Enter propose · Esc cancel");
+      expect(text).toContain("[memory-only]");
+    }
+  });
+
+  test("wraps and scrolls long grapheme-safe detail rather than losing the message tail", () => {
+    expect(displayWidth("👩‍💻🇰🇷é")).toBe(5);
+    const body = "가👩‍💻é ".repeat(600) + "END-OF-MESSAGE";
+    for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
+      let state = reduce(readyState(), { type: "querySucceeded", generation: 1, screen: "inbox", data: [{ id: "long", body }] });
+      state = reduce(state, { type: "key", key: "Enter" });
+      let text = renderScreen(state, size);
+      expect(text).toContain("PgUp/PgDn scroll");
+      expect(text).not.toContain("END-OF-MESSAGE");
+      for (let page = 0; page < 30; page++) state = reduce(state, { type: "key", key: "PageDown" });
+      text = renderScreen(state, size);
+      expect(text).toContain("END-OF-MESSAGE");
+      expect(text.split("\n").every(line => displayWidth(line) === size.width)).toBe(true);
+      expect(text).not.toMatch(/👩(?!‍💻)/u);
+      state = reduce(state, { type: "key", key: "Home" });
+      expect(renderScreen(state, size)).toContain("Message:");
+    }
+  });
+
+  test("qualifies other-intent uncertainty without mislabeling the selected proposal", () => {
+    let state = reduce(readyState(), { type: "querySucceeded", generation: 1, screen: "approvals", data: [{ id: "p", state: "Proposed" }, ...fixtures.approvals] });
+    state = reduce(state, { type: "switchScreen", screen: "approvals" });
+    state = reduce(state, { type: "key", key: "Enter" });
+    for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
+      const text = renderScreen(state, size);
+      expect(text).toContain("Other intent: UNCERTAIN");
+      expect(text).toContain("State: Proposed");
+    }
+  });
+
+  test("empty list context reports focus 0/0 instead of a phantom first row", () => {
+    const state = createInitialState();
+    const text = renderScreen(state, { width: 120, height: 40 });
+    expect(text).toContain("focus 0/0");
+    expect(text).not.toContain("focus 1/0");
+  });
+
+  test("clamps focus and selection when a refreshed list shrinks", () => {
     let state = readyState();
+    state = reduce(state, { type: "key", key: "j" });
+    state = reduce(state, { type: "key", key: "Enter" });
+    state = reduce(state, { type: "querySucceeded", generation: 1, screen: "inbox", data: [fixtures.inbox[0]!] });
+    expect(state.focus).toBe(0);
+    expect(state.selected.inbox).toBe(0);
+    expect(renderScreen(state, { width: 120, height: 40 })).toContain("> ● 민수");
+    expect(renderScreen(state, { width: 80, height: 24 })).not.toContain("No selected item");
+    state = reduce(state, { type: "switchScreen", screen: "approvals" });
+    state = reduce(state, { type: "querySucceeded", generation: 1, screen: "inbox", data: [] });
+    state = reduce(state, { type: "switchScreen", screen: "inbox" });
+    expect(state.focus).toBe(0);
+  });
+
+  test.each(["inbox", "search", "chat", "approvals"] as const)("keeps focused %s rows visible at both terminal sizes", (screen) => {
+    let state = readyState();
+    state = reduce(state, { type: "querySucceeded", generation: 1, screen,
+      data: Array.from({ length: 60 }, (_, index) => ({ id: `r${index}`, author: `row-${index}`, state: "Uncertain" })), nextCursor: "more" });
+    state = reduce(state, { type: "switchScreen", screen });
+    for (let i = 0; i < 59; i++) state = reduce(state, { type: "key", key: "j" });
+    for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
+      const output = renderScreen(state, size);
+      expect(output).toContain("> ○ row-59");
+      expect(output).toContain("more results [n]");
+      expect(output).toContain("Evidence rail:");
+      expect(output.split("\n")).toHaveLength(size.height);
+      expect(output.split("\n").every((line) => displayWidth(line) === size.width)).toBe(true);
+      if (screen === "approvals") {
+        expect(output).toContain("UNCERTAIN — do not resend automatically");
+        expect(output).toContain("Approve [disabled: Uncertain]");
+      }
+      if (screen === "chat") expect(output).toContain("coverage gap:");
+      state = reduce(state, { type: "key", key: "k" });
+      expect(renderScreen(state, size)).toContain("> ○ row-58");
+      state = reduce(state, { type: "key", key: "j" });
+    }
+  });
+
+  test("requires code for proposed approvals and disables actions while degraded", () => {
+    let state = readyState();
+    state = reduce(state, { type: "querySucceeded", generation: 1, screen: "approvals", data: [{ ...fixtures.approvals[0]!, id: "proposed", state: "Proposed" }, ...fixtures.approvals] });
     state = reduce(state, { type: "switchScreen", screen: "approvals" });
     state = reduce(state, { type: "key", key: "a" });
     let view = renderScreen(state, { width: 80, height: 24 });
@@ -248,7 +351,9 @@ describe("five-screen operational model", () => {
         request: async (method, params) => {
           calls.push({ method, params });
           if (method === "chat.list") return { chats: [{ platform: "slack", account: "me", chat_id: "ops", display_name: "Ops" }] };
-          if (method === "safety.intent.listPending") return { intents: [{ intent_id: "i1", actor: "me", scope: { platform: "slack", account: "me", chat_id: "ops" }, state: "Proposed", body: "Deploy", expires_at: 10, approval_code: "654321" }] };
+          if (method === "message.recent") return { messages: [] };
+          if (method === "safety.intent.listPending") return { intents: [{ intent_id: "i1", actor: "me", scope: { platform: "slack", account: "me", chat_id: "ops" }, state: "Proposed", body: "Deploy", expires_at: 10 }] };
+          if (method === "safety.intent.claimApprovalCode") return { code: "654321" };
           if (method === "system.status") return { ready: true, owner: "daemon" };
           if (method === "sync.status") return { state: "idle" };
           if (method === "auth.status") return { authenticated: true };
@@ -259,7 +364,7 @@ describe("five-screen operational model", () => {
 
     await controller.start();
     expect(subscribed).toEqual(["message.upserted", "coverage.changed", "safety.intent.changed"]);
-    expect(calls.map((call) => call.method)).toEqual(["chat.list", "safety.intent.listPending", "system.status", "sync.status", "auth.status"]);
+    expect(calls.map((call) => call.method)).toEqual(["chat.list", "message.recent", "safety.intent.listPending", "safety.intent.claimApprovalCode", "system.status", "sync.status", "auth.status"]);
     expect(controller.state.connection.status).toBe("connected");
     expect(JSON.stringify(controller.state)).not.toContain("654321");
     await controller.dispatchKey("4");
@@ -268,6 +373,30 @@ describe("five-screen operational model", () => {
     expect(JSON.stringify(controller.state)).not.toContain("654321");
     controller.stop();
     expect(controller.currentApprovalCode()).toBeUndefined();
+  });
+
+  test("treats nullable message revisions as absent while retaining timestamps and explicit flags", async () => {
+    const controller = createTuiController({
+      client: {
+        start: async () => {}, stop: () => {},
+        request: async () => ({ messages: [
+          { msg_id: "ordinary", body: "ordinary", edited_at: null, deleted_at: null },
+          { msg_id: "missing", body: "missing" },
+          { msg_id: "edited", edited_at: 0, deleted_at: null },
+          { msg_id: "deleted", edited_at: null, deleted_at: 123 },
+          { msg_id: "flags", edited_at: null, deleted_at: null, edited: true, deleted: true },
+        ] }),
+      },
+    });
+    const chat = { platform: "slack", account: "me", chat_id: "ops" };
+    controller.setActiveChat(chat);
+    controller.setSearch({ chat, interval: { from_ts: 0, to_ts: 200 }, query: "ordinary" });
+    await controller.start();
+    for (const screen of ["chat", "search"] as const) {
+      expect(controller.state.views[screen].data.map(({ edited, deleted }) => [edited, deleted])).toEqual([
+        [false, false], [false, false], [true, false], [false, true], [true, true],
+      ]);
+    }
   });
 
   test("maps the real daemon message and coverage shape without hiding limits", async () => {
@@ -393,7 +522,8 @@ describe("five-screen operational model", () => {
           calls.push({ method, params });
           if (method === "chat.list") return { chats: [] };
           if (method === "safety.intent.listPending") return { intents: [] };
-          if (method === "system.status" || method === "sync.status" || method === "auth.status") return {};
+          if (method === "system.status") return { send_capable: true };
+          if (method === "sync.status" || method === "auth.status") return {};
           if (method === "safety.intent.create") return { intent_id: "proposal-1", state: "Proposed" };
           throw new Error(`unexpected protocol call: ${method}`);
         },
@@ -419,7 +549,7 @@ describe("five-screen operational model", () => {
     const calls: string[] = [];
     const chat = { platform: "slack", account: "me", chat_id: "ops" };
     const controller = createTuiController({
-      initialState: readyState(),
+      initialState: reduce(readyState(), { type: "querySucceeded", generation: 1, screen: "approvals", data: [{ ...fixtures.approvals[0]!, state: "Proposed" }] }),
       client: {
         start: async () => {},
         stop: () => { calls.push("stop"); },
@@ -489,9 +619,11 @@ describe("five-screen operational model", () => {
         request: async (method, params) => {
           calls.push({ method, params });
           if (method === "chat.list") return { chats: [{ ...chat, display_name: "Stable Ops" }] };
+          if (method === "message.recent") return { messages: [{ ...chat, msg_id: "recent", body: "latest" }] };
           if (method === "message.inbox" || method === "message.search") return { messages: [], coverage: { covered: [], gaps: [], limits: [] } };
           if (method === "safety.intent.listPending") return { intents: [] };
-          if (method === "system.status" || method === "sync.status" || method === "auth.status" || method === "sync.backfill") return {};
+          if (method === "system.status") return { send_capable: true };
+          if (method === "sync.status" || method === "auth.status" || method === "sync.backfill") return {};
           if (method === "safety.intent.create") return { intent_id: "proposal-1", state: "Proposed" };
           throw new Error(`unexpected protocol call: ${method}`);
         },
@@ -525,6 +657,203 @@ describe("five-screen operational model", () => {
     ]);
   });
 
+  test("abandons a pending search when the operator starts and cancels a new query", async () => {
+    let finish!: (value: JsonObject) => void;
+    let searchCalls = 0;
+    const controller = createTuiController({ client: {
+      start: async () => {}, stop: () => {},
+      request: async (method) => {
+        if (method !== "message.search") return {};
+        searchCalls++;
+        return new Promise((resolve) => { finish = resolve; });
+      },
+    } });
+    await controller.start();
+    controller.setActiveChat({ platform: "slack", account: "me", chat_id: "ops" });
+    await controller.dispatchKey("/");
+    await controller.dispatchKey("x");
+    const search = controller.dispatchKey("Enter");
+    await controller.dispatchKey("/");
+    await controller.dispatchKey("y");
+    finish({ messages: [{ msg_id: "obsolete" }], next_cursor: "obsolete-page" });
+    await search;
+    expect(controller.state.views.search.data).toEqual([]);
+    expect(controller.state.views.search.nextCursor).toBeUndefined();
+    expect(controller.state.searchQuery).toBe("y");
+    await controller.dispatchKey("Escape");
+    await controller.receiveEvent("message.upserted");
+    expect(searchCalls).toBe(1);
+  });
+
+  test.each(["search", "chat"] as const)("invalidates %s rows, cursors and pending pages as soon as its scope changes", async (screen) => {
+    let finish!: (value: JsonObject) => void;
+    const chat = { platform: "slack", account: "me", chat_id: "old" };
+    const controller = createTuiController({ client: {
+      start: async () => {}, stop: () => {},
+      request: async (method, params) => {
+        if (params.cursor !== undefined) return new Promise((resolve) => { finish = resolve; });
+        if (method === "message.search" || method === "message.inbox") return { messages: [{ msg_id: "old" }], next_cursor: "old-page" };
+        return {};
+      },
+    } });
+    controller.setActiveChat(chat);
+    controller.setSearch({ chat, interval: { from_ts: 0, to_ts: 10 }, query: "old" });
+    await controller.start();
+    await controller.dispatchKey(screen === "search" ? "2" : "3");
+    const page = controller.dispatchKey("n");
+    if (screen === "search") controller.setSearch({ chat, interval: { from_ts: 0, to_ts: 10 }, query: "new" });
+    else controller.setActiveChat({ ...chat, chat_id: "new" });
+    const changed = controller.state.views[screen];
+    expect(changed.data).toEqual([]);
+    expect(changed.nextCursor).toBeUndefined();
+    finish({ messages: [{ msg_id: "obsolete-page" }], next_cursor: "obsolete-next" });
+    await page;
+    expect(controller.state.views[screen]).toEqual(changed);
+  });
+
+  test.each([
+    ["inbox", "message.recent"], ["search", "message.search"], ["chat", "message.inbox"],
+    ["approvals", "safety.intent.listPending"],
+  ] as const)("ignores out-of-order %s responses and failures in the same connection", async (screen, method) => {
+    const pending: Array<{ resolve(value: JsonObject): void; reject(error: Error): void }> = [];
+    let defer = false;
+    const chat = { platform: "slack", account: "me", chat_id: "ops" };
+    const controller = createTuiController({ client: {
+      start: async () => {}, stop: () => {},
+      request: async (name, params) => name === "safety.intent.claimApprovalCode" ? { code: params.intent_id } : name === method && defer
+        ? new Promise((resolve, reject) => pending.push({ resolve, reject })) : name === "chat.list" ? { chats: [chat] } : {},
+    } });
+    controller.setActiveChat(chat);
+    controller.setSearch({ chat, interval: { from_ts: 0, to_ts: 10 }, query: "needle" });
+    await controller.start();
+    defer = true;
+    const event = screen === "approvals" ? "safety.intent.changed" : "message.upserted";
+    const startRequest = async () => {
+      const previous = pending.length;
+      const completion = controller.receiveEvent(event);
+      for (let i = 0; i < 30 && pending.length === previous; i++) await Promise.resolve();
+      expect(pending.length).toBe(previous + 1);
+      return { completion };
+    };
+    const oldest = await startRequest();
+    const older = await startRequest();
+    const newest = await startRequest();
+    const result = (id: string) => ({
+      chats: [{ ...chat, chat_id: id }], messages: [{ msg_id: id }],
+      intents: [{ intent_id: id, actor: "me", scope: chat, state: "Proposed" }],
+      coverage: { freshness: "fresh", gaps: id === "new" ? 1 : 99 }, next_cursor: id,
+    });
+    pending[2]!.resolve(result("new"));
+    await newest.completion;
+    const current = controller.state.views[screen];
+    const currentCoverage = controller.state.coverage;
+    pending[1]!.resolve(result("old"));
+    await older.completion;
+    expect(controller.state.views[screen]).toEqual(current);
+    expect(controller.state.coverage).toEqual(currentCoverage);
+    pending[0]!.reject(new Error("obsolete failure"));
+    await oldest.completion;
+    expect(controller.state.views[screen]).toEqual(current);
+    if (screen === "approvals") expect(controller.currentApprovalCode()).toBe("new");
+  });
+
+  test("does not continue an obsolete refresh after disconnect", async () => {
+    let finish!: (value: JsonObject) => void;
+    const calls: string[] = [];
+    const controller = createTuiController({ client: {
+      start: async () => {}, stop: () => {},
+      request: async (method) => {
+        calls.push(method);
+        if (method === "chat.list") return new Promise((resolve) => { finish = resolve; });
+        return {};
+      },
+    } });
+    const starting = controller.start();
+    for (let i = 0; i < 30 && calls.length === 0; i++) await Promise.resolve();
+    expect(calls).toEqual(["chat.list"]);
+    controller.disconnected();
+    finish({ chats: [] });
+    await starting;
+    expect(calls).toEqual(["chat.list"]);
+    expect(controller.state.connection.status).toBe("reconnecting");
+  });
+
+  test("does not apply an old page or reuse its cursor while a replacement list is loading", async () => {
+    const pending: Array<(value: JsonObject) => void> = [];
+    const cursors: unknown[] = [];
+    let defer = false;
+    const controller = createTuiController({ client: {
+      start: async () => {}, stop: () => {},
+      request: async (method, params) => {
+        if (method === "chat.list") return { chats: [{ platform: "slack", account: "me", chat_id: "ops" }] };
+        if (method !== "message.recent") return {};
+        cursors.push(params.cursor);
+        if (defer) return new Promise((resolve) => { pending.push(resolve); });
+        return { messages: [{ platform: "slack", account: "me", chat_id: "ops", msg_id: "first" }], next_cursor: "old-page" };
+      },
+    } });
+    await controller.start();
+    defer = true;
+    const page = controller.dispatchKey("n");
+    const refresh = controller.receiveEvent("message.upserted");
+    for (let i = 0; i < 30 && pending.length < 2; i++) await Promise.resolve();
+    pending[1]!({ messages: [{ platform: "slack", account: "me", chat_id: "ops", msg_id: "replacement" }], next_cursor: "new-page" });
+    await refresh;
+    pending[0]!({ messages: [{ platform: "slack", account: "me", chat_id: "ops", msg_id: "obsolete" }] });
+    await page;
+    expect(controller.state.views.inbox.data.map((row) => row.id)).toEqual(["replacement"]);
+    const nextRefresh = controller.receiveEvent("message.upserted");
+    const more = controller.dispatchKey("n");
+    for (let i = 0; i < 30 && pending.length < 3; i++) await Promise.resolve();
+    expect(cursors).toEqual([undefined, "old-page", undefined, undefined]);
+    pending[2]!({ messages: [] });
+    await Promise.all([nextRefresh, more]);
+  });
+
+  test("shows continuation for an empty pending approval page", () => {
+    let state = readyState();
+    state = reduce(state, { type: "querySucceeded", generation: 1, screen: "approvals", data: [], nextCursor: "after-expired" });
+    state = reduce(state, { type: "switchScreen", screen: "approvals" });
+    expect(renderScreen(state, { width: 80, height: 24 })).toContain("more results [n]");
+  });
+
+  test("loads pending approval pages without losing earlier approval bindings or codes", async () => {
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+    const scope = { platform: "slack", account: "me", chat_id: "ops" };
+    const controller = createTuiController({ client: {
+      start: async () => {}, stop: () => {},
+      request: async (method, params) => {
+        calls.push({ method, params });
+        if (method === "safety.intent.claimApprovalCode") return { code: params.intent_id === "second" ? "222222" : "111111" };
+        if (method !== "safety.intent.listPending") return {};
+        const second = params.cursor === "approval-next";
+        return { intents: [{ intent_id: second ? "second" : "first", actor: "operator", scope,
+          state: "Proposed" }],
+          ...(second ? {} : { next_cursor: "approval-next" }) };
+      },
+    } });
+    await controller.start();
+    await controller.dispatchKey("4");
+    expect(controller.state.views.approvals.nextCursor).toBe("approval-next");
+    await Promise.all([controller.dispatchKey("n"), controller.dispatchKey("n")]);
+    expect(controller.state.views.approvals.data.map((row) => row.id)).toEqual(["first", "second"]);
+    expect(controller.state.views.approvals.nextCursor).toBeUndefined();
+    expect(controller.currentApprovalCode()).toBe("111111");
+    await controller.dispatchKey("j");
+    await controller.dispatchKey("Enter");
+    expect(controller.currentApprovalCode()).toBe("222222");
+    expect(JSON.stringify(controller.state)).not.toMatch(/111111|222222/);
+    await controller.dispatchKey("a");
+    for (const digit of "222222") await controller.dispatchKey(digit);
+    await controller.dispatchKey("Enter");
+    expect(calls.filter((call) => call.method === "safety.intent.approve")).toEqual([
+      { method: "safety.intent.approve", params: { intent_id: "second", actor: "operator", scope, code: "222222" } },
+    ]);
+    expect(calls.filter((call) => call.params.cursor !== undefined)).toEqual([
+      { method: "safety.intent.listPending", params: { cursor: "approval-next" } },
+    ]);
+  });
+
   test("retains paged inbox, search, and chat rows and clears the subscribed notice after current queries settle", async () => {
     const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
     const chat = { platform: "slack", account: "me", chat_id: "ops" };
@@ -535,9 +864,10 @@ describe("five-screen operational model", () => {
         request: async (method, params) => {
           calls.push({ method, params });
           const cursor = params.cursor;
-          if (method === "chat.list") return cursor === "inbox-next"
-            ? { chats: [{ platform: "slack", account: "me", chat_id: "second", display_name: "Second" }] }
-            : { chats: [{ ...chat, display_name: "Ops" }], next_cursor: "inbox-next" };
+          if (method === "chat.list") return { chats: [chat] };
+          if (method === "message.recent") return cursor === "inbox-next"
+            ? { messages: [{ ...chat, msg_id: "second", body: "Second" }] }
+            : { messages: [{ ...chat, msg_id: "first", body: "Ops" }], next_cursor: "inbox-next" };
           if (method === "message.search") return cursor === "search-next"
             ? { messages: [{ msg_id: "s2", body: "second search" }], coverage: { covered: [], gaps: [], limits: [] } }
             : { messages: [{ msg_id: "s1", body: "first search" }], coverage: { covered: [], gaps: [], limits: [] }, next_cursor: "search-next" };

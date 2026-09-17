@@ -1,6 +1,6 @@
 import { createConnection, type Socket } from "node:net";
 
-import { JsonLinesDecoder, encodeJsonLine, parseMessage, type ProtocolMessage, type ProtocolTransport } from "../../protocol/src/index.ts";
+import { JsonLinesDecoder, encodeJsonLine, parseMessage, type ClientRole, type ProtocolMessage, type ProtocolTransport } from "../../protocol/src/index.ts";
 
 /** Protocol transport used by the TUI; it owns only the UDS framing layer. */
 class JsonLinesTuiTransport implements ProtocolTransport {
@@ -9,7 +9,7 @@ class JsonLinesTuiTransport implements ProtocolTransport {
   private closed = false;
   private readonly decoder = new JsonLinesDecoder();
 
-  constructor(private readonly socket: Socket) {
+  constructor(private readonly socket: Socket, private readonly role: Extract<ClientRole, "reader" | "approver">) {
     socket.on("data", (chunk: Buffer) => this.handleData(chunk));
     socket.on("error", () => this.finish());
     socket.on("close", () => this.finish());
@@ -34,7 +34,7 @@ class JsonLinesTuiTransport implements ProtocolTransport {
 
   private handleData(chunk: Buffer): void {
     try {
-      for (const frame of this.decoder.push(chunk)) this.messageListener?.(parseMessage(frame));
+      for (const frame of this.decoder.push(chunk)) this.messageListener?.(parseMessage(frame, this.role));
     } catch {
       this.socket.destroy();
     }
@@ -47,7 +47,7 @@ class JsonLinesTuiTransport implements ProtocolTransport {
   }
 }
 
-export function connectTuiUdsTransport(socketPath: string): Promise<ProtocolTransport> {
+export function connectTuiUdsTransport(socketPath: string, role: Extract<ClientRole, "reader" | "approver">): Promise<ProtocolTransport> {
   if (socketPath.trim().length === 0) return Promise.reject(new Error("socket endpoint must be a non-empty string"));
   return new Promise((resolve, reject) => {
     const socket = createConnection(socketPath);
@@ -57,7 +57,7 @@ export function connectTuiUdsTransport(socketPath: string): Promise<ProtocolTran
     socket.once("connect", () => {
       connected = true;
       socket.removeListener("error", fail);
-      resolve(new JsonLinesTuiTransport(socket));
+      resolve(new JsonLinesTuiTransport(socket, role));
     });
   });
 }

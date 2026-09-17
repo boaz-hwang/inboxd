@@ -4,10 +4,10 @@ import { randomUUID } from "node:crypto";
 
 import type { Database } from "bun:sqlite";
 import { coreCall } from "../../native/src/index.ts";
-import { getMessage, inboxMessages, searchMessages } from "../../store/src/queries.ts";
+import { getMessage, inboxMessages, recentMessages, recentEvidence, searchMessages } from "../../store/src/queries.ts";
 import { createSafetyService, type SafetyService, type SendScope } from "../../safety/src/index.ts";
 import { encodeJsonLine, JsonLinesDecoder } from "../../protocol/src/framing.ts";
-import { approverTokenFromHandshake, parseRequest, parseRole, type ClientRole, type ProtocolEvent, type ProtocolEventMethod, type ProtocolMethod, type ProtocolResponse } from "../../protocol/src/schema.ts";
+import { approverTokenFromHandshake, parseRecentMessagesParams, parseRequest, parseRole, type ClientRole, type ProtocolEvent, type ProtocolEventMethod, type ProtocolMethod, type ProtocolResponse } from "../../protocol/src/schema.ts";
 import { SubscriptionQueue } from "../../protocol/src/subscriptions.ts";
 
 export interface DaemonServer {
@@ -21,6 +21,7 @@ export type TrustedApproverSessionAuthorizer = (session: { readonly socket: Sock
 export interface DaemonServerOptions {
   readonly safety?: SafetyService;
   readonly backfill?: (request: { readonly chat: { readonly platform: string; readonly account: string; readonly chat_id: string }; readonly interval: { readonly from_ts: number; readonly to_ts: number } }) => Promise<Record<string, unknown>>;
+  readonly diagnostics?: () => Record<string, unknown>;
   /** Defaults to deny: a claimed protocol role is not trusted local authorization. */
   readonly isTrustedApproverSession?: TrustedApproverSessionAuthorizer;
 }
@@ -173,7 +174,7 @@ export function createDaemonServer(database: Database, maxQueuedEvents?: number,
     if (!connection.role) throw new Error("system.hello is required before API requests");
     switch (method) {
       case "system.ping": return { pong: true };
-      case "system.status": return { ready: true, owner: "daemon" };
+      case "system.status": return options.diagnostics?.() ?? { ready: true, owner: "daemon" };
       case "chat.list": {
         const requested = page(params);
         let found: { chats: unknown[]; next_cursor?: string };
@@ -184,6 +185,19 @@ export function createDaemonServer(database: Database, maxQueuedEvents?: number,
         }
         auditRead(connection, "read.chat_list", "all-chats", found.chats.length);
         return found;
+      }
+      case "message.recent":
+      case "message.evidence": {
+        const input = parseRecentMessagesParams(params);
+        let found: ReturnType<typeof recentMessages> | ReturnType<typeof recentEvidence>;
+        try {
+          found = method === "message.recent" ? recentMessages(database, input) : recentEvidence(database, input);
+        } catch (error) {
+          if (error instanceof Error && (error.name === "TypeError" || error.name === "RangeError" || /^cursor\b/.test(error.message))) throw new BadRequestError(error.message);
+          throw error;
+        }
+        auditRead(connection, method === "message.recent" ? "read.recent" : "read.evidence", JSON.stringify(input.chats), "messages" in found ? found.messages.length : found.evidence.length);
+        return { ...found };
       }
       case "message.inbox": {
         const key = chat(params);
@@ -204,14 +218,22 @@ export function createDaemonServer(database: Database, maxQueuedEvents?: number,
         return { messages: found.messages, coverage: found.coverage, ...(found.next_cursor === undefined ? {} : { next_cursor: found.next_cursor }) };
       }
       case "sync.backfill": {
+        assertTrustedApprover(connection);
         if (options.backfill === undefined) throw new Error("sync.backfill is unavailable because no adapter is configured");
         const requested = parseBackfillRequest(params);
         const result = await options.backfill(requested);
         publish({ type: "event", method: "coverage.changed", params: { chat: requested.chat } });
         return result;
       }
-      case "sync.status": return { state: "idle" };
-      case "auth.status": return { authenticated: false };
+      case "sync.status": {
+        const platforms = (options.diagnostics?.().sync ?? {}) as Record<string, { state: string }>;
+        const state = ["running", "cooldown", "failed", "retry_due", "success"].find((state) => Object.values(platforms).some((platform) => platform.state === state)) ?? "idle";
+        return { state, ...(Object.keys(platforms).length === 0 ? {} : { platforms }) };
+      }
+      case "auth.status": {
+        const platforms = (options.diagnostics?.().auth ?? {}) as Record<string, string>;
+        return { authenticated: Object.keys(platforms).length > 0 && Object.values(platforms).every((state) => state === "authenticated"), ...(Object.keys(platforms).length === 0 ? {} : { platforms }) };
+      }
       case "safety.intent.create": {
         const created = safety.propose({ actor: string(params.actor, "actor"), scope: scope(params.scope), body: string(params.body, "body"), ...(params.parent_id === undefined ? {} : { parent_id: string(params.parent_id, "parent_id") }) });
         publishSafety(created.intent_id);
@@ -223,6 +245,13 @@ export function createDaemonServer(database: Database, maxQueuedEvents?: number,
         const found = safety.listPendingPage(page(params));
         auditRead(connection, "read.safety_intent_list", "pending-intents", found.intents.length);
         return { intents: found.intents, ...(found.next_cursor === undefined ? {} : { next_cursor: found.next_cursor }) };
+      }
+      case "safety.intent.claimApprovalCode": {
+        assertTrustedApprover(connection);
+        const intentId = string(params.intent_id, "intent_id");
+        const claimed = safety.claimApprovalCode(intentId);
+        if ("unavailable" in claimed) publishSafety(intentId);
+        return { ...claimed };
       }
       case "safety.intent.approve": {
         assertTrustedApprover(connection);

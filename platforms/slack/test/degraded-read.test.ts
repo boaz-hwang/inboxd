@@ -15,6 +15,12 @@ function adapterWithRunner(runner: (request: SlackRunnerRequest) => Promise<read
 }
 
 describe("degraded Slack read adapter", () => {
+  test("rejects a durable cursor instead of silently replaying the first unpaged result", async () => {
+    let calls = 0;
+    const adapter = adapterWithRunner(async () => { calls++; return fixture; });
+    await expect(adapter.fetchHistorical!({ chat, interval: { from_ts: 10, to_ts: 90 }, cursor: "some-checkpoint" })).rejects.toThrow("cursor");
+    expect(calls).toBe(0);
+  });
   test("denies a non-exact stable account/chat allowlist match before runner I/O", async () => {
     let runnerCalls = 0;
     const adapter = adapterWithRunner(async () => {

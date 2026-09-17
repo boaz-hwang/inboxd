@@ -75,6 +75,8 @@ export async function runCli(
     case "daemon status": result = await handlers.daemonStatus(); break;
     case "chat list": result = await handlers.chatList(); break;
     case "message inbox": result = await handlers.inbox(jsonArgument(payload, "message inbox") as unknown as Parameters<CliHandlers["inbox"]>[0]); break;
+    case "message recent": result = await handlers.recent(jsonArgument(payload, "message recent") as unknown as Parameters<CliHandlers["recent"]>[0]); break;
+    case "message evidence": result = await handlers.evidence(jsonArgument(payload, "message evidence") as unknown as Parameters<CliHandlers["evidence"]>[0]); break;
     case "message get": result = await handlers.get(jsonArgument(payload, "message get") as unknown as Parameters<CliHandlers["get"]>[0]); break;
     case "message search": result = await handlers.search(jsonArgument(payload, "message search") as unknown as Parameters<CliHandlers["search"]>[0]); break;
     case "sync status": result = await handlers.syncStatus(); break;
@@ -88,7 +90,7 @@ export async function runCli(
     case "doctor status": result = await handlers.doctor(); break;
     case "safety propose": result = await handlers.propose(jsonArgument(payload, "safety propose")); break;
     case "safety list": result = await handlers.listPending(); break;
-    case "safety approve": result = await handlers.approve(jsonArgument(payload, "safety approve") as Parameters<CliHandlers["approve"]>[0]); break;
+    case "safety approve": throw new Error("approval codes are accepted only by the owner-local TUI");
     case "safety reject": result = await handlers.reject(jsonArgument(payload, "safety reject") as Parameters<CliHandlers["reject"]>[0]); break;
     default: throw new Error("unknown command");
   }

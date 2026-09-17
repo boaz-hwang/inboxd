@@ -491,8 +491,97 @@ pub fn validate_send_configuration(value: &Value) -> DomainResult<Value> {
     Ok(Value::Null)
 }
 
+/// Only adapter-authenticated account evidence can establish self identity.
+/// The caller of this internal ingestion boundary must be a trusted adapter.
+pub fn account_identity(value: &Value) -> DomainResult<Value> {
+    let input = object(value, "account identity")?;
+    let mut result = json!({
+        "platform": non_empty_string(input.get("platform"), "platform")?,
+        "account": non_empty_string(input.get("account"), "account")?,
+        "observed_at": finite_number(input.get("observed_at"), "observed_at")?,
+    });
+    match input.get("status").and_then(Value::as_str) {
+        Some("known")
+            if input.get("source").and_then(Value::as_str) == Some("authenticated_adapter") =>
+        {
+            result["status"] = json!("known");
+            result["source"] = json!("authenticated_adapter");
+            result["self_id"] = json!(non_empty_string(input.get("self_id"), "self_id")?);
+        }
+        Some("unknown")
+            if input.get("source").and_then(Value::as_str) == Some("unknown")
+                && !input.contains_key("self_id")
+                && matches!(
+                    input.get("reason").and_then(Value::as_str),
+                    Some("unsupported" | "unavailable")
+                ) =>
+        {
+            result["status"] = json!("unknown");
+            result["source"] = json!("unknown");
+            result["reason"] = input["reason"].clone();
+        }
+        _ => {
+            return Err(CoreError::type_error(
+                "identity requires authenticated adapter evidence or explicit unknown",
+            ));
+        }
+    }
+    Ok(result)
+}
+
+pub fn unread_state(value: &Value) -> DomainResult<Value> {
+    let input = object(value, "unread state")?;
+    let mut result = json!({
+        "chat": chat_key(input.get("chat").unwrap_or(&Value::Null))?,
+        "observed_at": finite_number(input.get("observed_at"), "observed_at")?,
+    });
+    match (
+        input.get("status").and_then(Value::as_str),
+        input.get("source").and_then(Value::as_str),
+    ) {
+        (Some("known"), Some(source @ ("platform" | "local_estimate"))) => {
+            let count = finite_number(input.get("count"), "unread count")?;
+            if !(0.0..=9_007_199_254_740_991.0).contains(&count) || count.fract() != 0.0 {
+                return Err(CoreError::type_error(
+                    "unread count must be a non-negative safe integer",
+                ));
+            }
+            result["status"] = json!("known");
+            result["source"] = json!(source);
+            result["count"] = json!(count);
+            if source == "local_estimate" {
+                let basis = object(input.get("basis").unwrap_or(&Value::Null), "unread basis")?;
+                result["basis"] = json!({
+                    "read_cursor": non_empty_string(basis.get("read_cursor"), "read_cursor")?,
+                    "interval": interval(basis.get("interval").unwrap_or(&Value::Null))?.2,
+                });
+            }
+        }
+        (Some("unknown"), Some("unknown"))
+            if input.get("count") == Some(&Value::Null)
+                && matches!(
+                    input.get("reason").and_then(Value::as_str),
+                    Some("unsupported" | "unavailable")
+                ) =>
+        {
+            result["status"] = json!("unknown");
+            result["source"] = json!("unknown");
+            result["count"] = Value::Null;
+            result["reason"] = input["reason"].clone();
+        }
+        _ => {
+            return Err(CoreError::type_error(
+                "unread requires qualified count or explicit unknown",
+            ));
+        }
+    }
+    Ok(result)
+}
+
 pub fn dispatch(op: &str, input: &Value) -> Option<DomainResult<Value>> {
     Some(match op {
+        "domain.unreadState" => unread_state(input),
+        "domain.accountIdentity" => account_identity(input),
         "domain.chatKey" => chat_key(input),
         "domain.messageKey" => message_key(input),
         "domain.adapterRevision" => adapter_revision(input),

@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { migrateDatabase, openSqlCipherDatabase } from "../../store/src/index.ts";
+import { coreCall } from "../../native/src/index.ts";
 import {
   ApprovalRejectedError,
   createSafetyService,
@@ -41,6 +42,76 @@ async function approve(service: ReturnType<typeof createSafetyService>, intentId
 }
 
 describe("safety intent approval and outbox", () => {
+  test("startup scrubs legacy codes for every state and expires all orphan proposals", async () => {
+    const { database } = fixture();
+    const service = createSafetyService(database, { approvalCode: () => "654321" });
+    const orphan = proposal(service);
+    const approved = proposal(service);
+    await approve(service, approved.intent_id);
+    const modern = proposal(service);
+    database.run("UPDATE approvals SET payload_json = json_set(payload_json, '$.code', ?) WHERE intent_id IN (?, ?)", ["654321", orphan.intent_id, approved.intent_id]);
+    const restarted = createSafetyService(database);
+    const stored = database.query("SELECT payload_json FROM approvals").all();
+    expect(JSON.stringify(stored)).not.toContain("654321");
+    expect(restarted.getIntent(orphan.intent_id)?.state).toBe("Expired");
+    expect(restarted.getIntent(modern.intent_id)?.state).toBe("Expired");
+    expect(restarted.getIntent(approved.intent_id)?.state).toBe("Approved");
+    expect(restarted.claimApprovalCode(orphan.intent_id)).toEqual({ unavailable: true });
+    await expect(approve(restarted, orphan.intent_id)).rejects.toBeInstanceOf(ApprovalRejectedError);
+    expect(restarted.listPending().map(item => item.intent_id)).toEqual([approved.intent_id]);
+  });
+  test("claims an ephemeral code once and expires an orphan instead of recovering it", async () => {
+    const { database } = fixture();
+    const service = createSafetyService(database, { approvalCode: () => "654321" });
+    const created = proposal(service);
+    expect(service.claimApprovalCode(created.intent_id)).toEqual({ code: "654321" });
+    expect(service.claimApprovalCode(created.intent_id)).toEqual({ unavailable: true });
+    expect(service.getIntent(created.intent_id)?.state).toBe("Expired");
+    await expect(approve(service, created.intent_id)).rejects.toBeInstanceOf(ApprovalRejectedError);
+    const fresh = proposal(service);
+    const claimed = service.claimApprovalCode(fresh.intent_id);
+    expect(claimed).toEqual({ code: "654321" });
+    await expect(approve(service, fresh.intent_id)).resolves.toMatchObject({ state: "Approved" });
+    await expect(approve(service, fresh.intent_id)).rejects.toBeInstanceOf(ApprovalRejectedError);
+    expect(service.claimApprovalCode(fresh.intent_id)).toEqual({ unavailable: true });
+    expect(service.getIntent(fresh.intent_id)?.state).toBe("Approved");
+  });
+  test("rechecks send capability after the durable claim and never invokes a revoked sender", async () => {
+    const { database } = fixture();
+    let enabled = true;
+    let calls = 0;
+    const service = createSafetyService(database, {
+      approvalCode: () => "654321",
+      // A trusted policy refresh revokes the connector while the claim commits.
+      allowSend: () => { enabled = false; return true; },
+      transport: { capabilities: { get send() { return enabled; } }, send: async () => { calls++; return { state: "sent", receipt: "forbidden" }; } },
+    });
+    const created = proposal(service);
+    await approve(service, created.intent_id);
+    expect(await service.execute(created.intent_id)).toMatchObject({ state: "Failed" });
+    expect(calls).toBe(0);
+    expect(database.query("SELECT state FROM sends").all()).toEqual([{ state: "Failed" }]);
+    expect(database.query("SELECT used FROM quota ORDER BY scope").all()).toEqual([{ used: 0 }, { used: 0 }]);
+  });
+
+  test("removing the allowlist entry after approval makes zero remote calls and reserves no quota", async () => {
+    const { database } = fixture();
+    let allowed = true;
+    let calls = 0;
+    const service = createSafetyService(database, {
+      approvalCode: () => "654321", allowSend: () => allowed,
+      transport: { capabilities: { send: true }, send: async () => { calls++; return { state: "sent", receipt: "forbidden" }; } },
+    });
+    const created = proposal(service);
+    await approve(service, created.intent_id);
+    expect(service.getIntent(created.intent_id)?.state).toBe("Approved");
+    allowed = false;
+    expect(await service.execute(created.intent_id)).toMatchObject({ state: "Failed" });
+    expect(calls).toBe(0);
+    expect(database.query("SELECT * FROM sends").all()).toEqual([]);
+    expect(database.query("SELECT * FROM quota").all()).toEqual([]);
+  });
+
   test("issues a code only at the safety boundary and omits body and code from audit metadata", () => {
     const { database } = fixture();
     const service = createSafetyService(database, { now: () => 1_000, approvalCode: () => "654321" });
@@ -48,7 +119,11 @@ describe("safety intent approval and outbox", () => {
 
     expect(created).toEqual({ intent_id: expect.any(String), expires_at: 901_000 });
     expect(JSON.stringify(created)).not.toContain("654321");
-    expect(service.listPending()).toEqual([expect.objectContaining({ intent_id: created.intent_id, approval_code: "654321" })]);
+    expect(service.listPending()).toEqual([expect.objectContaining({ intent_id: created.intent_id })]);
+    expect(service.listPending()[0]).not.toHaveProperty("approval_code");
+    const stored = database.query("SELECT payload_json FROM approvals").get() as { payload_json: string };
+    expect(JSON.parse(stored.payload_json)).not.toHaveProperty("code");
+    expect(stored.payload_json).not.toContain("654321");
     const audit = database.query("SELECT payload_json FROM audit ORDER BY id").all() as { payload_json: string }[];
     expect(JSON.stringify(audit)).not.toContain("body never in audit");
     expect(JSON.stringify(audit)).not.toContain("654321");
@@ -281,6 +356,38 @@ describe("safety intent approval and outbox", () => {
     expect(calls).toBe(2);
   });
 
+  test("a stale finalization cannot overwrite recovered uncertainty or release quota", async () => {
+    const { database } = fixture();
+    let releaseTransport!: (result: { state: "failed"; reason: string }) => void;
+    let transportStarted!: () => void;
+    const started = new Promise<void>((resolve) => { transportStarted = resolve; });
+    const service = createSafetyService(database, {
+      now: () => 1_000,
+      approvalCode: () => "654321",
+      quotaLimit: 1,
+      globalQuotaLimit: 1,
+      transport: {
+        capabilities: { send: true },
+        send: () => {
+          transportStarted();
+          return new Promise((resolve) => { releaseTransport = resolve; });
+        },
+      },
+    });
+    const created = proposal(service, "late transport result");
+    await approve(service, created.intent_id);
+    const execution = service.execute(created.intent_id);
+    await started;
+
+    expect(coreCall<number>("daemon.recoverInterruptedSends", null, database)).toBe(1);
+    releaseTransport({ state: "failed", reason: "late definite failure" });
+    await expect(execution).rejects.toBeInstanceOf(IntentNotEligibleError);
+    expect(service.getIntent(created.intent_id)?.state).toBe("Uncertain");
+    expect(database.query("SELECT state FROM sends WHERE intent_id = ?").get(created.intent_id)).toEqual({ state: "Uncertain" });
+    expect(database.query("SELECT used FROM quota WHERE scope = '__global__'").get()).toEqual({ used: 1 });
+    expect(database.query("SELECT used FROM quota WHERE scope = ?").get('{"account":"account-1","chat_id":"chat-1","platform":"slack"}')).toEqual({ used: 1 });
+  });
+
   test("honors a preexisting v1 canonical scope counter atomically", async () => {
     const { database } = fixture();
     let calls = 0;
@@ -301,7 +408,7 @@ describe("safety intent approval and outbox", () => {
     expect(calls).toBe(0);
   });
 
-  test("consumes a persisted v1 approval produced by the TypeScript implementation", async () => {
+  test("expires a persisted v1 proposal rather than recovering its legacy raw code", async () => {
     const { database } = fixture();
     database.run("INSERT INTO intents (id, kind, payload_json, created_at) VALUES (?, 'send', ?, ?)", [
       "legacy-1",
@@ -312,7 +419,8 @@ describe("safety intent approval and outbox", () => {
       '{"code":"654321","code_hash":"64ded9f666f8e1078d7c21201aa6cad5b1bdad422b4c0f8c1e288175d905c5ad","bound_hash":"1bc0f40a3d34cac1ee3bae791761814ea6249ffbb787348c92b9d9db0c35bcf4","actor":"agent:alpha","scope":{"platform":"slack","account":"account-1","chat_id":"chat-1"},"expires_at":901234.75}',
     ]);
     const service = createSafetyService(database, { now: () => 1234.5 });
-    await expect(service.approve({ intentId: "legacy-1", code: "654321", actor: "agent:alpha", scope })).resolves.toEqual(expect.objectContaining({ state: "Approved", parent_id: "p-1" }));
+    await expect(service.approve({ intentId: "legacy-1", code: "654321", actor: "agent:alpha", scope })).rejects.toBeInstanceOf(ApprovalRejectedError);
+    expect(service.getIntent("legacy-1")).toMatchObject({ state: "Expired", parent_id: "p-1" });
   });
 
   test("keeps v1 cursor bytes compatible for genuine private-use scalar IDs", () => {

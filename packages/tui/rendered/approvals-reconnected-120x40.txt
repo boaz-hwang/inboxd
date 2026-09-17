@@ -1,0 +1,40 @@
+INBOXD · connected · slack                                                                                              
+1 INBOX | 2 SEARCH | 3 CHAT | ● APPROVALS | 5 DOCTOR                                                                    
+LIST 40%                                        │DETAIL 60%                                                             
+Evidence rail: partial · 1 chats / 1 gaps / 1 l…│Context rail: APPROVALS · focus 1/2                                    
+Status rail: connected · generation 2/2         │Detail — Approvals                                                     
+Approvals                                       │Context: 1 of 2 · partial · 1 chats / 1 gaps / 1 limits                
+Delivery: session observations                  │Other intent: UNCERTAIN — do not resend automatically                  
+Uncertain: outcome unknown; do not resend       │ID: intent-1                                                           
+> ● Code unavailable 10m slack:work:ops 승인 대…│State: Code unavailable                                                
+ ○ Uncertain expired slack:work:ops 자동 재전송…│Destination: slack:work:ops                                            
+Queue: UNCERTAIN — do not resend automatically  │Expires: 10m                                                           
+Approve [disabled: Code unavailable]            │Message: 승인 대기 제안                                                
+                                                │Approve [disabled]                                                     
+                                                │Back: Esc · PgUp/PgDn scroll · Home top (1–6/6)                        
+! approval code unavailable after reconnect — re-proposal required                                                      
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+1–5 j/k ↑↓ Enter / n-more b c a Esc ? q                                                                                 

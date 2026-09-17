@@ -2,5 +2,8 @@
   "name": "@inboxd/cli",
   "version": "0.0.0",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "bin": {
+    "inboxd": "src/bin.ts"
+  }
 }
