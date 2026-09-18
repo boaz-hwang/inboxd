@@ -32,6 +32,29 @@ pub fn wire_utf16_units(value: &str) -> CoreResult<Vec<u16>> {
     Ok(units)
 }
 
+/// Encodes JavaScript UTF-16 units for the core boundary without losing lone
+/// surrogates or confusing real private-use scalars with transport escapes.
+pub fn wire_from_utf16_units(units: &[u16]) -> String {
+    let mut encoded = String::new();
+    for decoded in char::decode_utf16(units.iter().copied()) {
+        match decoded {
+            Ok(character) => {
+                if (WIRE_SURROGATE_BASE..=WIRE_ESCAPE as u32).contains(&(character as u32)) {
+                    encoded.push(WIRE_ESCAPE);
+                }
+                encoded.push(character);
+            }
+            Err(error) => {
+                // An unpaired surrogate is D800..DFFF, so this always maps to
+                // a valid scalar in F0000..F07FF.
+                let point = WIRE_SURROGATE_BASE + u32::from(error.unpaired_surrogate()) - 0xD800;
+                encoded.push(char::from_u32(point).expect("surrogate wire range is valid"));
+            }
+        }
+    }
+    encoded
+}
+
 pub fn wire_cmp(left: &str, right: &str) -> CoreResult<std::cmp::Ordering> {
     Ok(wire_utf16_units(left)?.cmp(&wire_utf16_units(right)?))
 }

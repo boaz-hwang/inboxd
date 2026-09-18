@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/inboxd-core"]
+members = ["crates/inboxd-core", "crates/inboxd-storage"]
 resolver = "2"
 
 [workspace.package]

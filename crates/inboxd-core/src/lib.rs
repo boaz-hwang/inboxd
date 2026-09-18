@@ -10,7 +10,8 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 pub use host::{
-    CallbackHost, Host, HostCallback, SqlHost, wire_cmp, wire_code_unit_len, wire_utf16_units,
+    CallbackHost, Host, HostCallback, SqlHost, wire_cmp, wire_code_unit_len, wire_from_utf16_units,
+    wire_utf16_units,
 };
 
 pub type CoreResult<T> = Result<T, CoreError>;
@@ -33,6 +34,16 @@ impl CoreError {
     fn internal(error: impl std::fmt::Display) -> Self {
         Self::new("CoreError", error.to_string())
     }
+}
+
+/// Safe synchronous in-process entry point. All strings (including object keys)
+/// use the UTF-16 wire encoding; native callers must encode ordinary Rust text
+/// with `wire_from_utf16_units`. Returned strings use that same representation.
+/// The host is borrowed only for this call and must not re-enter the dispatcher.
+/// Panics are contained; transaction helpers roll back before propagation.
+pub fn call(op: &str, input: &Value, host: &dyn Host) -> CoreResult<Value> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(op, input, host)))
+        .unwrap_or_else(|_| Err(CoreError::new("CorePanic", "native core panicked")))
 }
 
 fn dispatch(op: &str, input: &Value, host: &dyn Host) -> CoreResult<Value> {

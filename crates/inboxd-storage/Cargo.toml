@@ -1,0 +1,18 @@
+[package]
+name = "inboxd-storage"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+inboxd-core = { path = "../inboxd-core" }
+serde_json.workspace = true
+rusqlite = { version = "=0.32.1", features = ["sqlcipher"] }
+ryu-js = "=1.0.2"
+sha2 = "0.10"
+base64 = "0.22"
+uuid = { version = "=1.16.0", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "=3.19.1"
