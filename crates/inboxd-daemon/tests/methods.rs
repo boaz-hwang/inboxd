@@ -19,20 +19,12 @@ fn private_tempdir() -> TempDir {
 }
 
 fn config(path: &Path) -> DaemonConfig {
-    DaemonConfig::new(
-        path,
-        path.join("inboxd.db"),
-        path.join("inboxd.sock"),
-        KEY,
-    )
+    DaemonConfig::new(path, path.join("inboxd.db"), path.join("inboxd.sock"), KEY)
 }
 
 fn seed(path: &Path) {
-    let mut actor = StorageActor::start(StorageActorConfig::new(
-        path.join("inboxd.db"),
-        KEY,
-    ))
-    .unwrap();
+    let mut actor =
+        StorageActor::start(StorageActorConfig::new(path.join("inboxd.db"), KEY)).unwrap();
     let chat = json!({"platform":"test","account":"one","chat_id":"room"});
     actor
         .call(
@@ -139,19 +131,80 @@ async fn all_legacy_read_methods_are_storage_backed_and_audited_by_session() {
         client.request("system.ping", json!({})).await,
         json!({"pong":true})
     );
-    assert_eq!(client.request("system.status", json!({})).await["owner"], "daemon");
+    assert_eq!(
+        client.request("system.status", json!({})).await["owner"],
+        "daemon"
+    );
 
     let chat = json!({"platform":"test","account":"one","chat_id":"room"});
     let interval = json!({"from_ts":0,"to_ts":20});
-    assert_eq!(client.request("chat.list", json!({})).await["chats"][0]["chat_id"], "room");
-    assert_eq!(client.request("message.inbox", json!({"chat":chat,"interval":interval})).await["messages"].as_array().unwrap().len(), 2);
-    assert_eq!(client.request("message.recent", json!({"chats":[chat],"interval":interval})).await["messages"].as_array().unwrap().len(), 2);
-    assert_eq!(client.request("message.evidence", json!({"chats":[chat],"interval":interval})).await["evidence"].as_array().unwrap().len(), 2);
-    assert_eq!(client.request("message.get", json!({"chat":chat,"msg_id":"m1"})).await["message"]["body"], "find me");
-    assert_eq!(client.request("message.search", json!({"chat":chat,"interval":interval,"query":"find"})).await["messages"].as_array().unwrap().len(), 1);
-    assert_eq!(client.request("sync.status", json!({})).await, json!({"state":"idle"}));
-    assert_eq!(client.request("auth.status", json!({})).await, json!({"authenticated":false}));
-    assert_eq!(client.request("send.status", json!({"id":"missing"})).await, json!({"state":"missing"}));
+    assert_eq!(
+        client.request("chat.list", json!({})).await["chats"][0]["chat_id"],
+        "room"
+    );
+    assert_eq!(
+        client
+            .request("message.inbox", json!({"chat":chat,"interval":interval}))
+            .await["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        client
+            .request(
+                "message.recent",
+                json!({"chats":[chat],"interval":interval})
+            )
+            .await["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        client
+            .request(
+                "message.evidence",
+                json!({"chats":[chat],"interval":interval})
+            )
+            .await["evidence"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        client
+            .request("message.get", json!({"chat":chat,"msg_id":"m1"}))
+            .await["message"]["body"],
+        "find me"
+    );
+    assert_eq!(
+        client
+            .request(
+                "message.search",
+                json!({"chat":chat,"interval":interval,"query":"find"})
+            )
+            .await["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        client.request("sync.status", json!({})).await,
+        json!({"state":"idle"})
+    );
+    assert_eq!(
+        client.request("auth.status", json!({})).await,
+        json!({"authenticated":false})
+    );
+    assert_eq!(
+        client.request("send.status", json!({"id":"missing"})).await,
+        json!({"state":"missing"})
+    );
 
     drop(client);
     shutdown(daemon).await;
@@ -164,8 +217,17 @@ async fn all_legacy_read_methods_are_storage_backed_and_audited_by_session() {
         )
         .unwrap();
     assert_eq!(
-        rows.iter().map(|row| row["action"].as_str().unwrap()).collect::<Vec<_>>(),
-        ["read.chat_list", "read.inbox", "read.recent", "read.evidence", "read.message", "read.search"]
+        rows.iter()
+            .map(|row| row["action"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "read.chat_list",
+            "read.inbox",
+            "read.recent",
+            "read.evidence",
+            "read.message",
+            "read.search"
+        ]
     );
     let sessions = rows
         .iter()
@@ -195,18 +257,34 @@ async fn approval_methods_require_role_and_owner_token_and_codes_are_one_shot() 
         "safety.intent.approve",
         "safety.intent.reject",
     ] {
-        let denied = agent.request_frame(method, json!({"intent_id":created["intent_id"]})).await;
+        let denied = agent
+            .request_frame(method, json!({"intent_id":created["intent_id"]}))
+            .await;
         assert_eq!(denied["error"]["code"], "BAD_REQUEST");
     }
 
     let mut untrusted = Client::connect(daemon.socket_path()).await;
-    untrusted.request("system.hello", json!({"role":"approver","approver_token":"wrong"})).await;
-    let denied = untrusted.request_frame("safety.intent.listPending", json!({})).await;
+    untrusted
+        .request(
+            "system.hello",
+            json!({"role":"approver","approver_token":"wrong"}),
+        )
+        .await;
+    let denied = untrusted
+        .request_frame("safety.intent.listPending", json!({}))
+        .await;
     assert_eq!(denied["error"]["code"], "UNSUPPORTED");
-    assert!(denied["error"]["message"].as_str().unwrap().contains("trusted local approver"));
+    assert!(
+        denied["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("trusted local approver")
+    );
 
     let mut approver = trusted_approver(directory.path()).await;
-    let pending = approver.request("safety.intent.listPending", json!({})).await;
+    let pending = approver
+        .request("safety.intent.listPending", json!({}))
+        .await;
     assert_eq!(pending["intents"][0]["intent_id"], created["intent_id"]);
     assert!(!pending.to_string().contains("code"));
     let claimed = approver
@@ -256,7 +334,12 @@ async fn approval_methods_require_role_and_owner_token_and_codes_are_one_shot() 
         )
         .await;
     assert_eq!(backfill["error"]["code"], "UNSUPPORTED");
-    assert!(backfill["error"]["message"].as_str().unwrap().contains("unavailable"));
+    assert!(
+        backfill["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unavailable")
+    );
 
     drop((agent, approver, untrusted));
     shutdown(daemon).await;
@@ -269,7 +352,9 @@ async fn subscriptions_replace_topics_and_terminal_overflow_closes_the_connectio
         .await
         .unwrap();
     let mut client = Client::connect(daemon.socket_path()).await;
-    client.request("system.hello", json!({"role":"reader"})).await;
+    client
+        .request("system.hello", json!({"role":"reader"}))
+        .await;
     assert_eq!(
         client
             .request("subscribe", json!({"topics":["message.upserted"]}))
@@ -295,7 +380,9 @@ async fn subscriptions_replace_topics_and_terminal_overflow_closes_the_connectio
     assert_eq!(event["params"]["sequence"], 2);
 
     let mut overflow = Client::connect(daemon.socket_path()).await;
-    overflow.request("system.hello", json!({"role":"reader"})).await;
+    overflow
+        .request("system.hello", json!({"role":"reader"}))
+        .await;
     overflow
         .request("subscribe", json!({"topics":["message.upserted"]}))
         .await;

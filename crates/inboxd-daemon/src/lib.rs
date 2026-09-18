@@ -1,9 +1,8 @@
 //! Rust-owned inboxd daemon and UDS lifecycle.
 #![forbid(unsafe_code)]
 
-use inboxd_protocol::{
-    ClientRole, JsonLinesDecoder, MAX_CLIENT_FRAME_BYTES, ProtocolRequest, parse_request,
-};
+mod server;
+
 use inboxd_storage::{StorageActor, StorageActorConfig};
 use serde_json::{Value, json};
 use std::{
@@ -16,15 +15,17 @@ use std::{
     process::Command,
     sync::Arc,
 };
-use subtle::ConstantTimeEq;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
     sync::oneshot,
     task::JoinHandle,
 };
-use uuid::Uuid;
 use zeroize::Zeroizing;
+
+use server::{EventHub, run_server};
+
+const DEFAULT_MAX_QUEUED_EVENTS: usize = 256;
+const MAX_QUEUED_EVENTS: usize = 4_096;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonError(String);
@@ -50,6 +51,7 @@ pub struct DaemonConfig {
     pub database_path: PathBuf,
     pub socket_path: PathBuf,
     database_key: Zeroizing<Vec<u8>>,
+    max_queued_events: usize,
 }
 
 impl fmt::Debug for DaemonConfig {
@@ -60,6 +62,7 @@ impl fmt::Debug for DaemonConfig {
             .field("database_path", &self.database_path)
             .field("socket_path", &self.socket_path)
             .field("database_key", &"<redacted>")
+            .field("max_queued_events", &self.max_queued_events)
             .finish()
     }
 }
@@ -71,6 +74,7 @@ impl Clone for DaemonConfig {
             database_path: self.database_path.clone(),
             socket_path: self.socket_path.clone(),
             database_key: Zeroizing::new(self.database_key.to_vec()),
+            max_queued_events: self.max_queued_events,
         }
     }
 }
@@ -87,12 +91,23 @@ impl DaemonConfig {
             database_path: database_path.as_ref().to_owned(),
             socket_path: socket_path.as_ref().to_owned(),
             database_key: Zeroizing::new(database_key.into()),
+            max_queued_events: DEFAULT_MAX_QUEUED_EVENTS,
         }
+    }
+
+    pub fn with_max_queued_events(mut self, maximum: usize) -> Self {
+        self.max_queued_events = maximum;
+        self
     }
 
     fn validate(&self) -> Result<()> {
         if self.database_key.is_empty() {
             return Err(DaemonError::new("database key must not be empty"));
+        }
+        if !(1..=MAX_QUEUED_EVENTS).contains(&self.max_queued_events) {
+            return Err(DaemonError::new(format!(
+                "max queued events must be from 1 to {MAX_QUEUED_EVENTS}"
+            )));
         }
         if !self.state_dir.is_absolute()
             || !self.database_path.is_absolute()
@@ -126,11 +141,22 @@ pub struct Daemon {
     shutdown: Option<oneshot::Sender<()>>,
     server: Option<JoinHandle<Arc<StorageActor>>>,
     state_lock: Option<StateLock>,
+    events: Arc<EventHub>,
 }
 
 impl Daemon {
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    /// Publishes a committed notification. Overflowed subscribers are closed and
+    /// must reconnect, resubscribe, and re-query; notifications are not replayed.
+    pub fn publish_event(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> std::result::Result<usize, DaemonError> {
+        self.events.publish(method, params)
     }
 
     pub async fn shutdown(mut self) -> Result<()> {
@@ -164,208 +190,33 @@ pub async fn launch(config: DaemonConfig) -> Result<Daemon> {
     let actor = StorageActor::start(actor_config)
         .map_err(|error| DaemonError::new(format!("{}: {}", error.name, error.message)))?;
     let actor = Arc::new(actor);
-    let listener = match UnixListener::bind(&config.socket_path) {
-        Ok(listener) => listener,
-        Err(error) => {
-            return Err(DaemonError::new(format!(
-                "unable to bind daemon socket: {error}"
-            )));
-        }
-    };
+    let listener = UnixListener::bind(&config.socket_path)
+        .map_err(|error| DaemonError::new(format!("unable to bind daemon socket: {error}")))?;
     fs::set_permissions(&config.socket_path, fs::Permissions::from_mode(0o600))
         .map_err(|error| DaemonError::new(format!("unable to secure daemon socket: {error}")))?;
+    let events = Arc::new(EventHub::default());
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let server_actor = Arc::clone(&actor);
+    let server_events = Arc::clone(&events);
+    let maximum = config.max_queued_events;
     let server = tokio::spawn(async move {
-        run_server(listener, server_actor, approver_token, shutdown_rx).await
+        run_server(
+            listener,
+            server_actor,
+            approver_token,
+            server_events,
+            maximum,
+            shutdown_rx,
+        )
+        .await
     });
     Ok(Daemon {
         socket_path: config.socket_path,
         shutdown: Some(shutdown_tx),
         server: Some(server),
         state_lock: Some(state_lock),
+        events,
     })
-}
-
-async fn run_server(
-    listener: UnixListener,
-    actor: Arc<StorageActor>,
-    approver_token: Arc<Zeroizing<String>>,
-    mut shutdown: oneshot::Receiver<()>,
-) -> Arc<StorageActor> {
-    let mut connections = tokio::task::JoinSet::new();
-    loop {
-        tokio::select! {
-            accepted = listener.accept() => match accepted {
-                Ok((socket, _)) => {
-                    let actor = Arc::clone(&actor);
-                    let token = Arc::clone(&approver_token);
-                    connections.spawn(async move { handle_connection(socket, actor, token).await; });
-                }
-                Err(_) => break,
-            },
-            _ = &mut shutdown => break,
-        }
-    }
-    connections.abort_all();
-    while connections.join_next().await.is_some() {}
-    actor
-}
-
-struct Session {
-    id: String,
-    role: Option<ClientRole>,
-    trusted_approver: bool,
-}
-
-async fn handle_connection(
-    mut socket: UnixStream,
-    actor: Arc<StorageActor>,
-    approver_token: Arc<Zeroizing<String>>,
-) {
-    let mut decoder = match JsonLinesDecoder::new(MAX_CLIENT_FRAME_BYTES) {
-        Ok(decoder) => decoder,
-        Err(_) => return,
-    };
-    let mut session = Session {
-        id: Uuid::new_v4().to_string(),
-        role: None,
-        trusted_approver: false,
-    };
-    let mut chunk = [0_u8; 8_192];
-    loop {
-        let received = match socket.read(&mut chunk).await {
-            Ok(0) | Err(_) => return,
-            Ok(received) => received,
-        };
-        let frames = match decoder.push(&chunk[..received]) {
-            Ok(frames) => frames,
-            Err(error) => {
-                let _ = write_frame(
-                    &mut socket,
-                    failure("invalid", "system.ping", "BAD_REQUEST", &error.message),
-                )
-                .await;
-                let _ = socket.shutdown().await;
-                return;
-            }
-        };
-        for frame in frames {
-            let raw_id = frame
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or("invalid")
-                .to_owned();
-            let raw_method = frame
-                .get("method")
-                .and_then(Value::as_str)
-                .unwrap_or("system.ping")
-                .to_owned();
-            let request = match parse_request(&frame, session.role) {
-                Ok(request) => request,
-                Err(error) => {
-                    if write_frame(
-                        &mut socket,
-                        failure(&raw_id, &raw_method, "BAD_REQUEST", &error.message),
-                    )
-                    .await
-                    .is_err()
-                    {
-                        return;
-                    }
-                    continue;
-                }
-            };
-            let response = match dispatch(&mut session, &actor, &approver_token, &request).await {
-                Ok(result) => success(&request.id, &request.method, result),
-                Err(error) => failure(&request.id, &request.method, error.code, &error.message),
-            };
-            if write_frame(&mut socket, response).await.is_err() {
-                return;
-            }
-        }
-    }
-}
-
-struct RpcError {
-    code: &'static str,
-    message: String,
-}
-
-impl RpcError {
-    fn unsupported(message: impl Into<String>) -> Self {
-        Self {
-            code: "UNSUPPORTED",
-            message: message.into(),
-        }
-    }
-}
-
-async fn dispatch(
-    session: &mut Session,
-    _actor: &Arc<StorageActor>,
-    approver_token: &str,
-    request: &ProtocolRequest,
-) -> std::result::Result<Value, RpcError> {
-    if request.method == "system.hello" {
-        let role = ClientRole::parse(
-            request
-                .params
-                .get("role")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-        )
-        .map_err(|error| RpcError {
-            code: "BAD_REQUEST",
-            message: error.message,
-        })?;
-        session.role = Some(role);
-        session.trusted_approver = role == ClientRole::Approver
-            && token_matches(
-                approver_token,
-                request.params.get("approver_token").and_then(Value::as_str),
-            );
-        return Ok(json!({"protocol":"inboxd","ready":true}));
-    }
-    if session.role.is_none() {
-        return Err(RpcError::unsupported(
-            "system.hello is required before API requests",
-        ));
-    }
-    match request.method.as_str() {
-        "system.ping" => Ok(json!({"pong":true})),
-        "system.status" => Ok(json!({"ready":true,"owner":"daemon"})),
-        "settings.get" | "settings.update" => Err(RpcError::unsupported(format!(
-            "{} is unsupported by this daemon",
-            request.method
-        ))),
-        _ => Err(RpcError::unsupported(format!(
-            "{} is unsupported by this daemon",
-            request.method
-        ))),
-    }
-}
-
-fn success(id: &str, method: &str, result: Value) -> Value {
-    json!({"type":"response","id":id,"method":method,"ok":true,"result":result})
-}
-
-fn failure(id: &str, method: &str, code: &str, message: &str) -> Value {
-    json!({"type":"response","id":id,"method":method,"ok":false,"error":{"code":code,"message":message}})
-}
-
-async fn write_frame(socket: &mut UnixStream, value: Value) -> std::io::Result<()> {
-    let mut frame = serde_json::to_vec(&value).map_err(std::io::Error::other)?;
-    frame.push(b'\n');
-    socket.write_all(&frame).await
-}
-
-fn token_matches(expected: &str, supplied: Option<&str>) -> bool {
-    let Some(supplied) = supplied else {
-        return false;
-    };
-    expected.as_bytes().len() == supplied.as_bytes().len()
-        && bool::from(expected.as_bytes().ct_eq(supplied.as_bytes()))
 }
 
 fn prepare_private_directory(path: &Path) -> Result<()> {
