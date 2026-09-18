@@ -10,7 +10,7 @@ fn main() {
         .read_to_string(&mut input)
         .expect("fixture stdin");
     let request = decode_json(&input).expect("fixture JSON");
-    let host = NativeHost::open_development(
+    let host = NativeHost::open_production(
         Path::new(request["path"].as_str().expect("fixture path")),
         &[42; 32],
     )

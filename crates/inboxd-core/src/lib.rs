@@ -1,3 +1,5 @@
+#[cfg(unix)]
+mod descriptor;
 mod domain;
 mod host;
 mod safety;
@@ -9,6 +11,8 @@ use std::os::raw::c_char;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+#[cfg(unix)]
+pub use descriptor::{DescriptorIdentity, descriptor_identity};
 pub use host::{
     CallbackHost, Host, HostCallback, SqlHost, wire_cmp, wire_code_unit_len, wire_from_utf16_units,
     wire_utf16_units,
@@ -150,5 +154,60 @@ pub unsafe extern "C" fn inboxd_core_free(value: *mut c_char) {
         unsafe {
             drop(CString::from_raw(value));
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod descriptor_tests {
+    use std::{
+        fs::{self, OpenOptions},
+        io::{Seek, SeekFrom, Write},
+        os::unix::{fs::MetadataExt, io::AsRawFd},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::descriptor_identity;
+
+    #[test]
+    fn borrowed_descriptor_identity_reports_target_dev_and_ino_without_moving_offset() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "inboxd-core-descriptor-{}-{nonce}",
+            std::process::id()
+        ));
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"descriptor proof").unwrap();
+        file.seek(SeekFrom::Start(4)).unwrap();
+        let metadata = file.metadata().unwrap();
+
+        let identity = descriptor_identity(file.as_raw_fd()).unwrap();
+
+        assert_eq!(identity.device, metadata.dev());
+        assert_eq!(identity.inode, metadata.ino());
+        assert!(identity.is_regular);
+        assert_eq!(file.stream_position().unwrap(), 4);
+        file.write_all(b" still borrowed").unwrap();
+        drop(file);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn descriptor_identity_rejects_invalid_descriptors() {
+        assert_eq!(
+            descriptor_identity(-1).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            descriptor_identity(i32::MAX).unwrap_err().raw_os_error(),
+            Some(libc::EBADF)
+        );
     }
 }

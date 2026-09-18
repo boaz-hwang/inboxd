@@ -8,5 +8,6 @@ rust-version = "1.85"
 license = "MIT"
 
 [workspace.dependencies]
+libc = "=0.2.189"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }

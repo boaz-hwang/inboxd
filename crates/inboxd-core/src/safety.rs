@@ -1,11 +1,23 @@
 use serde_json::{Map, Number, Value, json};
 
-use crate::{CoreError, CoreResult, Host, SqlHost};
+use crate::{CoreError, CoreResult, Host, SqlHost, wire_utf16_units};
 
 const GLOBAL_QUOTA_SCOPE: &str = "__global__";
 const CURSOR_SCOPE: &str = "safety.intent.listPending:v1";
 const DEFAULT_PAGE_LIMIT: u64 = 50;
 const MAX_PAGE_LIMIT: u64 = 100;
+const SEND_BODY_BYTES: usize = 65_536;
+const TEMPLATE_ID_BYTES: usize = 1_024;
+const TEMPLATE_PREVIEW_BYTES: usize = 65_536;
+const TEMPLATE_ARGUMENTS_BYTES: usize = 65_536;
+const JSON_DEPTH: usize = 32;
+const JSON_NODES: usize = 10_000;
+const JSON_OBJECT_KEYS: usize = 256;
+const JSON_TOTAL_KEYS: usize = 4_096;
+const JSON_ARRAY_ITEMS: usize = 1_000;
+const JSON_KEY_BYTES: usize = 256;
+const JSON_STRING_BYTES: usize = 65_536;
+const JSON_TOTAL_STRING_BYTES: usize = 1_048_576;
 
 fn error(name: &str, message: impl Into<String>) -> CoreError {
     CoreError::new(name, message)
@@ -95,41 +107,328 @@ fn validated_scope(value: &Value) -> CoreResult<Value> {
     }))
 }
 
-fn proposal_from(value: &Value) -> CoreResult<Value> {
+fn exact_keys(input: &Map<String, Value>, allowed: &[&str], label: &str) -> CoreResult<()> {
+    if input.keys().any(|key| !allowed.contains(&key.as_str())) {
+        Err(type_error(format!("{label} contains an unknown field")))
+    } else {
+        Ok(())
+    }
+}
+
+fn validated_resource(value: &Value) -> CoreResult<Value> {
+    let input = object(value, "send destination")?;
+    if input.get("v") != Some(&json!(1)) {
+        return Err(type_error("send destination version must be 1"));
+    }
+    let kind = string(input, "kind")?;
+    let mut resource = Map::new();
+    resource.insert("v".into(), json!(1));
+    resource.insert("kind".into(), json!(kind));
+    resource.insert(
+        "platform".into(),
+        json!(non_empty(
+            string(input, "platform")?,
+            "destination.platform"
+        )?),
+    );
+    resource.insert(
+        "account".into(),
+        json!(non_empty(string(input, "account")?, "destination.account")?),
+    );
+    match kind {
+        "chat" => {
+            exact_keys(
+                input,
+                &["v", "kind", "platform", "account", "chat_id"],
+                "chat destination",
+            )?;
+            resource.insert(
+                "chat_id".into(),
+                json!(non_empty(string(input, "chat_id")?, "destination.chat_id")?),
+            );
+        }
+        "destination" => {
+            exact_keys(
+                input,
+                &["v", "kind", "platform", "account", "destination_id"],
+                "write-only destination",
+            )?;
+            resource.insert(
+                "destination_id".into(),
+                json!(non_empty(
+                    string(input, "destination_id")?,
+                    "destination.destination_id"
+                )?),
+            );
+        }
+        _ => {
+            return Err(type_error(
+                "send destination kind must be chat or destination",
+            ));
+        }
+    }
+    Ok(Value::Object(resource))
+}
+
+fn ecmascript_utf8_len(value: &str) -> CoreResult<usize> {
+    Ok(char::decode_utf16(wire_utf16_units(value)?)
+        .map(|decoded| decoded.map_or(3, char::len_utf8))
+        .sum())
+}
+
+fn bounded_text(value: &str, field: &str, maximum: usize) -> CoreResult<String> {
+    let value = non_empty(value, field)?;
+    if ecmascript_utf8_len(&value)? > maximum {
+        Err(type_error(format!("{field} exceeds {maximum} UTF-8 bytes")))
+    } else {
+        Ok(value)
+    }
+}
+
+#[derive(Default)]
+struct JsonBudget {
+    nodes: usize,
+    keys: usize,
+    string_bytes: usize,
+}
+
+fn validate_json_value(
+    value: &Value,
+    label: &str,
+    budget: &mut JsonBudget,
+    depth: usize,
+) -> CoreResult<()> {
+    if depth > JSON_DEPTH {
+        return Err(type_error(format!("{label} exceeds the JSON depth limit")));
+    }
+    budget.nodes += 1;
+    if budget.nodes > JSON_NODES {
+        return Err(type_error(format!(
+            "{label} exceeds the aggregate JSON node limit"
+        )));
+    }
+    match value {
+        Value::Null | Value::Bool(_) => Ok(()),
+        Value::String(value) => {
+            let bytes = ecmascript_utf8_len(value)?;
+            if bytes > JSON_STRING_BYTES {
+                return Err(type_error(format!(
+                    "{label} exceeds the JSON string byte limit"
+                )));
+            }
+            budget.string_bytes += bytes;
+            if budget.string_bytes > JSON_TOTAL_STRING_BYTES {
+                return Err(type_error(format!(
+                    "{label} exceeds the aggregate JSON string byte limit"
+                )));
+            }
+            Ok(())
+        }
+        Value::Number(number) => {
+            if number.as_f64().is_some_and(f64::is_finite) {
+                Ok(())
+            } else {
+                Err(type_error(format!(
+                    "{label} must contain only finite JSON numbers"
+                )))
+            }
+        }
+        Value::Array(items) => {
+            if items.len() > JSON_ARRAY_ITEMS {
+                return Err(type_error(format!(
+                    "{label} exceeds the JSON array item limit"
+                )));
+            }
+            for item in items {
+                validate_json_value(item, label, budget, depth + 1)?;
+            }
+            Ok(())
+        }
+        Value::Object(object) => {
+            if object.len() > JSON_OBJECT_KEYS {
+                return Err(type_error(format!(
+                    "{label} exceeds the JSON object key limit"
+                )));
+            }
+            budget.keys += object.len();
+            if budget.keys > JSON_TOTAL_KEYS {
+                return Err(type_error(format!(
+                    "{label} exceeds the aggregate JSON key limit"
+                )));
+            }
+            for (key, nested) in object {
+                if ecmascript_utf8_len(key)? > JSON_KEY_BYTES {
+                    return Err(type_error(format!(
+                        "{label} contains a JSON key above the byte limit"
+                    )));
+                }
+                validate_json_value(nested, label, budget, depth + 1)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_json(value: &Value, label: &str) -> CoreResult<()> {
+    validate_json_value(value, label, &mut JsonBudget::default(), 0)
+}
+
+fn validate_template_arguments_bytes(host: &dyn Host, envelope: &Value) -> CoreResult<()> {
+    let arguments = envelope
+        .get("content")
+        .and_then(|content| content.get("arguments"));
+    if let Some(arguments) = arguments {
+        let encoded = stringify(host, arguments.clone())?;
+        if ecmascript_utf8_len(&encoded)? > TEMPLATE_ARGUMENTS_BYTES {
+            return Err(type_error(format!(
+                "template arguments exceeds {TEMPLATE_ARGUMENTS_BYTES} encoded JSON bytes"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validated_envelope(value: &Value) -> CoreResult<Value> {
+    let input = object(value, "send envelope")?;
+    exact_keys(
+        input,
+        &["v", "destination", "content", "reply"],
+        "send envelope",
+    )?;
+    if input.get("v") != Some(&json!(2)) {
+        return Err(type_error("send envelope version must be 2"));
+    }
+    let destination = validated_resource(input.get("destination").unwrap_or(&Value::Null))?;
+    let content = object(input.get("content").unwrap_or(&Value::Null), "send content")?;
+    let normalized_content = match content.get("mode").and_then(Value::as_str) {
+        Some("text") => {
+            exact_keys(content, &["mode", "body"], "text send content")?;
+            if destination.get("kind").and_then(Value::as_str) != Some("chat") {
+                return Err(type_error("text sends require a chat destination"));
+            }
+            json!({
+                "mode":"text",
+                "body":bounded_text(string(content, "body")?, "send body", SEND_BODY_BYTES)?,
+            })
+        }
+        Some("approved_template") => {
+            exact_keys(
+                content,
+                &["mode", "template_id", "arguments", "preview"],
+                "template send content",
+            )?;
+            if destination.get("kind").and_then(Value::as_str) != Some("destination") {
+                return Err(type_error(
+                    "approved template sends require a write-only destination",
+                ));
+            }
+            let arguments = content
+                .get("arguments")
+                .filter(|value| value.is_object())
+                .cloned()
+                .ok_or_else(|| type_error("template arguments must be a JSON object"))?;
+            validate_json(&arguments, "template arguments")?;
+            json!({
+                "mode":"approved_template",
+                "template_id":bounded_text(string(content, "template_id")?, "template_id", TEMPLATE_ID_BYTES)?,
+                "arguments":arguments,
+                "preview":bounded_text(string(content, "preview")?, "template preview", TEMPLATE_PREVIEW_BYTES)?,
+            })
+        }
+        _ => return Err(type_error("send content mode is invalid")),
+    };
+    let mut envelope = Map::new();
+    envelope.insert("v".into(), json!(2));
+    envelope.insert("destination".into(), destination);
+    envelope.insert("content".into(), normalized_content.clone());
+    if let Some(reply) = input.get("reply") {
+        if normalized_content.get("mode").and_then(Value::as_str) != Some("text") {
+            return Err(type_error("approved template sends do not support replies"));
+        }
+        let reply = object(reply, "send reply")?;
+        exact_keys(reply, &["parent_id"], "send reply")?;
+        envelope.insert(
+            "reply".into(),
+            json!({"parent_id":non_empty(string(reply, "parent_id")?, "reply.parent_id")?}),
+        );
+    }
+    Ok(Value::Object(envelope))
+}
+
+fn proposal_from(value: &Value, host: &dyn Host) -> CoreResult<Value> {
     let input = object(value, "proposal")?;
     let mut proposal = Map::new();
     proposal.insert(
         "actor".into(),
         Value::String(non_empty(string(input, "actor")?, "actor")?),
     );
-    proposal.insert(
-        "scope".into(),
-        validated_scope(input.get("scope").unwrap_or(&Value::Null))?,
-    );
-    proposal.insert(
-        "body".into(),
-        Value::String(non_empty(string(input, "body")?, "body")?),
-    );
-    if let Some(parent) = input.get("parent_id") {
-        let parent = parent
-            .as_str()
-            .ok_or_else(|| type_error("parent_id must be a string"))?;
+    if let Some(envelope) = input.get("envelope") {
+        exact_keys(input, &["actor", "envelope"], "v2 proposal")?;
+        let envelope = validated_envelope(envelope)?;
+        validate_template_arguments_bytes(host, &envelope)?;
+        proposal.insert("envelope".into(), envelope);
+    } else {
+        exact_keys(
+            input,
+            &["actor", "scope", "body", "parent_id"],
+            "v1 proposal",
+        )?;
         proposal.insert(
-            "parent_id".into(),
-            Value::String(non_empty(parent, "parent_id")?),
+            "scope".into(),
+            validated_scope(input.get("scope").unwrap_or(&Value::Null))?,
         );
+        proposal.insert(
+            "body".into(),
+            Value::String(non_empty(string(input, "body")?, "body")?),
+        );
+        if let Some(parent) = input.get("parent_id") {
+            let parent = parent
+                .as_str()
+                .ok_or_else(|| type_error("parent_id must be a string"))?;
+            proposal.insert(
+                "parent_id".into(),
+                Value::String(non_empty(parent, "parent_id")?),
+            );
+        }
     }
     Ok(Value::Object(proposal))
 }
 
 fn payload_hash_input(payload: &Map<String, Value>) -> Value {
     let mut result = Map::new();
-    for key in ["actor", "scope", "body", "parent_id"] {
-        if let Some(value) = payload.get(key) {
-            result.insert(key.into(), value.clone());
+    let keys: &[&str] = if payload.contains_key("envelope") {
+        &["actor", "envelope"]
+    } else {
+        &["actor", "scope", "body", "parent_id"]
+    };
+    for key in keys {
+        if let Some(value) = payload.get(*key) {
+            result.insert((*key).into(), value.clone());
         }
     }
     Value::Object(result)
+}
+
+fn approval_resource(payload: &Map<String, Value>) -> CoreResult<Value> {
+    if let Some(envelope) = payload.get("envelope") {
+        envelope
+            .get("destination")
+            .cloned()
+            .ok_or_else(|| error("CoreError", "v2 intent destination is missing"))
+    } else {
+        payload
+            .get("scope")
+            .cloned()
+            .ok_or_else(|| error("CoreError", "v1 intent scope is missing"))
+    }
+}
+
+fn resource_field(payload: &Map<String, Value>) -> &'static str {
+    if payload.contains_key("envelope") {
+        "resource"
+    } else {
+        "scope"
+    }
 }
 
 fn metadata(intent_id: &str, payload: &Map<String, Value>) -> Value {
@@ -220,16 +519,19 @@ fn bound_hash(
     payload: &Map<String, Value>,
 ) -> CoreResult<String> {
     let actual = hash(host, payload_hash_input(payload))?;
-    hash(
-        host,
-        json!({
-            "intent_id": intent_id,
-            "actor": payload.get("actor").cloned().unwrap_or(Value::Null),
-            "scope": payload.get("scope").cloned().unwrap_or(Value::Null),
-            "payload_hash": actual,
-            "expires_at": payload.get("expires_at").cloned().unwrap_or(Value::Null),
-        }),
-    )
+    let mut binding = Map::new();
+    binding.insert("intent_id".into(), json!(intent_id));
+    binding.insert(
+        "actor".into(),
+        payload.get("actor").cloned().unwrap_or(Value::Null),
+    );
+    binding.insert(resource_field(payload).into(), approval_resource(payload)?);
+    binding.insert("payload_hash".into(), json!(actual));
+    binding.insert(
+        "expires_at".into(),
+        payload.get("expires_at").cloned().unwrap_or(Value::Null),
+    );
+    hash(host, Value::Object(binding))
 }
 
 fn mark_intent(
@@ -309,6 +611,7 @@ fn summary(intent_id: &str, payload: &Map<String, Value>) -> Value {
         "state",
         "actor",
         "scope",
+        "envelope",
         "body",
         "parent_id",
         "expires_at",
@@ -436,7 +739,7 @@ fn decode_cursor(host: &dyn Host, value: &str) -> CoreResult<(Value, String)> {
 
 fn propose(input: &Value, host: &dyn Host) -> CoreResult<Value> {
     let args = object(input, "safety.propose input")?;
-    let proposal = proposal_from(args.get("proposal").unwrap_or(&Value::Null))?;
+    let proposal = proposal_from(args.get("proposal").unwrap_or(&Value::Null), host)?;
     let ttl = args
         .get("approval_ttl_ms")
         .and_then(Value::as_f64)
@@ -450,12 +753,28 @@ fn propose(input: &Value, host: &dyn Host) -> CoreResult<Value> {
         "payload_hash".into(),
         json!(hash(host, payload_hash_input(&payload))?),
     );
-    let code = host_string(host, "host.approvalCode", "approval code")?;
-    let approval = json!({
-        "code_hash": hash(host, json!(code))?,
-        "bound_hash": bound_hash(host, &intent_id, &payload)?,
-        "actor": payload.get("actor").cloned().unwrap(), "scope": payload.get("scope").cloned().unwrap(), "expires_at": expires,
-    });
+    let mut approval = Map::new();
+    approval.insert(
+        "code_hash".into(),
+        json!(host.generate_approval_code_digest()?),
+    );
+    approval.insert(
+        "bound_hash".into(),
+        json!(bound_hash(host, &intent_id, &payload)?),
+    );
+    approval.insert(
+        "actor".into(),
+        payload
+            .get("actor")
+            .cloned()
+            .ok_or_else(|| error("CoreError", "intent actor is missing"))?,
+    );
+    approval.insert(
+        resource_field(&payload).into(),
+        approval_resource(&payload)?,
+    );
+    approval.insert("expires_at".into(), json!(expires));
+    let approval = Value::Object(approval);
     let sql = SqlHost::new(host);
     sql.transaction(|sql| {
         sql.run("INSERT INTO intents (id, kind, payload_json, created_at) VALUES (?, ?, ?, ?)", &[json!(intent_id), json!("send"), json!(stringify(host, Value::Object(payload.clone()))?), now(host)?])?;
@@ -605,7 +924,8 @@ fn approve(input: &Value, host: &dyn Host) -> CoreResult<Value> {
         {
             return Err(rejected("approval has expired"));
         }
-        if hash(host, args.get("code").cloned().unwrap_or(Value::Null))?
+        let code = string(args, "code")?;
+        if host.approval_code_digest(code)?
             != approval
                 .payload
                 .get("code_hash")
@@ -615,19 +935,24 @@ fn approve(input: &Value, host: &dyn Host) -> CoreResult<Value> {
             return Err(rejected("approval code is invalid"));
         }
         let actor = args.get("actor");
-        let scope = args.get("scope");
+        let field = resource_field(&current);
+        let resource = args.get(field).unwrap_or(&Value::Null);
+        let approved_resource = approval.payload.get(field).unwrap_or(&Value::Null);
+        let current_resource = approval_resource(&current)?;
+        let resources_match = if field == "scope" {
+            equal_scopes(resource, approved_resource) && equal_scopes(resource, &current_resource)
+        } else {
+            resource == approved_resource && resource == &current_resource
+        };
         if actor != approval.payload.get("actor")
             || actor != current.get("actor")
-            || !equal_scopes(
-                scope.unwrap_or(&Value::Null),
-                approval.payload.get("scope").unwrap_or(&Value::Null),
-            )
-            || !equal_scopes(
-                scope.unwrap_or(&Value::Null),
-                current.get("scope").unwrap_or(&Value::Null),
-            )
+            || !resources_match
         {
-            return Err(rejected("approval actor or scope does not match"));
+            return Err(rejected(if field == "scope" {
+                "approval actor or scope does not match"
+            } else {
+                "approval actor or resource does not match"
+            }));
         }
         if approval
             .payload
@@ -683,7 +1008,8 @@ fn claim(input: &Value, host: &dyn Host) -> CoreResult<Value> {
     let args = object(input, "safety.claim input")?;
     let id = string(args, "intent_id")?;
     let sql = SqlHost::new(host);
-    if current_intent(&sql, host, id)?.get("state") == Some(&json!("Expired")) {
+    let policy_input = current_intent(&sql, host, id)?;
+    if policy_input.get("state") == Some(&json!("Expired")) {
         return Err(ineligible("intent has expired"));
     }
     if args.get("transport_present").and_then(Value::as_bool) != Some(true) {
@@ -721,10 +1047,11 @@ fn claim(input: &Value, host: &dyn Host) -> CoreResult<Value> {
         .get("quota_limit")
         .and_then(Value::as_f64)
         .ok_or_else(|| type_error("quota_limit must be a number"))?;
-    let use_policy = args
-        .get("use_allow_send")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let use_policy = host.requires_send_policy()
+        || args
+            .get("use_allow_send")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
     sql.transaction(|sql| {
         let current = load_intent(sql, host, id)?.ok_or_else(|| ineligible("intent is missing approval data"))?;
         let approval = load_approval(sql, host, id)?.ok_or_else(|| ineligible("intent is missing approval data"))?;
@@ -733,15 +1060,32 @@ fn claim(input: &Value, host: &dyn Host) -> CoreResult<Value> {
         if approval.approved_at.is_null() || !approval.payload.contains_key("consumed_at") || approval.payload.get("bound_hash").and_then(Value::as_str).unwrap_or("") != bound_hash(host, id, &current)? || expires_at(&approval.payload)? <= now_f64(host)? {
             return Err(ineligible("approval binding is no longer valid"));
         }
-        // This host policy port is intentionally inside the transaction and sees the freshly loaded payload.
-        if use_policy && host.call("host.allowSend", Value::Object(current.clone()))?.as_bool() != Some(true) {
+        // Optional callback hosts retain the frozen v1 caller opt-in. A host
+        // whose trust contract requires policy cannot be downgraded by input.
+        if use_policy
+            && host
+                .call("host.allowSend", Value::Object(current.clone()))?
+                .as_bool()
+                != Some(true)
+        {
             let failed = mark_intent(sql, host, id, &current, "Failed", Some("policy_denied"))?;
             audit(sql, host, "send.rejected", id, metadata(id, &failed))?;
             return Ok(json!({"summary":summary(id, &failed)}));
         }
-        let scope = current.get("scope").cloned().unwrap_or(Value::Null);
-        reserve_quota(sql, host, &scope, global, scoped)?;
-        let key = hash(host, json!({"intent_id":id,"scope":scope,"payload_hash":current.get("payload_hash").cloned().unwrap_or(Value::Null),"expires_at":current.get("expires_at").cloned().unwrap_or(Value::Null)}))?;
+        let resource = approval_resource(&current)?;
+        reserve_quota(sql, host, &resource, global, scoped)?;
+        let mut idempotency_binding = Map::new();
+        idempotency_binding.insert("intent_id".into(), json!(id));
+        idempotency_binding.insert(resource_field(&current).into(), resource);
+        idempotency_binding.insert(
+            "payload_hash".into(),
+            current.get("payload_hash").cloned().unwrap_or(Value::Null),
+        );
+        idempotency_binding.insert(
+            "expires_at".into(),
+            current.get("expires_at").cloned().unwrap_or(Value::Null),
+        );
+        let key = hash(host, Value::Object(idempotency_binding))?;
         let sending = mark_intent(sql, host, id, &current, "Sending", None)?;
         sql.run("INSERT INTO sends (id, intent_id, idempotency_key, state, payload_json, created_at) VALUES (?, ?, ?, 'Sending', ?, ?)", &[
             json!(host_string(host, "host.id", "id")?), json!(id), json!(key), json!(stringify(host, Value::Object(current.clone()))?), now(host)?,
@@ -771,14 +1115,19 @@ fn finalize(input: &Value, host: &dyn Host) -> CoreResult<Value> {
             return Err(ineligible("send is no longer active"));
         }
         let mut state_payload = payload.clone();
-        if let Some(receipt) = transport.get("receipt") { state_payload.insert("receipt".into(), receipt.clone()); }
+        let receipt_field = if payload.contains_key("envelope") {
+            "receipt_id"
+        } else {
+            "receipt"
+        };
+        if let Some(receipt) = transport.get(receipt_field) { state_payload.insert("receipt".into(), receipt.clone()); }
         let reason = transport.get("reason").and_then(Value::as_str);
         let send_update = sql.run("UPDATE sends SET state = ?, payload_json = ? WHERE intent_id = ? AND state = 'Sending'", &[json!(state), json!(stringify(host, Value::Object(transport.clone()))?), json!(id)])?;
         if send_update.get("changes").and_then(Value::as_u64) != Some(1) {
             return Err(ineligible("send is no longer active"));
         }
         let updated = mark_intent(sql, host, id, &state_payload, state, reason)?;
-        if state == "Failed" { release_quota(sql, host, payload.get("scope").unwrap_or(&Value::Null))?; }
+        if state == "Failed" { release_quota(sql, host, &approval_resource(&payload)?)?; }
         audit(sql, host, &format!("send.{}", state.to_lowercase()), id, metadata(id, &updated))?;
         Ok(summary(id, &updated))
     })
@@ -799,15 +1148,27 @@ fn verify_receipt(input: &Value, host: &dyn Host) -> CoreResult<Value> {
             .get("receipt")
             .and_then(Value::as_str)
             .filter(|v| !v.is_empty());
-        if receipt.is_none()
-            || evidence.get("receipt").and_then(Value::as_str) != receipt
-            || !equal_scopes(
-                evidence.get("scope").unwrap_or(&Value::Null),
-                payload.get("scope").unwrap_or(&Value::Null),
-            )
-            || evidence.get("body") != payload.get("body")
-            || evidence.get("parent_id") != payload.get("parent_id")
-        {
+        let evidence_matches = if let Some(envelope) = payload.get("envelope") {
+            let destination = envelope.get("destination").unwrap_or(&Value::Null);
+            if destination.get("kind").and_then(Value::as_str) == Some("destination") {
+                return Ok(summary(id, &payload));
+            }
+            receipt.is_some()
+                && evidence.get("receipt_id").and_then(Value::as_str) == receipt
+                && evidence.get("destination") == Some(destination)
+                && evidence.get("content") == envelope.get("content")
+                && evidence.get("reply") == envelope.get("reply")
+        } else {
+            receipt.is_some()
+                && evidence.get("receipt").and_then(Value::as_str) == receipt
+                && equal_scopes(
+                    evidence.get("scope").unwrap_or(&Value::Null),
+                    payload.get("scope").unwrap_or(&Value::Null),
+                )
+                && evidence.get("body") == payload.get("body")
+                && evidence.get("parent_id") == payload.get("parent_id")
+        };
+        if !evidence_matches {
             return Ok(summary(id, &payload));
         }
         let changed = sql.run(
@@ -839,5 +1200,179 @@ pub fn dispatch(op: &str, input: &Value, host: &dyn Host) -> CoreResult<Value> {
             "RangeError",
             format!("unknown safety operation: {op}"),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wire_from_utf16_units;
+
+    fn chat_envelope(body: String) -> Value {
+        json!({
+            "v":2,
+            "destination":{
+                "v":1,"kind":"chat","platform":"slack","account":"work","chat_id":"C1"
+            },
+            "content":{"mode":"text","body":body}
+        })
+    }
+
+    fn template_envelope(arguments: Value) -> Value {
+        json!({
+            "v":2,
+            "destination":{
+                "v":1,"kind":"destination","platform":"kakao","account":"app",
+                "destination_id":"friend"
+            },
+            "content":{
+                "mode":"approved_template","template_id":"notice",
+                "arguments":arguments,"preview":"preview"
+            }
+        })
+    }
+
+    fn nested_object(depth: usize) -> Value {
+        let mut value = json!("leaf");
+        for _ in 0..depth {
+            value = json!({"nested":value});
+        }
+        value
+    }
+
+    fn object_with_keys(count: usize) -> Value {
+        Value::Object(
+            (0..count)
+                .map(|index| (format!("k{index}"), Value::Null))
+                .collect(),
+        )
+    }
+
+    fn node_matrix(last_items: usize) -> Value {
+        let mut rows = (0..9)
+            .map(|_| Value::Array(vec![Value::Null; 999]))
+            .collect::<Vec<_>>();
+        rows.push(Value::Array(vec![Value::Null; last_items]));
+        json!({"matrix":rows})
+    }
+
+    fn key_groups(last_keys: usize) -> Value {
+        let mut groups = (0..15).map(|_| object_with_keys(256)).collect::<Vec<_>>();
+        groups.push(object_with_keys(last_keys));
+        json!({"groups":groups})
+    }
+
+    fn string_total(last_bytes: usize) -> Value {
+        let mut object = Map::new();
+        for index in 0..16 {
+            object.insert(format!("s{index}"), json!("a".repeat(65_535)));
+        }
+        object.insert("last".into(), json!("a".repeat(last_bytes)));
+        Value::Object(object)
+    }
+
+    fn assert_rejected(value: Value, expected: &str) {
+        let error = validated_envelope(&template_envelope(value)).unwrap_err();
+        assert!(
+            error.message.contains(expected),
+            "expected {expected:?}, got {:?}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn frozen_v2_bounds_match_typescript_on_json_and_utf16_boundaries() {
+        let lone = wire_from_utf16_units(&[0xd800]);
+        let pua = wire_from_utf16_units(&[0xdb80, 0xdc00]);
+        let reserved_pua = wire_from_utf16_units(&[0xdb82, 0xdc00]);
+
+        assert!(validated_envelope(&chat_envelope("a".repeat(65_536))).is_ok());
+        assert!(validated_envelope(&chat_envelope("a".repeat(65_537))).is_err());
+        let mut exact_fields = template_envelope(json!({}));
+        exact_fields["content"]["template_id"] = json!("a".repeat(1_024));
+        exact_fields["content"]["preview"] = json!("a".repeat(65_536));
+        assert!(validated_envelope(&exact_fields).is_ok());
+        exact_fields["content"]["template_id"] = json!("a".repeat(1_025));
+        assert!(validated_envelope(&exact_fields).is_err());
+        exact_fields["content"]["template_id"] = json!("a".repeat(1_024));
+        exact_fields["content"]["preview"] = json!("a".repeat(65_537));
+        assert!(validated_envelope(&exact_fields).is_err());
+
+        for scalar in [&pua, &reserved_pua] {
+            assert!(
+                validated_envelope(&chat_envelope(format!("{}{}", "a".repeat(65_532), scalar)))
+                    .is_ok()
+            );
+            assert!(
+                validated_envelope(&chat_envelope(format!("{}{}", "a".repeat(65_533), scalar)))
+                    .is_err()
+            );
+        }
+        assert!(
+            validated_envelope(&chat_envelope(format!("{}{}", "a".repeat(65_533), lone))).is_ok()
+        );
+        assert!(
+            validated_envelope(&chat_envelope(format!("{}{}", "a".repeat(65_534), lone))).is_err()
+        );
+
+        for accepted in [
+            nested_object(32),
+            node_matrix(997),
+            object_with_keys(256),
+            key_groups(255),
+            json!({"array":vec![Value::Null; 1_000]}),
+            Value::Object(Map::from_iter([(
+                String::from("a").repeat(256),
+                Value::Null,
+            )])),
+            json!({"string":"a".repeat(65_536)}),
+            string_total(16),
+        ] {
+            assert!(validated_envelope(&template_envelope(accepted)).is_ok());
+        }
+
+        assert_rejected(nested_object(33), "depth");
+        assert_rejected(node_matrix(998), "node");
+        assert_rejected(object_with_keys(257), "object key");
+        assert_rejected(key_groups(256), "aggregate JSON key");
+        assert_rejected(json!({"array":vec![Value::Null; 1_001]}), "array item");
+        assert_rejected(
+            Value::Object(Map::from_iter([(
+                String::from("a").repeat(257),
+                Value::Null,
+            )])),
+            "key above the byte limit",
+        );
+        assert_rejected(json!({"string":"a".repeat(65_537)}), "string byte");
+        assert_rejected(string_total(17), "aggregate JSON string byte");
+
+        assert!(
+            validated_envelope(&template_envelope(Value::Object(Map::from_iter([(
+                format!("{}{}", "a".repeat(253), lone),
+                Value::Null,
+            )]))))
+            .is_ok()
+        );
+        assert_rejected(
+            Value::Object(Map::from_iter([(
+                format!("{}{}", "a".repeat(254), lone),
+                Value::Null,
+            )])),
+            "key above the byte limit",
+        );
+        assert!(
+            validated_envelope(&template_envelope(Value::Object(Map::from_iter([(
+                format!("{}{}", "a".repeat(252), pua.clone()),
+                Value::Null,
+            )]))))
+            .is_ok()
+        );
+        assert_rejected(
+            Value::Object(Map::from_iter([(
+                format!("{}{}", "a".repeat(253), pua),
+                Value::Null,
+            )])),
+            "key above the byte limit",
+        );
     }
 }

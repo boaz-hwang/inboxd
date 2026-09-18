@@ -85,6 +85,136 @@ CREATE TABLE IF NOT EXISTS audit (
 );
 "#;
 
+// Pinned independently from `INITIAL_SCHEMA`: version 3 is shared with the
+// pre-R1 Bun store, so a same-column constraint/index/FTS rewrite is drift,
+// not an implicit migration. Whitespace and keyword case are normalized when
+// these definitions are compared with sqlite_master.
+const CANONICAL_SCHEMA_DEFINITIONS: &[(&str, &str, &str)] = &[
+    (
+        "table",
+        "chats",
+        "CREATE TABLE chats (platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, display_name TEXT, PRIMARY KEY (platform, account, chat_id)) WITHOUT ROWID",
+    ),
+    (
+        "table",
+        "unread_evidence",
+        "CREATE TABLE unread_evidence (platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, evidence_json TEXT NOT NULL, observed_at REAL NOT NULL, PRIMARY KEY (platform, account, chat_id)) WITHOUT ROWID",
+    ),
+    (
+        "table",
+        "account_self",
+        "CREATE TABLE account_self (platform TEXT NOT NULL, account TEXT NOT NULL, evidence_json TEXT NOT NULL, observed_at REAL NOT NULL, PRIMARY KEY (platform, account)) WITHOUT ROWID",
+    ),
+    (
+        "table",
+        "identities",
+        "CREATE TABLE identities (platform TEXT NOT NULL, account TEXT NOT NULL, identity_id TEXT NOT NULL, display_name TEXT, PRIMARY KEY (platform, account, identity_id)) WITHOUT ROWID",
+    ),
+    (
+        "table",
+        "messages",
+        "CREATE TABLE messages (platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, msg_id TEXT NOT NULL, author_id TEXT, ts REAL NOT NULL, body TEXT, parent_platform TEXT, parent_account TEXT, parent_chat_id TEXT, parent_msg_id TEXT, attachments_json TEXT NOT NULL DEFAULT '[]', edited_at REAL, deleted_at REAL, revision_kind TEXT NOT NULL CHECK (revision_kind IN ('number', 'string')), revision_value TEXT NOT NULL, PRIMARY KEY (platform, account, chat_id, msg_id), CHECK ((deleted_at IS NULL AND body IS NOT NULL) OR (deleted_at IS NOT NULL AND body IS NULL))) WITHOUT ROWID",
+    ),
+    (
+        "index",
+        "messages_by_chat_timestamp",
+        "CREATE INDEX messages_by_chat_timestamp ON messages(platform, account, chat_id, ts)",
+    ),
+    (
+        "table",
+        "messages_fts",
+        "CREATE VIRTUAL TABLE messages_fts USING fts5(platform UNINDEXED, account UNINDEXED, chat_id UNINDEXED, msg_id UNINDEXED, body, tokenize = 'trigram')",
+    ),
+    (
+        "table",
+        "messages_fts_config",
+        "CREATE TABLE 'messages_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID",
+    ),
+    (
+        "table",
+        "messages_fts_content",
+        "CREATE TABLE 'messages_fts_content'(id INTEGER PRIMARY KEY, c0, c1, c2, c3, c4)",
+    ),
+    (
+        "table",
+        "messages_fts_data",
+        "CREATE TABLE 'messages_fts_data'(id INTEGER PRIMARY KEY, block BLOB)",
+    ),
+    (
+        "table",
+        "messages_fts_docsize",
+        "CREATE TABLE 'messages_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB)",
+    ),
+    (
+        "table",
+        "messages_fts_idx",
+        "CREATE TABLE 'messages_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID",
+    ),
+    (
+        "table",
+        "read_cursors",
+        "CREATE TABLE read_cursors (platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, cursor TEXT NOT NULL, updated_at REAL NOT NULL, PRIMARY KEY (platform, account, chat_id)) WITHOUT ROWID",
+    ),
+    (
+        "table",
+        "sync_state",
+        "CREATE TABLE sync_state (platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, cursor TEXT NOT NULL, updated_at REAL NOT NULL, PRIMARY KEY (platform, account, chat_id)) WITHOUT ROWID",
+    ),
+    (
+        "table",
+        "sync_page_sequence",
+        "CREATE TABLE sync_page_sequence (platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK (sequence > 0 AND sequence <= 9007199254740991), PRIMARY KEY (platform, account, chat_id)) WITHOUT ROWID",
+    ),
+    (
+        "table",
+        "sync_coverage",
+        "CREATE TABLE sync_coverage (id INTEGER PRIMARY KEY, platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, from_ts REAL NOT NULL, to_ts REAL NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('backfill', 'watch', 'verified_empty')), collected_at REAL NOT NULL, mutations_verified_at REAL, UNIQUE (platform, account, chat_id, from_ts, to_ts, kind), CHECK (from_ts < to_ts))",
+    ),
+    (
+        "table",
+        "sync_limits",
+        "CREATE TABLE sync_limits (id INTEGER PRIMARY KEY, platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, from_ts REAL NOT NULL, to_ts REAL NOT NULL, reason TEXT NOT NULL CHECK (reason IN ('retention', 'permission', 'rate_limit', 'unsupported', 'unknown')), observed_at REAL NOT NULL, resolved_at REAL, UNIQUE (platform, account, chat_id, from_ts, to_ts, reason), CHECK (from_ts < to_ts))",
+    ),
+    (
+        "table",
+        "intents",
+        "CREATE TABLE intents (id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload_json TEXT NOT NULL, created_at REAL NOT NULL)",
+    ),
+    (
+        "table",
+        "approvals",
+        "CREATE TABLE approvals (id TEXT PRIMARY KEY, intent_id TEXT NOT NULL, approved_at REAL, payload_json TEXT NOT NULL)",
+    ),
+    (
+        "table",
+        "sends",
+        "CREATE TABLE sends (id TEXT PRIMARY KEY, intent_id TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE, state TEXT NOT NULL, payload_json TEXT NOT NULL, created_at REAL NOT NULL)",
+    ),
+    (
+        "table",
+        "quota",
+        "CREATE TABLE quota (scope TEXT PRIMARY KEY, used INTEGER NOT NULL DEFAULT 0, updated_at REAL NOT NULL)",
+    ),
+    (
+        "table",
+        "audit",
+        "CREATE TABLE audit (id INTEGER PRIMARY KEY, action TEXT NOT NULL, subject TEXT NOT NULL, payload_json TEXT NOT NULL, created_at REAL NOT NULL)",
+    ),
+];
+
+// SQLCipher's pinned SQLite 3.53.4 creates these unavoidable NULL-SQL
+// autoindexes for rowid-table PRIMARY KEY and UNIQUE constraints. They are the
+// only sqlite_* schema objects accepted by schema v3.
+const CANONICAL_SCHEMA_AUTO_INDEXES: &[(&str, &str)] = &[
+    ("sqlite_autoindex_approvals_1", "approvals"),
+    ("sqlite_autoindex_intents_1", "intents"),
+    ("sqlite_autoindex_quota_1", "quota"),
+    ("sqlite_autoindex_sends_1", "sends"),
+    ("sqlite_autoindex_sends_2", "sends"),
+    ("sqlite_autoindex_sync_coverage_1", "sync_coverage"),
+    ("sqlite_autoindex_sync_limits_1", "sync_limits"),
+];
+
 fn object<'a>(value: &'a Value, label: &str) -> CoreResult<&'a Map<String, Value>> {
     value
         .as_object()
@@ -457,6 +587,73 @@ fn read_sync_state(host: &dyn Host, input: &Value) -> CoreResult<Value> {
     Ok(result)
 }
 
+fn normalized_schema_sql(source: &str) -> String {
+    let mut normalized = String::with_capacity(source.len());
+    let mut in_string = false;
+    for character in source.chars() {
+        if character == '\'' {
+            in_string = !in_string;
+            normalized.push(character);
+        } else if in_string {
+            normalized.push(character);
+        } else if !character.is_ascii_whitespace() {
+            normalized.push(character.to_ascii_lowercase());
+        }
+    }
+    normalized
+}
+
+fn schema_is_valid(sql: &SqlHost<'_>) -> CoreResult<bool> {
+    let objects = sql.all(
+        "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE type IN ('table', 'index', 'view', 'trigger')",
+        &[],
+    )?;
+    if objects.len() != CANONICAL_SCHEMA_DEFINITIONS.len() + CANONICAL_SCHEMA_AUTO_INDEXES.len() {
+        return Ok(false);
+    }
+    for (kind, name, expected) in CANONICAL_SCHEMA_DEFINITIONS {
+        let expected_table = if *kind == "index" { "messages" } else { *name };
+        let Some(actual) = objects.iter().find(|row| {
+            row.get("type").and_then(Value::as_str) == Some(*kind)
+                && row.get("name").and_then(Value::as_str) == Some(*name)
+                && row.get("tbl_name").and_then(Value::as_str) == Some(expected_table)
+        }) else {
+            return Ok(false);
+        };
+        let Some(actual) = actual.get("sql").and_then(Value::as_str) else {
+            return Ok(false);
+        };
+        if normalized_schema_sql(actual) != normalized_schema_sql(expected) {
+            return Ok(false);
+        }
+    }
+    for (name, table) in CANONICAL_SCHEMA_AUTO_INDEXES {
+        let Some(actual) = objects.iter().find(|row| {
+            row.get("type").and_then(Value::as_str) == Some("index")
+                && row.get("name").and_then(Value::as_str) == Some(*name)
+                && row.get("tbl_name").and_then(Value::as_str) == Some(*table)
+        }) else {
+            return Ok(false);
+        };
+        if !actual.get("sql").is_some_and(Value::is_null) {
+            return Ok(false);
+        }
+    }
+    let check = sql.get("PRAGMA quick_check", &[])?;
+    Ok(check
+        .as_object()
+        .and_then(|row| row.values().next())
+        .and_then(Value::as_str)
+        == Some("ok"))
+}
+
+fn invalid_schema() -> CoreError {
+    CoreError::new(
+        "StoreSchemaError",
+        format!("Store schema {SCHEMA_VERSION} failed validation"),
+    )
+}
+
 fn migrate(host: &dyn Host) -> CoreResult<Value> {
     let sql = SqlHost::new(host);
     let current = sql.get("PRAGMA user_version", &[])?;
@@ -471,11 +668,18 @@ fn migrate(host: &dyn Host) -> CoreResult<Value> {
         ));
     }
     if version == SCHEMA_VERSION {
-        return Ok(json!(SCHEMA_VERSION));
+        return if schema_is_valid(&sql)? {
+            Ok(json!(SCHEMA_VERSION))
+        } else {
+            Err(invalid_schema())
+        };
     }
     sql.transaction(|sql| {
         sql.exec(INITIAL_SCHEMA)?;
         sql.run(&format!("PRAGMA user_version = {SCHEMA_VERSION}"), &[])?;
+        if !schema_is_valid(sql)? {
+            return Err(invalid_schema());
+        }
         Ok(json!(SCHEMA_VERSION))
     })
 }
@@ -493,9 +697,13 @@ fn diagnose(host: &dyn Host) -> CoreResult<Value> {
         .get("user_version")
         .and_then(Value::as_i64)
         .unwrap_or(0);
-    Ok(
-        json!({ "cipher_version": cipher_version, "schema_version": schema_version, "ready": !cipher_version.is_empty() && schema_version == SCHEMA_VERSION }),
-    )
+    let schema_valid = schema_version == SCHEMA_VERSION && schema_is_valid(&sql)?;
+    Ok(json!({
+        "cipher_version": cipher_version,
+        "schema_version": schema_version,
+        "schema_valid": schema_valid,
+        "ready": !cipher_version.is_empty() && schema_valid,
+    }))
 }
 
 fn coverage_for(host: &dyn Host, target: &Value) -> CoreResult<Value> {

@@ -43,7 +43,8 @@ fn policy_default_deny_cannot_be_bypassed_and_quota_outbox_are_atomic() {
                 .unwrap();
         host.set_hooks(NativeHooks {
             approval_code: Some(Box::new(|| "synthetic-approval".into())),
-            allow_send: allow.then(|| Box::new(|_: &Value| true) as Box<dyn Fn(&Value) -> bool>),
+            allow_send: allow
+                .then(|| Box::new(|_: &Value| true) as Box<dyn Fn(&Value) -> bool + Send + Sync>),
         });
         host.execute("store.migrate", &Value::Null).unwrap();
         let scope = json!({"platform":"p","account":"a","chat_id":"c"});
@@ -86,4 +87,66 @@ fn policy_default_deny_cannot_be_bypassed_and_quota_outbox_are_atomic() {
         }
         assert_eq!(host.call("host.allowSend", Value::Null).unwrap(), allow);
     }
+}
+
+#[test]
+fn public_core_call_cannot_disable_native_host_send_policy() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host =
+        NativeHost::open_development(&directory.path().join("direct-core-call.db"), &[0x43; 32])
+            .unwrap();
+    host.set_hooks(NativeHooks {
+        approval_code: Some(Box::new(|| "direct-core-approval".into())),
+        allow_send: None,
+    });
+    host.execute("store.migrate", &Value::Null).unwrap();
+    let scope = json!({"platform":"p","account":"a","chat_id":"direct"});
+    let created = host
+        .execute(
+            "safety.propose",
+            &json!({
+                "proposal":{"actor":"direct-caller","scope":scope,"body":"must not send"},
+                "approval_ttl_ms":60_000,
+            }),
+        )
+        .unwrap();
+    host.execute(
+        "safety.approve",
+        &json!({
+            "intent_id":created["intent_id"],"code":"direct-core-approval",
+            "actor":"direct-caller","scope":scope,
+        }),
+    )
+    .unwrap();
+
+    let result = inboxd_core::call(
+        "safety.claim",
+        &json!({
+            "intent_id":created["intent_id"],"transport_present":true,
+            "send_capable":true,"quota_limit":1,"global_quota_limit":1,
+            "use_allow_send":false,
+        }),
+        &host,
+    )
+    .unwrap();
+
+    assert_eq!(result["summary"]["state"], "Failed");
+    assert!(result.get("request").is_none());
+    let sql = SqlHost::new(&host);
+    assert_eq!(
+        sql.get(
+            "SELECT json_extract(payload_json, '$.failure_reason') AS failure_reason FROM intents WHERE id = ?",
+            &[created["intent_id"].clone()],
+        )
+        .unwrap()["failure_reason"],
+        "policy_denied"
+    );
+    assert_eq!(
+        sql.get("SELECT count(*) AS n FROM sends", &[]).unwrap()["n"],
+        0
+    );
+    assert_eq!(
+        sql.get("SELECT count(*) AS n FROM quota", &[]).unwrap()["n"],
+        0
+    );
 }

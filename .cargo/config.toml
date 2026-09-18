@@ -1,0 +1,4 @@
+[env]
+SQLCIPHER_STATIC = { value = "1", force = true }
+SQLCIPHER_LIB_DIR = { value = "/opt/homebrew/Cellar/sqlcipher/4.19.0/lib", force = true }
+SQLCIPHER_INCLUDE_DIR = { value = "/opt/homebrew/Cellar/sqlcipher/4.19.0/include/sqlcipher", force = true }
