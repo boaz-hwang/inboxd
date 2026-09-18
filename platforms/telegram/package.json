@@ -1,0 +1,13 @@
+{
+  "name": "@inboxd/telegram",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "inboxd-telegram-worker": "src/worker-entrypoint.ts"
+  },
+  "dependencies": {
+    "prebuilt-tdlib": "0.1008066.0",
+    "tdl": "8.1.0"
+  }
+}

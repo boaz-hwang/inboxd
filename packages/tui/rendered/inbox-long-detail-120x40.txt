@@ -1,9 +1,14 @@
-INBOXD · connected · slack                                                                                              
+INBOXD · connected · mixed                                                                                              
 ● INBOX | 2 SEARCH | 3 CHAT | 4 APPROVALS | 5 DOCTOR                                                                    
+Resource: none                                                                                                          
+READ unknown                                                                                                            
+WRITE unknown                                                                                                           
+RECEIPT unknown                                                                                                         
+AUTH unknown reason=capability_unavailable                                                                              
 LIST 40%                                        │DETAIL 60%                                                             
-Evidence rail: partial · 1 chats / 1 gaps / 1 l…│Context rail: INBOX · focus 1/1                                        
+Evidence rail: partial · 3 chats / 1 gaps / 1 l…│Context rail: INBOX · focus 1/1                                        
 Status rail: connected · generation 1/1         │Detail — Inbox                                                         
-Inbox                                           │Context: 1 of 1 · partial · 1 chats / 1 gaps / 1 limits                
+Inbox                                           │Context: 1 of 1 · partial · 3 chats / 1 gaps / 1 limits                
 > ● 민수 한글 👩‍💻 é message 한글 👩‍💻 é message 한…│ID: long                                                               
                                                 │Author: 민수                                                           
                                                 │Message: 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 
@@ -30,11 +35,6 @@ Inbox                                           │Context: 1 of 1 · partial ·
                                                 │한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message
                                                 │ 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é messag
                                                 │e 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é messa
-                                                │ge 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é mess
-                                                │age 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é mes
-                                                │sage 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é me
-                                                │ssage 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é m
-                                                │essage 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é 
-                                                │Back: Esc · PgUp/PgDn scroll · Home top (1–31/54)                      
-! inbox selection opened                                                                                                
-1–5 j/k ↑↓ Enter / n-more b c a Esc ? q                                                                                 
+                                                │Back: Esc · PgUp/PgDn scroll · Home top (1–26/54)                      
+! inbox detail opened                                                                                                   
+1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply a Esc ? q                                                           

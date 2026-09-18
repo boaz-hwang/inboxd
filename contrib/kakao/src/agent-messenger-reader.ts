@@ -41,6 +41,16 @@ function findBinding(
   return binding;
 }
 
+function isValidPageSpillover(message: AgentMessengerKakaoMessage, request: KakaoReaderRequest): boolean {
+  const timestamp = message.sent_at;
+  return Number.isSafeInteger(timestamp)
+    && (
+      timestamp < request.interval.from_ts
+      || timestamp >= request.interval.to_ts
+      || timestamp >= request.upper_bound_ts
+    );
+}
+
 export function createAgentMessengerKakaoReader(options: AgentMessengerKakaoReaderOptions): KakaoReadReader {
   if (!Number.isInteger(options.page_size) || options.page_size < 1 || options.page_size > 100) {
     throw new TypeError("Kakao reader page_size must be an integer between 1 and 100");
@@ -59,16 +69,20 @@ export function createAgentMessengerKakaoReader(options: AgentMessengerKakaoRead
     let client: AgentMessengerKakaoClient | undefined;
     try {
       client = await options.createClient(binding.transport_account_id);
-      const page = await client.getMessagePage(binding.transport_chat_id, { count: options.page_size });
-      return page.messages.map((message) => ({
-        account_id: binding.account,
-        chat_id: binding.chat_id,
-        message_id: message.log_id,
-        author_id: String(message.author_id),
-        ts: message.sent_at,
-        body: message.message,
-        revision: message.log_id,
-      }));
+      const page = await client.getMessagePage(binding.transport_chat_id, {
+        count: Math.min(options.page_size, request.limit),
+      });
+      return page.messages
+        .filter((message) => !isValidPageSpillover(message, request))
+        .map((message) => ({
+          account_id: binding.account,
+          chat_id: binding.chat_id,
+          message_id: message.log_id,
+          author_id: String(message.author_id),
+          ts: message.sent_at,
+          body: message.message,
+          revision: message.log_id,
+        }));
     } catch {
       throw new Error("Kakao transport read failed");
     } finally {

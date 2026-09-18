@@ -1,14 +1,16 @@
 use serde_json::{Map, Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{OwnedRwLockReadGuard, RwLock as AsyncRwLock};
 
 #[cfg(feature = "test-worker")]
 use crate::TestWorkerConfig;
-use crate::{DaemonError, Result, WorkerSupervisor};
+use crate::{DaemonError, ProductionWorkerConfig, Result, WorkerSupervisor};
+#[cfg(feature = "test-worker")]
+use std::{path::Path, sync::Mutex};
 
 #[derive(Clone, Debug)]
 pub struct TrustedBinding {
@@ -20,6 +22,31 @@ pub struct TrustedBinding {
 impl TrustedBinding {
     pub fn new_static(id: impl Into<String>, claims: Value) -> Result<Self> {
         Self::build(id.into(), claims, None)
+    }
+
+    pub fn production(
+        id: impl Into<String>,
+        claims: Value,
+        worker: ProductionWorkerConfig,
+    ) -> Result<Self> {
+        let id = id.into();
+        let worker = WorkerSupervisor::production(id.clone(), worker)
+            .map_err(|error| DaemonError::new(error.to_string()))?;
+        Self::build(id, claims, Some(worker))
+    }
+
+    #[cfg(feature = "test-worker")]
+    pub fn production_for_test(
+        id: impl Into<String>,
+        claims: Value,
+        worker: ProductionWorkerConfig,
+        executable_directory: impl AsRef<Path>,
+    ) -> Result<Self> {
+        let id = id.into();
+        let worker =
+            WorkerSupervisor::production_for_test(id.clone(), worker, executable_directory)
+                .map_err(|error| DaemonError::new(error.to_string()))?;
+        Self::build(id, claims, Some(worker))
     }
 
     #[cfg(feature = "test-worker")]

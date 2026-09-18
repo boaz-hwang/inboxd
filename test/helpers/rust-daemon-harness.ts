@@ -1,11 +1,11 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createConnection, type Socket } from "node:net";
 
 import { connectUdsTransport } from "../../packages/cli/src/transport.ts";
-import { applySyncBatch, migrateDatabase, openSqlCipherDatabase, recordAccountIdentity, recordUnreadState } from "../../packages/store/src/index.ts";
+import { queryRustStorageRows, rustStorageValues } from "./rust-storage-fixture.ts";
 
-export const TEST_DATABASE_KEY = new Uint8Array(32).fill(0x44);
+export const TEST_DATABASE_KEY = new Uint8Array(32).fill(42);
 export const TEST_DATABASE_KEY_HEX = Buffer.from(TEST_DATABASE_KEY).toString("hex");
 
 export interface FixtureChat {
@@ -23,42 +23,29 @@ function daemonBinary(): string {
   return path;
 }
 
-function configureTestSqlCipher(): void {
-  process.env.NODE_ENV = "test";
-  if (process.env.SQLCIPHER_PATH) return;
-  for (const candidate of [
-    "/opt/homebrew/opt/sqlcipher/lib/libsqlcipher.dylib",
-    "/usr/local/opt/sqlcipher/lib/libsqlcipher.dylib",
-  ]) {
-    if (existsSync(candidate)) {
-      process.env.SQLCIPHER_PATH = candidate;
-      return;
-    }
-  }
-  throw new Error("SQLCIPHER_PATH must name the local SQLCipher library for the TypeScript seed fixture");
+export interface RustDaemonSeed {
+  readonly identity: Record<string, unknown>;
+  readonly unread: Record<string, unknown>;
+  readonly batch: Record<string, unknown>;
 }
 
-export function seedRustDaemonFixture(databasePath: string): void {
-  configureTestSqlCipher();
-  const database = openSqlCipherDatabase({ filename: databasePath, keyProvider: { getKey: () => TEST_DATABASE_KEY } });
-  try {
-    migrateDatabase(database);
-    recordAccountIdentity(database, {
+const DEFAULT_SEED: RustDaemonSeed = {
+  identity: {
       platform: FIXTURE_CHAT.platform,
       account: FIXTURE_CHAT.account,
       status: "known",
       self_id: "self",
       source: "authenticated_adapter",
       observed_at: 50,
-    });
-    recordUnreadState(database, {
+  },
+  unread: {
       chat: FIXTURE_CHAT,
       status: "known",
       count: 1,
       source: "platform",
       observed_at: 50,
-    });
-    applySyncBatch(database, {
+  },
+  batch: {
       events: [
         {
           kind: "create",
@@ -72,13 +59,51 @@ export function seedRustDaemonFixture(databasePath: string): void {
         },
       ],
       coverage: [{ chat: FIXTURE_CHAT, interval: FIXTURE_INTERVAL, kind: "backfill", collected_at: 100, mutations_verified_at: 100 }],
-    });
-  } finally {
-    database.close();
-  }
+  },
+};
+
+export function seedRustDaemonFixture(databasePath: string, seed: RustDaemonSeed = DEFAULT_SEED): void {
+  rustStorageValues(databasePath, [
+    { op: "store.migrate", input: null },
+    { op: "store.recordAccountIdentity", input: seed.identity },
+    { op: "store.recordUnreadState", input: seed.unread },
+    { op: "store.applySyncBatch", input: seed.batch },
+  ]);
 }
 
 type DaemonProcess = ReturnType<typeof Bun.spawn>;
+
+export type FixedWorkerKind = "slack" | "telegram" | "kakao-local" | "kakao-official";
+
+export interface RustDaemonHarnessOptions {
+  readonly providers?: readonly Record<string, unknown>[];
+  /** Release fake worker copied under each production-fixed sibling name. */
+  readonly fixedWorkerBinary?: string;
+}
+
+const FIXED_WORKER_NAMES: Readonly<Record<FixedWorkerKind, string>> = {
+  slack: "inboxd-slack-worker",
+  telegram: "inboxd-telegram-worker",
+  "kakao-local": "inboxd-kakao-local-worker",
+  "kakao-official": "inboxd-kakao-message-worker",
+};
+
+const FIXTURE_PARENT = join(import.meta.dir, "../../target/inboxd-test-fixtures");
+
+function assertPrivateDirectory(path: string, label: string): void {
+  const stat = lstatSync(path);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`${label} must be a regular directory`);
+  if ((stat.mode & 0o777) !== 0o700) throw new Error(`${label} must be mode 0700`);
+  if (typeof process.getuid === "function" && stat.uid !== process.getuid()) throw new Error(`${label} must be owned by the fixture user`);
+}
+
+function createPrivateFixtureRoot(): string {
+  mkdirSync(FIXTURE_PARENT, { recursive: true, mode: 0o700 });
+  assertPrivateDirectory(FIXTURE_PARENT, "Rust daemon fixture parent");
+  const root = mkdtempSync(join(FIXTURE_PARENT, "inboxd-rd-"));
+  assertPrivateDirectory(root, "Rust daemon fixture root");
+  return root;
+}
 
 interface CapturedProcess {
   readonly child: DaemonProcess;
@@ -102,15 +127,40 @@ async function exitWithin(child: DaemonProcess, milliseconds: number): Promise<n
 }
 
 export class RustDaemonHarness {
-  readonly root = mkdtempSync("/private/tmp/inboxd-rd-");
-  readonly stateDir = join(this.root, "state");
-  readonly databasePath = join(this.stateDir, "inboxd.db");
-  readonly socketPath = join(this.stateDir, "sock");
-  readonly configPath = join(this.root, "config.json");
+  readonly root: string;
+  readonly stateDir: string;
+  readonly databasePath: string;
+  readonly socketPath: string;
+  readonly configPath: string;
+  readonly executablePath: string;
+  private readonly providers: readonly Record<string, unknown>[];
+  private readonly fixedWorkerPaths = new Map<FixedWorkerKind, string>();
   private process: CapturedProcess | undefined;
 
-  constructor() {
+  constructor(options: RustDaemonHarnessOptions = {}) {
+    this.root = createPrivateFixtureRoot();
+    this.stateDir = join(this.root, ".inboxd");
+    this.databasePath = join(this.stateDir, "inboxd.db");
+    this.socketPath = join(this.stateDir, "sock");
+    this.configPath = join(this.root, "config.json");
+    this.providers = options.providers ?? [];
     mkdirSync(this.stateDir, { mode: 0o700 });
+    if (options.fixedWorkerBinary !== undefined) {
+      if (!existsSync(options.fixedWorkerBinary)) throw new Error("fixedWorkerBinary must name the built release fake worker executable");
+      const binDir = join(this.root, "bin");
+      mkdirSync(binDir, { mode: 0o700 });
+      this.executablePath = join(binDir, "inboxd-daemon");
+      copyFileSync(daemonBinary(), this.executablePath);
+      chmodSync(this.executablePath, 0o700);
+      for (const [kind, name] of Object.entries(FIXED_WORKER_NAMES) as Array<[FixedWorkerKind, string]>) {
+        const destination = join(binDir, name);
+        copyFileSync(options.fixedWorkerBinary, destination);
+        chmodSync(destination, 0o700);
+        this.fixedWorkerPaths.set(kind, destination);
+      }
+    } else {
+      this.executablePath = daemonBinary();
+    }
     writeFileSync(this.configPath, JSON.stringify(this.config()), { mode: 0o600 });
   }
 
@@ -121,6 +171,7 @@ export class RustDaemonHarness {
       database_path: this.databasePath,
       socket_path: this.socketPath,
       keychain: { service: "inboxd-test", account: "fixture" },
+      ...(this.providers.length === 0 ? {} : { providers: this.providers }),
     };
   }
 
@@ -128,9 +179,23 @@ export class RustDaemonHarness {
     seedRustDaemonFixture(this.databasePath);
   }
 
+  seedFixture(seed: RustDaemonSeed): void {
+    seedRustDaemonFixture(this.databasePath, seed);
+  }
+
+  queryRows(sql: string, params: readonly unknown[] = []): Record<string, unknown>[] {
+    if (this.process?.child.exitCode === null) throw new Error("stop the Rust daemon before inspecting its encrypted database");
+    return queryRustStorageRows(this.databasePath, sql, params);
+  }
+
+  assertPrivateFixtureRoot(): void {
+    assertPrivateDirectory(FIXTURE_PARENT, "Rust daemon fixture parent");
+    assertPrivateDirectory(this.root, "Rust daemon fixture root");
+  }
+
   async start(extraEnv: Record<string, string | undefined> = {}): Promise<void> {
     if (this.process && this.process.child.exitCode === null) throw new Error("Rust daemon fixture is already running");
-    const child = Bun.spawn([daemonBinary(), "--config", this.configPath], {
+    const child = Bun.spawn([this.executablePath, "--config", this.configPath], {
       env: {
         ...process.env,
         INBOXD_TEST_DATABASE_KEY_HEX: TEST_DATABASE_KEY_HEX,
@@ -206,6 +271,30 @@ export class RustDaemonHarness {
       if ((stat.mode & 0o777) !== 0o600) throw new Error(`${path} is not mode 0600`);
       if (typeof process.getuid === "function" && stat.uid !== process.getuid()) throw new Error(`${path} is not owned by the fixture user`);
     }
+  }
+
+  assertFixedWorkersAreRegularOwnerExecutables(): void {
+    if (this.fixedWorkerPaths.size !== Object.keys(FIXED_WORKER_NAMES).length) {
+      throw new Error("configured fixture did not install every fixed worker sibling");
+    }
+    const executableDirectory = join(this.root, "bin");
+    for (const [kind, path] of this.fixedWorkerPaths) {
+      const stat = lstatSync(path);
+      if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`${kind} fixed worker is not a copied regular file`);
+      if ((stat.mode & 0o777) !== 0o700) throw new Error(`${kind} fixed worker is not owner-executable mode 0700`);
+      if (typeof process.getuid === "function" && stat.uid !== process.getuid()) throw new Error(`${kind} fixed worker is not owned by the fixture user`);
+      if (!path.startsWith(`${executableDirectory}/`)) throw new Error(`${kind} fixed worker is not a daemon sibling`);
+    }
+    const config = lstatSync(this.configPath);
+    if (!config.isFile() || config.isSymbolicLink() || (config.mode & 0o777) !== 0o600) {
+      throw new Error("configured daemon config is not an owner-only regular file");
+    }
+  }
+
+  removeFixedWorker(kind: FixedWorkerKind): void {
+    const path = this.fixedWorkerPaths.get(kind);
+    if (path === undefined) throw new Error(`${kind} fixed worker was not installed`);
+    rmSync(path);
   }
 
   async dispose(): Promise<void> {

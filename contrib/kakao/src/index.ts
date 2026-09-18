@@ -38,6 +38,7 @@ export interface KakaoReaderRequest {
   readonly chat_id: string;
   readonly interval: HalfOpenInterval;
   readonly upper_bound_ts: number;
+  readonly limit: number;
   /** Pagination is never followed unless future measured evidence proves it. */
   readonly max_pages: 1;
 }
@@ -47,7 +48,7 @@ export type KakaoReadReader = (request: KakaoReaderRequest) => Promise<readonly 
 export interface KakaoReadLimits {
   readonly authoritative_backfill: false;
   readonly pagination: "unavailable";
-  readonly cursor: "unverified";
+  readonly cursor: "none";
   readonly max_pages: 1;
 }
 
@@ -84,9 +85,11 @@ const capabilities: GatewayCapabilities = {
 const read_limits: KakaoReadLimits = {
   authoritative_backfill: false,
   pagination: "unavailable",
-  cursor: "unverified",
+  cursor: "none",
   max_pages: 1,
 };
+
+const MAX_READER_ITEMS = 100;
 
 function stableIdentifier(value: string): boolean {
   return /^stable:[A-Za-z0-9_-]{1,128}$/.test(value);
@@ -140,6 +143,14 @@ function assertInvocationInterval(interval: HalfOpenInterval, upperBound: number
   }
   if (interval.from_ts >= upperBound) throw new RangeError("Kakao read denied: future since");
   return { from_ts: interval.from_ts, to_ts: Math.min(interval.to_ts, upperBound) };
+}
+
+function invocationLimit(limit: number | undefined): number {
+  const bounded = limit ?? MAX_READER_ITEMS;
+  if (!Number.isSafeInteger(bounded) || bounded < 1 || bounded > MAX_READER_ITEMS) {
+    throw new RangeError("Kakao read denied: limit must be an integer from 1 to 100");
+  }
+  return bounded;
 }
 
 function stringField(input: Record<string, unknown>, field: string): string | null {
@@ -202,8 +213,8 @@ export function createKakaoReadAdapter(options: KakaoReadAdapterOptions): KakaoR
   ) {
     throw new TypeError("Kakao read allowlist must contain stable account/chat identifiers");
   }
-  if (!Number.isFinite(options.max_measurement_age) || options.max_measurement_age < 0) {
-    throw new TypeError("Kakao max_measurement_age must be a non-negative finite number");
+  if (!Number.isFinite(options.max_measurement_age) || options.max_measurement_age <= 0) {
+    throw new TypeError("Kakao max_measurement_age must be a positive finite number");
   }
 
   return {
@@ -211,11 +222,14 @@ export function createKakaoReadAdapter(options: KakaoReadAdapterOptions): KakaoR
     read_limits,
     async fetchHistorical(request: FetchHistoricalRequest): Promise<HistoricalFetchResult> {
       const upperBound = options.now();
-      if (!Number.isFinite(upperBound)) throw new TypeError("Kakao read denied: current time must be finite");
+      if (!Number.isSafeInteger(upperBound) || upperBound <= 0) {
+        throw new TypeError("Kakao read denied: current time must be a finite positive safe integer");
+      }
       assertMeasurementEvidence(options.measurement, upperBound, options.max_measurement_age);
       assertAllowedChat(request.chat, allowlist);
       if (request.cursor !== undefined) throw new Error("Kakao read denied: cursor resume is not measured");
       const interval = assertInvocationInterval(request.interval, upperBound);
+      const limit = invocationLimit(request.limit);
       let rawEvents: readonly unknown[];
       try {
         rawEvents = await options.reader({
@@ -223,9 +237,13 @@ export function createKakaoReadAdapter(options: KakaoReadAdapterOptions): KakaoR
           chat_id: request.chat.chat_id,
           interval,
           upper_bound_ts: upperBound,
+          limit,
           max_pages: read_limits.max_pages,
         });
       } catch {
+        throw new Error("Kakao transport read failed");
+      }
+      if (!Array.isArray(rawEvents) || rawEvents.length > limit) {
         throw new Error("Kakao transport read failed");
       }
       const events = rawEvents

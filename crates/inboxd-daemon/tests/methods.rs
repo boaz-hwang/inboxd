@@ -605,3 +605,66 @@ async fn capability_registry_refreshes_exact_resources_notifies_and_revokes() {
     drop(client);
     shutdown(daemon).await;
 }
+
+#[cfg(feature = "test-worker")]
+#[tokio::test]
+async fn backfill_uses_a_private_durable_checkpoint_and_enforces_page_budget() {
+    let directory = private_tempdir();
+    let claims = json!({
+        "v":1,
+        "resource":{"v":1,"kind":"chat","platform":"slack","account":"work","chat_id":"C0123"},
+        "read":{"mode":"bounded_history","limits":{"max_page_size":100,"max_pages":1,"cursor":"opaque"}},
+        "write":{"mode":"none","content_mode":"none","reply":false},
+        "receipt":{"level":"none"}
+    });
+    let binding = TrustedBinding::for_test(
+        "slack-work",
+        claims,
+        TestWorkerConfig::new(
+            PathBuf::from(env!("CARGO_BIN_EXE_inboxd-fake-worker")),
+            "read_ok",
+        )
+        .with_timeout(Duration::from_millis(500)),
+    )
+    .unwrap();
+    let daemon = launch(config(directory.path()).with_bindings(vec![binding]))
+        .await
+        .unwrap();
+    let mut approver = trusted_approver(directory.path()).await;
+    let params = json!({
+        "platform":"slack","account":"work","chat_id":"C0123",
+        "from_ts":1726650000,"to_ts":1726653600
+    });
+
+    let first = approver.request("sync.backfill", params.clone()).await;
+    assert_eq!(first, json!({"event_count":1,"authoritative":true}));
+    assert!(!first.to_string().contains("opaque_1"));
+
+    let exhausted = approver.request_frame("sync.backfill", params).await;
+    assert_eq!(exhausted["ok"], false, "{exhausted}");
+    assert_eq!(exhausted["error"]["code"], "UNSUPPORTED");
+    assert!(!exhausted.to_string().contains("opaque_1"));
+    assert!(
+        exhausted["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("max_pages")
+    );
+    drop(approver);
+    shutdown(daemon).await;
+    let host = NativeHost::open_development(&directory.path().join("inboxd.db"), &KEY).unwrap();
+    let stored = host
+        .execute(
+            "store.readSyncState",
+            &json!({"platform":"slack","account":"work","chat_id":"C0123"}),
+        )
+        .unwrap();
+    let checkpoint: Value = serde_json::from_str(stored["cursor"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        checkpoint["interval"],
+        json!({"from_ts":1726650000,"to_ts":1726653600})
+    );
+    assert_eq!(checkpoint["provider_cursor"], "opaque_1");
+    assert_eq!(checkpoint["committed_pages"], 1);
+    assert_eq!(checkpoint["terminal"], false);
+}

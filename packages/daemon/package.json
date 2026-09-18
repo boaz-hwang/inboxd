@@ -1,9 +1,0 @@
-{
-  "name": "@inboxd/daemon",
-  "version": "0.0.0",
-  "private": true,
-  "type": "module",
-  "bin": {
-    "inboxd-daemon": "src/bin.ts"
-  }
-}

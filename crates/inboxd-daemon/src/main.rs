@@ -23,14 +23,16 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let config_path = parse_config_path(std::env::args_os())?;
-    let loaded = config::load(&config_path)?;
+    let mut loaded = config::load(&config_path)?;
+    let bindings = loaded.take_provider_bindings()?;
     let database_key = keychain::database_key(&loaded.keychain)?;
     let daemon_config = DaemonConfig::new(
         &loaded.state_dir,
         &loaded.database_path,
         &loaded.socket_path,
         database_key.as_slice().to_vec(),
-    );
+    )
+    .with_bindings(bindings);
     let runtime = Builder::new_multi_thread()
         .enable_all()
         .build()

@@ -16,25 +16,47 @@ import {
   type TuiState,
 } from "../src/index.ts";
 import { readTuiApproverToken, runTuiEntrypoint } from "../src/main.ts";
-import type { JsonObject } from "../../protocol/src/schema.ts";
+import type { JsonObject, ResourceCapabilityV1 } from "../../protocol/src/schema.ts";
+
+const slackChat = { platform: "slack", account: "work", chat_id: "ops" } as const;
+const slackResource = { v: 1, kind: "chat", ...slackChat } as const;
+
+function chatCapability(chat: { platform: string; account: string; chat_id: string }, send = true): ResourceCapabilityV1 {
+  return {
+    v: 1,
+    resource: { v: 1, kind: "chat", ...chat },
+    read: { mode: "bounded_history", limits: { max_page_size: 100, max_pages: 1, cursor: "opaque" } },
+    write: send ? { mode: "send", content_mode: "text", reply: true } : { mode: "none", content_mode: "none", reply: false },
+    receipt: { level: send ? "independent_readback" : "none" },
+    auth: { state: "authenticated", reason: null, observed_at: 1_726_650_000 },
+  };
+}
+
+const slackCapability = chatCapability(slackChat);
 
 const fixtures = {
   inbox: [
-    { id: "m1", author: "민수", ts: "09:41", body: "긴 한국어 메시지와 ASCII text", edited: true },
-    { id: "m2", author: "Ari", ts: "09:40", body: "deleted message", deleted: true },
+    { id: "m1", resource: slackResource, chat: slackChat, author: "민수", ts: "09:41", body: "긴 한국어 메시지와 ASCII text", edited: true },
+    { id: "m2", resource: slackResource, chat: slackChat, author: "Ari", ts: "09:40", body: "deleted message", deleted: true },
   ],
-  search: [{ id: "s1", author: "민수", ts: "09:41", body: "search result" }],
-  approvals: [{ id: "a1", state: "Uncertain", destination: "slack:#ops", expires: "10m", body: "Deploy now", codeRequired: true }],
+  search: [{ id: "s1", resource: slackResource, chat: slackChat, author: "민수", ts: "09:41", body: "search result" }],
+  chat: [
+    { id: "m1", resource: slackResource, chat: slackChat, author: "민수", ts: "09:41", body: "긴 한국어 메시지와 ASCII text", edited: true },
+    { id: "m2", resource: slackResource, chat: slackChat, author: "Ari", ts: "09:40", body: "deleted message", deleted: true },
+  ],
+  approvals: [{ id: "a1", resource: slackResource, chat: slackChat, state: "Uncertain", destination: "slack:#ops", expires: "10m", body: "Deploy now", codeRequired: true }],
 };
 
 function readyState(): TuiState {
   let state = createInitialState({ platform: "slack", period: "24h" });
   state = reduce(state, { type: "connected", generation: 1 });
   state = reduce(state, { type: "subscribed", generation: 1 });
+  state = reduce(state, { type: "capabilitySucceeded", generation: 1, data: [slackCapability] });
   state = reduce(state, { type: "querySucceeded", generation: 1, screen: "inbox", data: fixtures.inbox, coverage: { chats: 3, gaps: 1, freshness: "fresh" } });
   state = reduce(state, { type: "querySucceeded", generation: 1, screen: "search", data: fixtures.search, coverage: { chats: 3, gaps: 1, freshness: "partial" } });
+  state = reduce(state, { type: "querySucceeded", generation: 1, screen: "chat", data: fixtures.chat, coverage: { chats: 3, gaps: 1, freshness: "partial" } });
   state = reduce(state, { type: "querySucceeded", generation: 1, screen: "approvals", data: fixtures.approvals });
-  return { ...state, sendCapable: true };
+  return { ...state, activeChat: slackChat, activeResource: slackResource };
 }
 
 describe("five-screen operational model", () => {
@@ -81,7 +103,7 @@ describe("five-screen operational model", () => {
     state = reduce(state, { type: "key", key: "Escape" });
     expect(state.helpOpen).toBe(false);
     const help = renderScreen(state, { width: 80, height: 24 });
-    expect(help).toContain("1–5 j/k ↑↓ Enter / n-more b c a Esc ? q");
+    expect(help).toContain("1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply a Esc ? q");
     state = { ...state, draft: "memory-only reply" };
     state = reduce(state, { type: "key", key: "q" });
     expect(state.draft).toBe("");
@@ -130,11 +152,11 @@ describe("five-screen operational model", () => {
     const wide = renderScreen(state, { width: 120, height: 40 });
     expect(wide).toContain("LIST 40%");
     expect(wide).toContain("DETAIL 60%");
-    expect(wide.split("\n")[2]?.indexOf("│")).toBe(48);
+    expect(wide.split("\n").find(line => line.includes("LIST 40%"))?.indexOf("│")).toBe(48);
     expect(wide).toContain("Detail — Inbox");
     expect(wide).toContain("Message: 긴 한국어 메시지와 ASCII text");
 
-    state = reduce(state, { type: "key", key: "Enter" });
+    state = reduce(state, { type: "key", key: "d" });
     const narrow = renderScreen(state, { width: 80, height: 24 });
     expect(narrow).toContain("Detail — Inbox");
     expect(narrow).toContain("Back: Esc");
@@ -144,11 +166,11 @@ describe("five-screen operational model", () => {
   test("retains Chat coverage and Approval uncertainty in activated narrow details", () => {
     let state = readyState();
     state = reduce(state, { type: "switchScreen", screen: "chat" });
-    state = reduce(state, { type: "key", key: "Enter" });
+    state = reduce(state, { type: "key", key: "d" });
     expect(renderScreen(state, { width: 80, height: 24 })).toContain("── coverage gap: 1 · partial ──");
 
     state = reduce(state, { type: "switchScreen", screen: "approvals" });
-    state = reduce(state, { type: "key", key: "Enter" });
+    state = reduce(state, { type: "key", key: "d" });
     expect(renderScreen(state, { width: 80, height: 24 })).toContain("UNCERTAIN — do not resend automatically");
   });
 
@@ -179,14 +201,14 @@ describe("five-screen operational model", () => {
     state = reduce(state, { type: "key", key: "x" });
 
     const chat = renderScreen(state, { width: 80, height: 24 });
-    expect(chat).toContain("Compose proposal: x [memory-only]");
+    expect(chat).toContain("Compose text: x [memory-only]");
     expect(chat).toContain("── coverage gap: 1 · partial ──");
   });
 
   test("active approval input remains visible in a narrow activated detail", () => {
     let state = reduce(readyState(), { type: "querySucceeded", generation: 1, screen: "approvals", data: [{ id: "p", state: "Proposed", body: "long message ".repeat(100) }] });
     state = reduce(state, { type: "switchScreen", screen: "approvals" });
-    for (const key of ["Enter", "a", "1", "2", "3", "4"]) state = reduce(state, { type: "key", key });
+    for (const key of ["d", "a", "1", "2", "3", "4"]) state = reduce(state, { type: "key", key });
     for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
       const text = renderScreen(state, size);
       expect(text).toContain("Approval code [memory-only]");
@@ -198,11 +220,11 @@ describe("five-screen operational model", () => {
 
   test("active compose remains visible with separate submit and cancel controls in detail", () => {
     let state = reduce(readyState(), { type: "switchScreen", screen: "chat" });
-    for (const key of ["Enter", "c", "x"]) state = reduce(state, { type: "key", key });
+    for (const key of ["d", "c", "x"]) state = reduce(state, { type: "key", key });
     state = { ...state, draft: "long draft ".repeat(50) };
     for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
       const text = renderScreen(state, size);
-      expect(text).toContain("Compose proposal:");
+      expect(text).toContain("Compose text:");
       expect(text).toContain("Enter propose · Esc cancel");
       expect(text).toContain("[memory-only]");
     }
@@ -213,7 +235,7 @@ describe("five-screen operational model", () => {
     const body = "가👩‍💻é ".repeat(600) + "END-OF-MESSAGE";
     for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
       let state = reduce(readyState(), { type: "querySucceeded", generation: 1, screen: "inbox", data: [{ id: "long", body }] });
-      state = reduce(state, { type: "key", key: "Enter" });
+      state = reduce(state, { type: "key", key: "d" });
       let text = renderScreen(state, size);
       expect(text).toContain("PgUp/PgDn scroll");
       expect(text).not.toContain("END-OF-MESSAGE");
@@ -230,7 +252,7 @@ describe("five-screen operational model", () => {
   test("qualifies other-intent uncertainty without mislabeling the selected proposal", () => {
     let state = reduce(readyState(), { type: "querySucceeded", generation: 1, screen: "approvals", data: [{ id: "p", state: "Proposed" }, ...fixtures.approvals] });
     state = reduce(state, { type: "switchScreen", screen: "approvals" });
-    state = reduce(state, { type: "key", key: "Enter" });
+    state = reduce(state, { type: "key", key: "d" });
     for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
       const text = renderScreen(state, size);
       expect(text).toContain("Other intent: UNCERTAIN");
@@ -252,7 +274,7 @@ describe("five-screen operational model", () => {
     state = reduce(state, { type: "querySucceeded", generation: 1, screen: "inbox", data: [fixtures.inbox[0]!] });
     expect(state.focus).toBe(0);
     expect(state.selected.inbox).toBe(0);
-    expect(renderScreen(state, { width: 120, height: 40 })).toContain("> ● 민수");
+    expect(renderScreen(state, { width: 120, height: 40 })).toContain("> ● slack › work › chat:ops 민수");
     expect(renderScreen(state, { width: 80, height: 24 })).not.toContain("No selected item");
     state = reduce(state, { type: "switchScreen", screen: "approvals" });
     state = reduce(state, { type: "querySucceeded", generation: 1, screen: "inbox", data: [] });
@@ -344,13 +366,15 @@ describe("five-screen operational model", () => {
   test("controller subscribes before protocol-only refreshes and never retains approval codes", async () => {
     const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
     let subscribed: readonly string[] = [];
+    const chat = { platform: "slack", account: "me", chat_id: "ops" };
     const controller = createTuiController({
       client: {
         start: async (topics) => { subscribed = topics; },
         stop: () => {},
         request: async (method, params) => {
           calls.push({ method, params });
-          if (method === "chat.list") return { chats: [{ platform: "slack", account: "me", chat_id: "ops", display_name: "Ops" }] };
+          if (method === "capability.list") return { v: 1, resources: [chatCapability(chat)] };
+          if (method === "chat.list") return { chats: [{ ...chat, display_name: "Ops" }] };
           if (method === "message.recent") return { messages: [] };
           if (method === "safety.intent.listPending") return { intents: [{ intent_id: "i1", actor: "me", scope: { platform: "slack", account: "me", chat_id: "ops" }, state: "Proposed", body: "Deploy", expires_at: 10 }] };
           if (method === "safety.intent.claimApprovalCode") return { code: "654321" };
@@ -363,8 +387,8 @@ describe("five-screen operational model", () => {
     });
 
     await controller.start();
-    expect(subscribed).toEqual(["message.upserted", "coverage.changed", "safety.intent.changed"]);
-    expect(calls.map((call) => call.method)).toEqual(["chat.list", "message.recent", "safety.intent.listPending", "safety.intent.claimApprovalCode", "system.status", "sync.status", "auth.status"]);
+    expect(subscribed).toEqual(["message.upserted", "coverage.changed", "safety.intent.changed", "capability.changed"]);
+    expect(calls.map((call) => call.method)).toEqual(["capability.list", "chat.list", "message.recent", "safety.intent.listPending", "safety.intent.claimApprovalCode", "system.status", "sync.status", "auth.status"]);
     expect(controller.state.connection.status).toBe("connected");
     expect(JSON.stringify(controller.state)).not.toContain("654321");
     await controller.dispatchKey("4");
@@ -468,7 +492,7 @@ describe("five-screen operational model", () => {
       client: { start: async () => {}, stop: () => {}, request: async () => ({}) },
     });
 
-    await controller.dispatchKey("Enter");
+    await controller.dispatchKey("d");
     expect(controller.state.screen).toBe("inbox");
     expect(controller.state.detailOpen).toBe(true);
     await controller.dispatchKey("Enter");
@@ -520,6 +544,7 @@ describe("five-screen operational model", () => {
         stop: () => {},
         request: async (method, params) => {
           calls.push({ method, params });
+          if (method === "capability.list") return { v: 1, resources: [chatCapability(scope)] };
           if (method === "chat.list") return { chats: [] };
           if (method === "safety.intent.listPending") return { intents: [] };
           if (method === "system.status") return { send_capable: true };
@@ -535,11 +560,18 @@ describe("five-screen operational model", () => {
     await controller.dispatchKey("3");
     await controller.dispatchKey("c");
     for (const key of "deploy tonight") await controller.dispatchKey(key);
-    expect(renderScreen(controller.state, { width: 80, height: 24 })).toContain("Compose proposal: deploy tonight [memory-only]");
+    expect(renderScreen(controller.state, { width: 80, height: 24 })).toContain("Compose text: deploy tonight [memory-only]");
     await controller.dispatchKey("Enter");
 
     expect(calls.filter((call) => call.method === "safety.intent.create")).toEqual([
-      { method: "safety.intent.create", params: { actor: "tui:operator", scope, body: "deploy tonight" } },
+      { method: "safety.intent.create", params: {
+        actor: "tui:operator",
+        envelope: {
+          v: 2,
+          destination: { v: 1, kind: "chat", ...scope },
+          content: { mode: "text", body: "deploy tonight" },
+        },
+      } },
     ]);
     expect(controller.state.draft).toBe("");
     expect(controller.state.notice).toContain("proposal created");
@@ -547,7 +579,7 @@ describe("five-screen operational model", () => {
 
   test("keeps q and b as input text instead of quitting or backfilling", async () => {
     const calls: string[] = [];
-    const chat = { platform: "slack", account: "me", chat_id: "ops" };
+    const chat = slackChat;
     const controller = createTuiController({
       initialState: reduce(readyState(), { type: "querySucceeded", generation: 1, screen: "approvals", data: [{ ...fixtures.approvals[0]!, state: "Proposed" }] }),
       client: {
@@ -589,6 +621,7 @@ describe("five-screen operational model", () => {
         stop: () => {},
         request: async (method, params) => {
           calls.push({ method, params });
+          if (method === "capability.list") return { v: 1, resources: [chatCapability(chat)] };
           if (method === "chat.list") return { chats: [] };
           if (method === "safety.intent.listPending") return { intents: [] };
           if (method === "system.status" || method === "sync.status" || method === "auth.status" || method === "sync.backfill") return {};
@@ -600,6 +633,7 @@ describe("five-screen operational model", () => {
     await controller.start();
     controller.setActiveChat(chat);
     controller.setSearch({ chat, interval: { from_ts: 10, to_ts: 20 }, query: "" });
+    await controller.dispatchKey("3");
     await controller.dispatchKey("b");
 
     expect(calls.filter((call) => call.method === "sync.backfill")).toEqual([
@@ -618,6 +652,7 @@ describe("five-screen operational model", () => {
         stop: () => {},
         request: async (method, params) => {
           calls.push({ method, params });
+          if (method === "capability.list") return { v: 1, resources: [chatCapability(chat)] };
           if (method === "chat.list") return { chats: [{ ...chat, display_name: "Stable Ops" }] };
           if (method === "message.recent") return { messages: [{ ...chat, msg_id: "recent", body: "latest" }] };
           if (method === "message.inbox" || method === "message.search") return { messages: [], coverage: { covered: [], gaps: [], limits: [] } };
@@ -632,7 +667,6 @@ describe("five-screen operational model", () => {
 
     await controller.start();
     await controller.dispatchKey("Enter");
-    await controller.dispatchKey("Enter");
     controller.setSearch({ chat, interval: { from_ts: 10, to_ts: 20 }, query: "needle" });
     await controller.dispatchKey("/");
     for (const key of "needle") await controller.dispatchKey(key);
@@ -645,12 +679,20 @@ describe("five-screen operational model", () => {
 
     expect(calls.filter((call) => call.method === "message.inbox")).toEqual([
       { method: "message.inbox", params: { chat } },
+      { method: "message.inbox", params: { chat } },
     ]);
     expect(calls.filter((call) => call.method === "message.search")).toEqual([
       { method: "message.search", params: { chat, interval: { from_ts: 10, to_ts: 20 }, query: "needle" } },
     ]);
     expect(calls.filter((call) => call.method === "safety.intent.create")).toEqual([
-      { method: "safety.intent.create", params: { actor: "tui:operator", scope: chat, body: "deploy" } },
+      { method: "safety.intent.create", params: {
+        actor: "tui:operator",
+        envelope: {
+          v: 2,
+          destination: { v: 1, kind: "chat", ...chat },
+          content: { mode: "text", body: "deploy" },
+        },
+      } },
     ]);
     expect(calls.filter((call) => call.method === "sync.backfill")).toEqual([
       { method: "sync.backfill", params: { platform: "slack", account: "stable:acct", chat_id: "stable:ops", from_ts: 10, to_ts: 20 } },
@@ -769,12 +811,12 @@ describe("five-screen operational model", () => {
       },
     } });
     const starting = controller.start();
-    for (let i = 0; i < 30 && calls.length === 0; i++) await Promise.resolve();
-    expect(calls).toEqual(["chat.list"]);
+    for (let i = 0; i < 30 && !calls.includes("chat.list"); i++) await Promise.resolve();
+    expect(calls).toEqual(["capability.list", "chat.list"]);
     controller.disconnected();
     finish({ chats: [] });
     await starting;
-    expect(calls).toEqual(["chat.list"]);
+    expect(calls).toEqual(["capability.list", "chat.list"]);
     expect(controller.state.connection.status).toBe("reconnecting");
   });
 

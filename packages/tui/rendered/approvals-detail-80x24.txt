@@ -1,24 +1,24 @@
-INBOXD · connected · slack                                                      
+INBOXD · connected · mixed                                                      
 1 INBOX | 2 SEARCH | 3 CHAT | ● APPROVALS | 5 DOCTOR                            
+Resource: slack › work › chat:ops                                               
+READ bounded_history max_page=100 pages=1 cursor=opaque                         
+WRITE send content=text reply=yes                                               
+RECEIPT independent_readback                                                    
+AUTH authenticated reason=none observed_at=1726650000                           
 DETAIL (in place)                                                               
-Evidence rail: partial · 1 chats / 1 gaps / 1 limits · connected                
+Evidence rail: partial · 3 chats / 1 gaps / 1 limits · connected                
 Detail — Approvals                                                              
-Context: 1 of 2 · partial · 1 chats / 1 gaps / 1 limits                         
+Context: 1 of 2 · partial · 3 chats / 1 gaps / 1 limits                         
 Other intent: UNCERTAIN — do not resend automatically                           
 ID: intent-1                                                                    
+Resource: slack › work › chat:ops                                               
 State: Proposed                                                                 
 Destination: slack:work:ops                                                     
 Expires: 10m                                                                    
 Message: 승인 대기 제안                                                         
 Approval code required                                                          
 Approve [a]                                                                     
-Back: Esc · PgUp/PgDn scroll · Home top (1–7/7)                                 
-! approvals selection opened                                                    
+Back: Esc · PgUp/PgDn scroll · Home top (1–8/8)                                 
+! approvals detail opened                                                       
                                                                                 
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-1–5 j/k ↑↓ Enter / n-more b c a Esc ? q                                         
+1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply a Esc ? q                   

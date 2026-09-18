@@ -1,7 +1,12 @@
-INBOXD · connected · slack                                                                                              
+INBOXD · connected · mixed                                                                                              
 ● INBOX | 2 SEARCH | 3 CHAT | 4 APPROVALS | 5 DOCTOR                                                                    
+Resource: none                                                                                                          
+READ unknown                                                                                                            
+WRITE unknown                                                                                                           
+RECEIPT unknown                                                                                                         
+AUTH unknown reason=capability_unavailable                                                                              
 LIST 40%                                        │DETAIL 60%                                                             
-Evidence rail: partial · 1 chats / 1 gaps / 1 l…│Context rail: INBOX · focus 0/0                                        
+Evidence rail: partial · 3 chats / 1 gaps / 1 l…│Context rail: INBOX · focus 0/0                                        
 Status rail: connected · generation 1/1         │Detail — Inbox                                                         
 Inbox                                           │No selected item                                                       
 > No messages                                   │Back: Esc                                                              
@@ -32,9 +37,4 @@ Inbox                                           │No selected item
                                                                                                                         
                                                                                                                         
                                                                                                                         
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-1–5 j/k ↑↓ Enter / n-more b c a Esc ? q                                                                                 
+1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply a Esc ? q                                                           

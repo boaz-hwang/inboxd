@@ -18,10 +18,15 @@ libc.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 subtle.workspace = true
 tokio.workspace = true
+unicode-normalization.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+calcifer-macos-acl.workspace = true
 
 [dev-dependencies]
 inboxd-core = { path = "../inboxd-core" }

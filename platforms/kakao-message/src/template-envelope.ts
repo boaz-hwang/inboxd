@@ -173,6 +173,11 @@ export function validateKakaoTemplateEnvelope(
     ["mode", "template_id", "arguments", "preview"],
     "Kakao template content",
   );
+  boundedUtf8String(
+    contentRecord.template_id,
+    "Kakao template ID",
+    KAKAO_TEMPLATE_LIMITS.template_id_bytes,
+  );
   boundedUtf8String(contentRecord.preview, "Kakao template preview", KAKAO_TEMPLATE_LIMITS.preview_bytes);
   const envelope = envelopeRecord as unknown as KakaoTemplateEnvelope;
   if (

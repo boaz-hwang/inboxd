@@ -331,14 +331,20 @@ fn checked_interval(
     to: Option<&Value>,
     label: &str,
 ) -> std::result::Result<Value, RpcError> {
-    let from = finite_number(from, &format!("{label}.from_ts"))?;
-    let to = finite_number(to, &format!("{label}.to_ts"))?;
+    let from_value = from
+        .cloned()
+        .ok_or_else(|| RpcError::bad_request(format!("{label}.from_ts must be a finite number")))?;
+    let to_value = to
+        .cloned()
+        .ok_or_else(|| RpcError::bad_request(format!("{label}.to_ts must be a finite number")))?;
+    let from = finite_number(Some(&from_value), &format!("{label}.from_ts"))?;
+    let to = finite_number(Some(&to_value), &format!("{label}.to_ts"))?;
     if from >= to {
         return Err(RpcError::bad_request(format!(
             "{label}.from_ts must be before {label}.to_ts"
         )));
     }
-    Ok(json!({"from_ts":from,"to_ts":to}))
+    Ok(json!({"from_ts":from_value,"to_ts":to_value}))
 }
 
 fn page(params: &Map<String, Value>) -> std::result::Result<Map<String, Value>, RpcError> {
@@ -439,6 +445,108 @@ fn publish_safety(events: &EventHub, actor: &StorageActor, intent_id: &str) {
                 json!({"intent_id":intent_id,"state":state}),
             );
         }
+    }
+}
+
+struct BackfillPagePlan {
+    interval: Value,
+    provider_cursor: Value,
+    committed_pages: u64,
+}
+
+impl BackfillPagePlan {
+    fn for_request(
+        sync: &Value,
+        interval: &Value,
+        max_pages: u64,
+    ) -> std::result::Result<Self, RpcError> {
+        let checkpoint = sync
+            .get("cursor")
+            .and_then(Value::as_str)
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .and_then(|value| {
+                let object = value.as_object()?;
+                let exact = object.len() == 6
+                    && [
+                        "v",
+                        "kind",
+                        "interval",
+                        "provider_cursor",
+                        "committed_pages",
+                        "terminal",
+                    ]
+                    .iter()
+                    .all(|field| object.contains_key(*field));
+                (exact
+                    && object.get("v") == Some(&json!(1))
+                    && object.get("kind") == Some(&json!("backfill_job"))
+                    && object.get("interval") == Some(interval))
+                .then_some(value)
+            });
+        if let Some(checkpoint) = checkpoint {
+            let terminal = checkpoint["terminal"].as_bool();
+            let committed_pages = checkpoint["committed_pages"]
+                .as_u64()
+                .filter(|value| *value > 0);
+            let provider_cursor = checkpoint["provider_cursor"].as_str().filter(|value| {
+                !value.is_empty() && value.len() <= inboxd_protocol::MAX_CURSOR_BYTES
+            });
+            if terminal == Some(false) {
+                if let (Some(committed_pages), Some(provider_cursor)) =
+                    (committed_pages, provider_cursor)
+                {
+                    if committed_pages >= max_pages {
+                        return Err(RpcError::unsupported(
+                            "sync.backfill max_pages budget is exhausted for this interval",
+                        ));
+                    }
+                    return Ok(Self {
+                        interval: interval.clone(),
+                        provider_cursor: Value::String(provider_cursor.to_owned()),
+                        committed_pages,
+                    });
+                }
+            }
+            if terminal == Some(true)
+                && committed_pages.is_some()
+                && checkpoint["provider_cursor"].is_null()
+            {
+                return Ok(Self {
+                    interval: interval.clone(),
+                    provider_cursor: Value::Null,
+                    committed_pages: 0,
+                });
+            }
+        }
+        Ok(Self {
+            interval: interval.clone(),
+            provider_cursor: Value::Null,
+            committed_pages: 0,
+        })
+    }
+
+    fn into_apply_sync_batch(
+        self,
+        page: inboxd_protocol::NormalizedWorkerPage,
+        expected_page_sequence: u64,
+    ) -> std::result::Result<Value, RpcError> {
+        let next_cursor = page.next_cursor.clone();
+        let mut batch = page
+            .into_apply_sync_batch(expected_page_sequence)
+            .map_err(|error| RpcError::unsupported(error.message))?;
+        let checkpoint = json!({
+            "v":1,
+            "kind":"backfill_job",
+            "interval":self.interval,
+            "provider_cursor":next_cursor,
+            "committed_pages":self.committed_pages + 1,
+            "terminal":next_cursor.is_null(),
+        });
+        batch["sync"]["cursor"] = Value::String(
+            serde_json::to_string(&checkpoint)
+                .map_err(|_| RpcError::unsupported("backfill checkpoint could not be encoded"))?,
+        );
+        Ok(batch)
     }
 }
 
@@ -585,14 +693,55 @@ async fn dispatch(
         }
         "sync.backfill" => {
             assert_trusted_approver(session)?;
-            let _ = if request.params.contains_key("chat") {
+            let (chat, interval) = if request.params.contains_key("chat") {
                 (chat(&request.params)?, interval(&request.params)?)
             } else {
                 (flat_chat(&request.params)?, flat_interval(&request.params)?)
             };
-            Err(RpcError::unsupported(
-                "sync.backfill is unavailable because no adapter is configured",
-            ))
+            let resource = json!({
+                "v":1,
+                "kind":"chat",
+                "platform":chat["platform"],
+                "account":chat["account"],
+                "chat_id":chat["chat_id"],
+            });
+            let binding = capabilities.exact(&resource).ok_or_else(|| {
+                RpcError::unsupported(
+                    "sync.backfill is unavailable because no adapter is configured",
+                )
+            })?;
+            if binding.claims["read"]["mode"] == "none" {
+                return Err(RpcError::unsupported(
+                    "sync.backfill is unavailable for this resource",
+                ));
+            }
+            let worker = binding.worker.as_ref().ok_or_else(|| {
+                RpcError::unsupported(
+                    "sync.backfill is unavailable because no worker is configured",
+                )
+            })?;
+            let sync = actor_call(actor, StorageOperation::ReadSyncState, chat.clone(), false)?;
+            let expected_page_sequence = sync
+                .get("page_sequence")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let limit = binding.claims["read"]["limits"]["max_page_size"]
+                .as_u64()
+                .ok_or_else(|| RpcError::unsupported("configured read limit is invalid"))?;
+            let max_pages = binding.claims["read"]["limits"]["max_pages"]
+                .as_u64()
+                .ok_or_else(|| RpcError::unsupported("configured page budget is invalid"))?;
+            let plan = BackfillPagePlan::for_request(&sync, &interval, max_pages)?;
+            let cursor = plan.provider_cursor.clone();
+            let page = worker
+                .read_page(&binding.id, resource, interval, limit, cursor)
+                .await
+                .map_err(|error| RpcError::unsupported(error.to_string()))?;
+            let event_count = page.messages.len() + page.tombstones.len();
+            let authoritative = page.authoritative;
+            let batch = plan.into_apply_sync_batch(page, expected_page_sequence)?;
+            actor_call(actor, StorageOperation::ApplySyncBatch, batch, false)?;
+            Ok(json!({"event_count":event_count,"authoritative":authoritative}))
         }
         "sync.status" => Ok(json!({"state":"idle"})),
         "auth.status" => Ok(json!({"authenticated":false})),
@@ -769,4 +918,125 @@ fn token_matches(expected: &str, supplied: Option<&str>) -> bool {
         return false;
     };
     expected.len() == supplied.len() && bool::from(expected.as_bytes().ct_eq(supplied.as_bytes()))
+}
+
+#[cfg(test)]
+mod backfill_tests {
+    use super::*;
+    use inboxd_protocol::NormalizedWorkerPage;
+    use inboxd_storage::StorageActorConfig;
+    use std::{fs, os::unix::fs::PermissionsExt};
+
+    fn terminal_page(interval: &Value) -> NormalizedWorkerPage {
+        let chat_ref = json!({
+            "v":1,"kind":"chat","platform":"telegram","account":"personal","chat_id":"42"
+        });
+        let chat = json!({"platform":"telegram","account":"personal","chat_id":"42"});
+        NormalizedWorkerPage {
+            mode: "bounded_history".into(),
+            chat: chat_ref,
+            interval: interval.clone(),
+            messages: Vec::new(),
+            tombstones: Vec::new(),
+            identity: json!({
+                "chat":chat,"status":"unknown","source":"unknown",
+                "reason":"unsupported","observed_at":2
+            }),
+            unread: json!({
+                "chat":chat,"status":"unknown","source":"unknown","count":null,
+                "reason":"unsupported","observed_at":2
+            }),
+            coverage: Vec::new(),
+            limits: Vec::new(),
+            next_cursor: Value::Null,
+            authoritative: true,
+            observed_at: 2.0,
+        }
+    }
+
+    #[test]
+    fn terminal_page_commits_non_null_checkpoint_and_restarts_same_interval() {
+        let interval = json!({"from_ts":0,"to_ts":10});
+        let plan = BackfillPagePlan::for_request(&Value::Null, &interval, 1)
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        let batch = plan
+            .into_apply_sync_batch(terminal_page(&interval), 0)
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        assert!(batch["sync"]["cursor"].is_string());
+
+        let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let mut actor = StorageActor::start(StorageActorConfig::new(
+            directory.path().join("terminal.db"),
+            [0x51; 32],
+        ))
+        .unwrap();
+        actor.call(StorageOperation::ApplySyncBatch, batch).unwrap();
+        let chat = json!({"platform":"telegram","account":"personal","chat_id":"42"});
+        let stored = actor.call(StorageOperation::ReadSyncState, chat).unwrap();
+        assert!(stored["cursor"].is_string());
+        assert_eq!(stored["page_sequence"], 1);
+
+        let restarted = BackfillPagePlan::for_request(&stored, &interval, 1)
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(restarted.provider_cursor, Value::Null);
+        assert_eq!(restarted.committed_pages, 0);
+        actor.shutdown().unwrap();
+    }
+
+    #[test]
+    fn active_provider_cursor_resumes_only_for_the_exact_interval() {
+        let interval = json!({"from_ts":0,"to_ts":10});
+        let mut page = terminal_page(&interval);
+        page.next_cursor = json!("provider-secret");
+        let initial = BackfillPagePlan::for_request(&Value::Null, &interval, 3)
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        let batch = initial
+            .into_apply_sync_batch(page, 0)
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        let stored = json!({"cursor":batch["sync"]["cursor"],"page_sequence":1});
+
+        let resumed = BackfillPagePlan::for_request(&stored, &interval, 3)
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(resumed.provider_cursor, "provider-secret");
+        assert_eq!(resumed.committed_pages, 1);
+
+        let other_interval = json!({"from_ts":10,"to_ts":20});
+        let restarted = BackfillPagePlan::for_request(&stored, &other_interval, 3)
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(restarted.provider_cursor, Value::Null);
+        assert_eq!(restarted.committed_pages, 0);
+
+        let legacy = json!({"cursor":"provider-secret","page_sequence":1});
+        let legacy_restarted = BackfillPagePlan::for_request(&legacy, &interval, 3)
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(legacy_restarted.provider_cursor, Value::Null);
+        assert_eq!(legacy_restarted.committed_pages, 0);
+    }
+
+    #[test]
+    fn active_job_refuses_provider_io_after_its_page_budget_is_committed() {
+        let interval = json!({"from_ts":0,"to_ts":10});
+        let mut page = terminal_page(&interval);
+        page.next_cursor = json!("more-pages");
+        let first = BackfillPagePlan::for_request(&Value::Null, &interval, 1)
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        let batch = first
+            .into_apply_sync_batch(page, 0)
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        let stored = json!({"cursor":batch["sync"]["cursor"],"page_sequence":1});
+
+        let error = match BackfillPagePlan::for_request(&stored, &interval, 1) {
+            Ok(_) => panic!("exhausted backfill job unexpectedly resumed"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "UNSUPPORTED");
+        assert!(error.message.contains("max_pages"));
+
+        let other_interval = json!({"from_ts":10,"to_ts":20});
+        let fresh = BackfillPagePlan::for_request(&stored, &other_interval, 1)
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(fresh.provider_cursor, Value::Null);
+        assert_eq!(fresh.committed_pages, 0);
+    }
 }

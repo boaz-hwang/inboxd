@@ -64,11 +64,16 @@ fn final_payload(request: &Value, field: &str, value: Value) -> Value {
 }
 
 fn finalize(actor: &StorageActor, intent_id: &str, state: &str, payload: Value) -> Result<Value> {
-    actor_call(
+    let reason = payload.get("reason").cloned();
+    let mut summary = actor_call(
         actor,
         StorageOperation::SafetyFinalize,
         json!({"intent_id":intent_id,"state":state,"transport_payload":payload}),
-    )
+    )?;
+    if let (Some(reason), Some(summary)) = (reason, summary.as_object_mut()) {
+        summary.insert("reason".into(), reason);
+    }
+    Ok(summary)
 }
 
 fn receipt_evidence(request: &Value, evidence: Value) -> Value {

@@ -1,0 +1,40 @@
+INBOXD · connected · mixed                                                                                              
+1 INBOX | 2 SEARCH | ● CHAT | 4 APPROVALS | 5 DOCTOR                                                                    
+Resource: slack › work › chat:ops                                                                                       
+READ bounded_history max_page=100 pages=1 cursor=opaque                                                                 
+WRITE send content=text reply=yes                                                                                       
+RECEIPT independent_readback                                                                                            
+AUTH authenticated reason=none observed_at=1726650000                                                                   
+LIST 40%                                        │DETAIL 60%                                                             
+Evidence rail: partial · 3 chats / 1 gaps / 1 l…│Context rail: CHAT · focus 0/0                                         
+Status rail: connected · generation 1/1         │Detail — Chat                                                          
+Chat                                            │No selected item                                                       
+── coverage gap: 1 · partial ──                 │Back: Esc                                                              
+> No messages                                   │                                                                       
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply a Esc ? q                                                           

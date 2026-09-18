@@ -34,6 +34,35 @@ function adapterWithReader(
 }
 
 describe("measurement-gated Kakao read adapter", () => {
+  test("rejects non-positive measurement age at construction", () => {
+    for (const max_measurement_age of [0, -1]) {
+      expect(() => createKakaoReadAdapter({
+        allowedChats: [{ account, chat_id: chat.chat_id }],
+        measurement: measuredEvidence,
+        max_measurement_age,
+        now: () => now,
+        reader: async () => [],
+      })).toThrow(/positive finite/i);
+    }
+  });
+
+  test("rejects an invalid clock before measurement checks or reader I/O", async () => {
+    for (const invalidNow of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
+      let readerCalls = 0;
+      const adapter = createKakaoReadAdapter({
+        allowedChats: [{ account, chat_id: chat.chat_id }],
+        measurement: { ...measuredEvidence, observed_at: 0 },
+        max_measurement_age: 100,
+        now: () => invalidNow,
+        reader: async () => { readerCalls += 1; return []; },
+      });
+
+      await expect(adapter.fetchHistorical!({ chat, interval: { from_ts: 10, to_ts: 20 } }))
+        .rejects.toThrow(/current time.*finite positive safe integer/i);
+      expect(readerCalls).toBe(0);
+    }
+  });
+
   test("rejects the current Spike B BLOCKED/not_observed manifest before reader I/O", async () => {
     let readerCalls = 0;
     const adapter = adapterWithReader(async () => {
@@ -96,7 +125,7 @@ describe("measurement-gated Kakao read adapter", () => {
     expect(adapter.read_limits).toEqual({
       authoritative_backfill: false,
       pagination: "unavailable",
-      cursor: "unverified",
+      cursor: "none",
       max_pages: 1,
     });
     expect("send" in adapter).toBe(false);
@@ -123,13 +152,18 @@ describe("measurement-gated Kakao read adapter", () => {
       return fixture;
     });
 
-    const result = await adapter.fetchHistorical!({ chat, interval: { from_ts: 10, to_ts: 1_500 } });
+    const result = await adapter.fetchHistorical!({
+      chat,
+      interval: { from_ts: 10, to_ts: 1_500 },
+      limit: 100,
+    });
 
     expect(requests).toEqual([{
       account,
       chat_id: chat.chat_id,
       interval: { from_ts: 10, to_ts: now },
       upper_bound_ts: now,
+      limit: 100,
       max_pages: 1,
     }]);
     expect(result.events).toMatchObject([
@@ -172,5 +206,19 @@ describe("measurement-gated Kakao read adapter", () => {
     await expect(adapter.fetchHistorical!({ chat, interval: { from_ts: 10, to_ts: 20 }, cursor: "unverified-cursor" }))
       .rejects.toThrow("Kakao read denied: cursor resume is not measured");
     expect(readerCalls).toBe(0);
+  });
+
+  test("rejects invalid item limits before reader I/O", async () => {
+    for (const limit of [0, -1, 1.5, 101, Number.NaN, Number.POSITIVE_INFINITY]) {
+      let readerCalls = 0;
+      const adapter = adapterWithReader(async () => {
+        readerCalls += 1;
+        return [];
+      });
+
+      await expect(adapter.fetchHistorical!({ chat, interval: { from_ts: 10, to_ts: 20 }, limit }))
+        .rejects.toThrow(/limit.*integer.*1.*100/i);
+      expect(readerCalls).toBe(0);
+    }
   });
 });

@@ -5,11 +5,7 @@ import { join } from "node:path";
 const root = join(import.meta.dir, "..");
 const workspaces = [
   "packages/core",
-  "packages/store",
-  "packages/sync",
-  "packages/safety",
   "packages/protocol",
-  "packages/daemon",
   "packages/cli",
   "packages/tui",
   "packages/mcp",

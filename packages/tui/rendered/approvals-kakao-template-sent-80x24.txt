@@ -1,0 +1,24 @@
+INBOXD · connected · account ?                                                  
+1 INBOX | 2 SEARCH | 3 CHAT | ● APPROVALS | 5 DOCTOR                            
+Resource: kakao › official-app › destination:friend-uuid                        
+READ none                                                                       
+WRITE send content=approved_template reply=no                                   
+RECEIPT ack_only                                                                
+AUTH authenticated reason=none observed_at=1726650003                           
+DETAIL (in place)                                                               
+Evidence rail: unknown · 0 chats / ? gaps · connected                           
+Detail — Approvals                                                              
+Context: 1 of 1 · unknown · 0 chats / ? gaps                                    
+ID: template-1                                                                  
+Resource: kakao › official-app › destination:friend-uuid                        
+session observation                                                             
+acknowledged; not verified                                                      
+State: Sent                                                                     
+Destination: kakao › official-app › destination:friend-uuid                     
+Expires: 10m                                                                    
+Message: 승인: 1000                                                             
+Approve [disabled]                                                              
+Back: Esc · PgUp/PgDn scroll · Home top (1–9/9)                                 
+! approvals detail opened                                                       
+                                                                                
+1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply a Esc ? q                   

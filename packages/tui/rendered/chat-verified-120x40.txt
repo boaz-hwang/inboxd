@@ -1,17 +1,23 @@
-INBOXD · connected · slack                                                                                              
+INBOXD · connected · mixed                                                                                              
 1 INBOX | 2 SEARCH | ● CHAT | 4 APPROVALS | 5 DOCTOR                                                                    
+Resource: slack › work › chat:ops                                                                                       
+READ bounded_history max_page=100 pages=1 cursor=opaque                                                                 
+WRITE send content=text reply=yes                                                                                       
+RECEIPT independent_readback                                                                                            
+AUTH authenticated reason=none observed_at=1726650000                                                                   
 LIST 40%                                        │DETAIL 60%                                                             
-Evidence rail: partial · 1 chats / 1 gaps / 1 l…│Context rail: CHAT · focus 1/2                                         
+Evidence rail: partial · 3 chats / 1 gaps / 1 l…│Context rail: CHAT · focus 1/2                                         
 Status rail: connected · generation 1/1         │Detail — Chat                                                          
-Chat                                            │Context: 1 of 2 · partial · 1 chats / 1 gaps / 1 limits                
+Chat                                            │Context: 1 of 2 · partial · 3 chats / 1 gaps / 1 limits                
 ── coverage gap: 1 · partial ──                 │Delivery: session observations                                         
 Delivery: session observations                  │Verified: destination read-back matched                                
 Verified: destination read-back matched         │── coverage gap: 1 · partial ──                                        
-> ● 민수 09:41 재현 가능한 대화 내용            │ID: m-chat-1                                                           
- ○ Ari 09:42 수정됨 (edited)                    │Author: 민수                                                           
+> ● slack › work › chat:ops 민수 09:41 재현 가… │ID: m-chat-1                                                           
+ ○ slack › work › chat:ops Ari 09:42 수정됨 (ed…│Resource: slack › work › chat:ops                                      
+                                                │Author: 민수                                                           
                                                 │Time: 09:41                                                            
                                                 │Message: 재현 가능한 대화 내용                                         
-                                                │Back: Esc · PgUp/PgDn scroll · Home top (1–4/4)                        
+                                                │Back: Esc · PgUp/PgDn scroll · Home top (1–5/5)                        
                                                                                                                         
                                                                                                                         
                                                                                                                         
@@ -31,10 +37,4 @@ Verified: destination read-back matched         │── coverage gap: 1 · par
                                                                                                                         
                                                                                                                         
                                                                                                                         
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-1–5 j/k ↑↓ Enter / n-more b c a Esc ? q                                                                                 
+1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply a Esc ? q                                                           

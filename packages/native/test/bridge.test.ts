@@ -1,47 +1,32 @@
 import { describe, expect, test } from "bun:test";
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 
-import { openSqlCipherDatabase } from "../../store/src/sqlcipher.ts";
-import { createEncryptedFixture } from "../../store/test/fixtures/encrypted-fixture.ts";
 import { assertNativeAbiVersion, coreCall, NATIVE_ABI_VERSION } from "../src/index.ts";
 
-describe("Rust core Bun SQLCipher host bridge", () => {
-  test("round-trips an encrypted SQL host result and maps callback failures", () => {
-    const fixture = createEncryptedFixture();
-    const database = openSqlCipherDatabase({ filename: fixture.databasePath, keyProvider: fixture.keyProvider });
-    try {
-      const result = coreCall<{ value: number }>("host.roundtrip", { method: "sql.get", args: { sql: "SELECT 42 AS value", params: [] } }, database);
-      expect(result).toEqual({ value: 42 });
-      const text = `before\ud800${String.fromCodePoint(0xf0000)}${String.fromCodePoint(0xf0800)}after`;
-      expect(coreCall<{ pong: boolean; input: { text: string } }>("ping", { text })).toEqual({ pong: true, input: { text } });
-      expect(() => coreCall("host.roundtrip", { method: "sql.get", args: { sql: "SELECT * FROM absent", params: [] } }, database)).toThrow(/no such table/i);
-      expect(() => coreCall("unknown", {})).toThrow(/unknown core operation/i);
-    } finally {
-      database.close();
-      fixture.dispose();
-    }
+function sourceFiles(directory: string): string[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(directory, entry.name);
+    return entry.isDirectory() ? sourceFiles(path) : entry.name.endsWith(".ts") ? [path] : [];
+  });
+}
+
+describe("Rust core Bun FFI bridge", () => {
+  test("round-trips wire Unicode and maps unknown operations", () => {
+    const text = `before\ud800${String.fromCodePoint(0xf0000)}${String.fromCodePoint(0xf0800)}after`;
+    expect(coreCall<{ pong: boolean; input: { text: string } }>("ping", { text })).toEqual({ pong: true, input: { text } });
+    expect(() => coreCall("unknown", {})).toThrow(/unknown core operation/i);
   });
 
-  test("keeps callback buffers isolated across repeated, nested, and multi-database calls", () => {
-    const first = createEncryptedFixture();
-    const second = createEncryptedFixture();
-    const one = openSqlCipherDatabase({ filename: first.databasePath, keyProvider: first.keyProvider });
-    const two = openSqlCipherDatabase({ filename: second.databasePath, keyProvider: second.keyProvider });
-    try {
-      one.exec("CREATE TABLE sample (value INTEGER); INSERT INTO sample VALUES (1)");
-      two.exec("CREATE TABLE sample (value INTEGER); INSERT INTO sample VALUES (2)");
-      for (let index = 0; index < 8; index++) {
-        expect(coreCall<{ value: number }>("host.roundtrip", { method: "sql.get", args: { sql: "SELECT value FROM sample", params: [] } }, index % 2 ? one : two).value).toBe(index % 2 ? 1 : 2);
-      }
-      const nested = coreCall<boolean>("host.roundtrip", { method: "host.allowSend", args: { safe: true } }, undefined, {
-        allowSend: () => coreCall<{ pong: boolean }>("ping", { nested: "ok" }).pong,
-      });
-      expect(nested).toBe(true);
-    } finally {
-      one.close(); two.close(); first.dispose(); second.dispose();
+  test("keeps callback buffers isolated across repeated and nested pure calls", () => {
+    for (let index = 0; index < 8; index++) {
+      expect(coreCall<{ pong: boolean; input: { index: number } }>("ping", { index })).toEqual({ pong: true, input: { index } });
     }
+    const nested = coreCall<boolean>("host.roundtrip", { method: "host.allowSend", args: { safe: true } }, undefined, {
+      allowSend: () => coreCall<{ pong: boolean }>("ping", { nested: "ok" }).pong,
+    });
+    expect(nested).toBe(true);
   });
 
   test("preserves structured Unicode errors and rejects missing or wrong ABI versions", () => {
@@ -63,20 +48,31 @@ describe("Rust core Bun SQLCipher host bridge", () => {
       1700785133613.1575,
       1700687331747.8599,
     ];
-    const fixture = createEncryptedFixture();
-    const database = openSqlCipherDatabase({ filename: fixture.databasePath, keyProvider: fixture.keyProvider });
-    try {
-      for (const ts of numbers) {
-        expect(coreCall<{ input: { ts: number } }>("ping", { ts }).input.ts).toBe(ts);
-        const event = coreCall<{ message: { ts: number } }>("domain.normalizeMessageEvent", {
-          kind: "create",
-          message: { key: { platform: "p", account: "a", chat_id: "c", msg_id: "m" }, author_id: "u", ts, body: "body", attachments: [] },
-          revision: { source: "adapter", value: 1 },
-        });
-        expect(event.message.ts).toBe(ts);
-        expect(coreCall<{ timestamp: number }>("host.roundtrip", { method: "sql.get", args: { sql: "SELECT ? AS timestamp", params: [ts] } }, database).timestamp).toBe(ts);
-      }
-    } finally { database.close(); fixture.dispose(); }
+    for (const ts of numbers) {
+      expect(coreCall<{ input: { ts: number } }>("ping", { ts }).input.ts).toBe(ts);
+      const event = coreCall<{ message: { ts: number } }>("domain.normalizeMessageEvent", {
+        kind: "create",
+        message: { key: { platform: "p", account: "a", chat_id: "c", msg_id: "m" }, author_id: "u", ts, body: "body", attachments: [] },
+        revision: { source: "adapter", value: 1 },
+      });
+      expect(event.message.ts).toBe(ts);
+    }
+  });
+
+  test("retained production consumers stay pure", () => {
+    const packages = join(import.meta.dir, "..", "..");
+    const consumers = sourceFiles(packages)
+      .filter((path) => relative(packages, path).includes("/src/"))
+      .filter((path) => readFileSync(path, "utf8").includes("native/src/index"));
+    const retained = consumers;
+    expect(retained.map((path) => relative(packages, path)).sort()).toEqual([
+      "core/src/capabilities.ts",
+      "core/src/coverage.ts",
+      "core/src/models.ts",
+    ]);
+    for (const path of retained) {
+      expect(readFileSync(path, "utf8")).not.toMatch(/bun:sqlite|\bDatabase\b/);
+    }
   });
 
   test("does not need cargo or the current project directory at runtime", () => {
@@ -114,7 +110,7 @@ describe("Rust core Bun SQLCipher host bridge", () => {
       const result = Bun.spawnSync({
         cmd: [process.execPath, "scripts/build-native.ts"],
         cwd: outside,
-        env: { ...process.env, CARGO: join(process.env.HOME!, ".cargo", "bin", "cargo"), CARGO_TARGET_DIR: targetDirectory },
+        env: { ...process.env, RUSTFLAGS: "", RUSTDOCFLAGS: "", CARGO: join(process.env.HOME!, ".cargo", "bin", "cargo"), CARGO_TARGET_DIR: targetDirectory },
         stdout: "pipe",
         stderr: "pipe",
       });

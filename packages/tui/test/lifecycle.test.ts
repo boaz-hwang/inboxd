@@ -2,6 +2,15 @@ import { expect, test } from "bun:test";
 import { createConnectedTuiController } from "../src/main.ts";
 import type { ProtocolMessage, ProtocolTransport } from "../../protocol/src/index.ts";
 
+const slackCapability = {
+  v: 1,
+  resource: { v: 1, kind: "chat", platform: "slack", account: "work", chat_id: "ops" },
+  read: { mode: "bounded_history", limits: { max_page_size: 100, max_pages: 1, cursor: "opaque" } },
+  write: { mode: "send", content_mode: "text", reply: true },
+  receipt: { level: "independent_readback" },
+  auth: { state: "authenticated", reason: null, observed_at: 1_726_650_000 },
+} as const;
+
 class Peer implements ProtocolTransport {
   message?: (message: ProtocolMessage) => void;
   closed?: () => void;
@@ -12,7 +21,7 @@ class Peer implements ProtocolTransport {
     this.methods.push(message.method);
     if (this.heldMethods.has(message.method)) return;
     queueMicrotask(() => this.message?.({ type: "response", id: message.id, method: message.method, ok: true,
-      result: message.method === "safety.intent.claimApprovalCode" ? { code: "123456" } : message.method === "system.status" ? { send_capable: true } : message.method === "safety.intent.listPending" ? { intents: [{ intent_id: "p", actor: "operator", scope: { platform: "slack", account: "work", chat_id: "ops" }, state: "Proposed" }] } : {} }));
+      result: message.method === "capability.list" ? { v: 1, resources: [slackCapability] } : message.method === "safety.intent.claimApprovalCode" ? { code: "123456" } : message.method === "system.status" ? { send_capable: true } : message.method === "safety.intent.listPending" ? { intents: [{ intent_id: "p", actor: "operator", scope: { platform: "slack", account: "work", chat_id: "ops" }, state: "Proposed" }] } : {} }));
   }
   onMessage(listener: (message: ProtocolMessage) => void) { this.message = listener; return () => {}; }
   onClose(listener: () => void) { this.closed = listener; return () => {}; }
@@ -64,7 +73,7 @@ test("retries refused reconnects with capped exponential backoff then resubscrib
     clock.fire(); await settle();
     expect(controller.state.connection.status).toBe("connected");
     expect(controller.state.views.approvals.status).toBe("ready");
-    expect(recovered.methods.slice(0, 3)).toEqual(["system.hello", "subscribe", "chat.list"]);
+    expect(recovered.methods.slice(0, 4)).toEqual(["system.hello", "subscribe", "capability.list", "chat.list"]);
     expect(clock.pending.size).toBe(0);
     expect(connections).toBe(10);
     available = false;
@@ -135,13 +144,15 @@ test.each(["safety.intent.approve", "safety.intent.create", "sync.backfill"])("a
     } else if (method === "safety.intent.create") {
       await controller.dispatchKey("3"); await controller.dispatchKey("c");
       await controller.dispatchKey("x");
+    } else if (method === "sync.backfill") {
+      await controller.dispatchKey("3");
     }
     const dispatching = controller.dispatchKey(method === "sync.backfill" ? "b" : "Enter");
     expect(first.methods.filter(call => call === method)).toHaveLength(1);
     first.close(); await settle(); await dispatching;
     clock.fire(); await settle();
     expect(controller.state.connection.status).toBe("connected");
-    expect(recovered.methods.slice(0, 3)).toEqual(["system.hello", "subscribe", "chat.list"]);
+    expect(recovered.methods.slice(0, 4)).toEqual(["system.hello", "subscribe", "capability.list", "chat.list"]);
     expect(recovered.methods.filter(call => ["safety.intent.approve", "safety.intent.create", "sync.backfill"].includes(call))).toEqual([]);
     expect(controller.state.approvalPrompt).toBe(false);
     expect(controller.state.draft).toBe("");
@@ -181,7 +192,7 @@ test("real reconnecting client loss marks retained views stale and resubscribes 
   for (let turn = 0; turn < 100 && controller.state.views.approvals.status !== "ready"; turn++) await Promise.resolve();
   expect(controller.state.connection.status).toBe("connected");
   expect(controller.state.connection.generation).toBe(2);
-  expect(second.methods.slice(0, 3)).toEqual(["system.hello", "subscribe", "chat.list"]);
+  expect(second.methods.slice(0, 4)).toEqual(["system.hello", "subscribe", "capability.list", "chat.list"]);
   expect(controller.state.views.approvals.status).toBe("ready");
   controller.stop();
   expect(connections).toBe(2);

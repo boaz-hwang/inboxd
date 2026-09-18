@@ -1,14 +1,19 @@
-INBOXD · connected · slack                                                                                              
+INBOXD · connected · mixed                                                                                              
 ● INBOX | 2 SEARCH | 3 CHAT | 4 APPROVALS | 5 DOCTOR                                                                    
+Resource: slack › work › chat:ops                                                                                       
+READ bounded_history max_page=100 pages=1 cursor=opaque                                                                 
+WRITE send content=text reply=yes                                                                                       
+RECEIPT independent_readback                                                                                            
+AUTH authenticated reason=none observed_at=1726650000                                                                   
 LIST 40%                                        │DETAIL 60%                                                             
-Evidence rail: partial · 1 chats / 1 gaps / 1 l…│Context rail: INBOX · focus 1/2                                        
+Evidence rail: partial · 3 chats / 1 gaps / 1 l…│Context rail: INBOX · focus 1/3                                        
 Status rail: connected · generation 1/1         │Detail — Inbox                                                         
-Inbox                                           │Context: 1 of 2 · partial · 1 chats / 1 gaps / 1 limits                
-> ● 운영 Unread: ? (unknown) 09:41 한국어/CJK … │ID: slack:work:ops                                                     
- ○ 개발 09:38 다음 점검 항목                    │Chat: slack:work:ops                                                   
-                                                │Unread: ? (unknown)                                                    
+Inbox                                           │Context: 1 of 3 · partial · 3 chats / 1 gaps / 1 limits                
+> ● slack › work › chat:ops 운영 Unread: ? (unk…│ID: slack:work:ops                                                     
+ ○ telegram › personal › chat:-100123 민수 09:3…│Resource: slack › work › chat:ops                                      
+ ○ kakao › local › chat:room-7 카카오 로컬 09:3…│Unread: ? (unknown)                                                    
                                                 │Unread reason: unobserved                                              
-                                                │Coverage: partial · 1 chats / 1 gaps / 1 limits                        
+                                                │Coverage: partial · 3 chats / 1 gaps / 1 limits                        
                                                 │Self: ? (unknown)                                                      
                                                 │Author: 운영                                                           
                                                 │Time: 09:41                                                            
@@ -32,9 +37,4 @@ Inbox                                           │Context: 1 of 2 · partial ·
                                                                                                                         
                                                                                                                         
                                                                                                                         
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-1–5 j/k ↑↓ Enter / n-more b c a Esc ? q                                                                                 
+1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply a Esc ? q                                                           

@@ -21,6 +21,7 @@ The current local workflow targets macOS with Bun, Rust (see `rust-toolchain.tom
 brew install sqlcipher
 bun install --frozen-lockfile
 bun run build:native
+bun run build:product
 bun run test
 bun run lint
 bun run check:boundaries
@@ -32,16 +33,15 @@ cargo fmt --all -- --check
 The 100k-message benchmark is opt-in and is not run by the default test suite:
 
 ```sh
-INBOXD_RUN_100K_ACCEPTANCE=1 NODE_ENV=test \
-SQLCIPHER_PATH="$(brew --prefix sqlcipher)/lib/libsqlcipher.dylib" \
-bun test packages/store/test/performance-100k.test.ts
+cargo test --locked --release -p inboxd-storage \
+  --test performance_100k -- --ignored --nocapture
 ```
 
 See the [evidence ledger](docs/07-evidence-ledger.md) for recorded validation and its limits.
 
 ## Run
 
-Clients do not auto-start the daemon. Startup requires an owner-only JSON configuration with absolute state, database, and socket paths. Live readers additionally require explicit allowlisted scopes and trusted host bindings; configuration does not discover credentials automatically. See the [architecture and startup contract](docs/06-architecture.md) and [launcher implementation](packages/daemon/src/launcher.ts).
+Normal client commands do not auto-start the daemon; `inboxd daemon start` explicitly launches the packaged Rust daemon and waits for a real status response. Startup requires an owner-only JSON configuration with absolute state, database, and socket paths. Live readers additionally require explicit allowlisted scopes and trusted host bindings; configuration does not discover credentials automatically. See the [architecture and startup contract](docs/06-architecture.md) and [launcher implementation](packages/cli/src/daemon-launcher.ts).
 
 ```sh
 chmod 600 /absolute/path/inboxd-config.json

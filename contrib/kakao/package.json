@@ -2,5 +2,8 @@
   "name": "@inboxd/kakao",
   "version": "0.0.0",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "agent-messenger": "2.37.1"
+  }
 }

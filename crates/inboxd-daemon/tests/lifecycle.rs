@@ -171,6 +171,7 @@ async fn drop_and_cancelled_shutdown_abort_owned_tasks_clean_socket_and_allow_sa
     }
 }
 
+#[cfg(feature = "test-worker")]
 #[tokio::test]
 async fn completed_connection_tasks_are_reaped_while_the_daemon_keeps_serving() {
     let directory = private_tempdir();

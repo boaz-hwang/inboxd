@@ -1,14 +1,14 @@
-INBOXD · connected · slack                                                      
+INBOXD · connected · mixed                                                      
 ● INBOX | 2 SEARCH | 3 CHAT | 4 APPROVALS | 5 DOCTOR                            
+Resource: none                                                                  
+READ unknown                                                                    
+WRITE unknown                                                                   
+RECEIPT unknown                                                                 
+AUTH unknown reason=capability_unavailable                                      
 DETAIL (in place)                                                               
-Evidence rail: partial · 1 chats / 1 gaps / 1 limits · connected                
+Evidence rail: partial · 3 chats / 1 gaps / 1 limits · connected                
 Detail — Inbox                                                                  
-Context: 1 of 1 · partial · 1 chats / 1 gaps / 1 limits                         
-sage 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한 
-글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é 
-message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 
-한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 
-é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é messag
+Context: 1 of 1 · partial · 3 chats / 1 gaps / 1 limits                         
 e 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글  
 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é mes
 sage 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한 
@@ -18,7 +18,7 @@ message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 �
 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é messag
 e 한글 👩‍💻 é message                                                             
 END-OF-MESSAGE                                                                  
-Back: Esc · PgUp/PgDn scroll · Home top (36–49/49)                              
-! inbox selection opened                                                        
+Back: Esc · PgUp/PgDn scroll · Home top (41–49/49)                              
+! inbox detail opened                                                           
                                                                                 
-1–5 j/k ↑↓ Enter / n-more b c a Esc ? q                                         
+1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply a Esc ? q                   

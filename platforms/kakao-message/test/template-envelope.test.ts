@@ -157,3 +157,135 @@ test("accepts only ack-level Sent, failed, or uncertain outcomes", () => {
   expect(() => parseKakaoTemplateSendOutcome({ outcome: "verified", receipt_id: "receipt-1" })).toThrow(/outcome|verified|ack/i);
   expect(() => parseKakaoTemplateSendOutcome({ outcome: "sent", receipt_id: "receipt-1", verified: true })).toThrow(/field|verified/i);
 });
+
+test("bounds template IDs by UTF-8 bytes even when the expectation repeats the oversized value", () => {
+  const boundaryId = "t".repeat(KAKAO_TEMPLATE_LIMITS.template_id_bytes);
+  const boundary = envelope() as { content: Record<string, unknown> };
+  boundary.content.template_id = boundaryId;
+  expect(() => validateKakaoTemplateEnvelope(boundary, {
+    ...expectation,
+    approved_template_id: boundaryId,
+  })).not.toThrow();
+
+  const oversizedId = "한".repeat(Math.floor(KAKAO_TEMPLATE_LIMITS.template_id_bytes / 3) + 1);
+  const oversized = envelope() as { content: Record<string, unknown> };
+  oversized.content.template_id = oversizedId;
+  expect(() => validateKakaoTemplateEnvelope(oversized, {
+    ...expectation,
+    approved_template_id: oversizedId,
+  })).toThrow(/template.*UTF-8|template.*byte/i);
+});
+
+test("accepts the exact JSON depth boundary and rejects one level beyond it", () => {
+  function nestedArguments(levels: number): Record<string, unknown> {
+    const root: Record<string, unknown> = {};
+    let cursor = root;
+    for (let index = 0; index < levels; index += 1) {
+      if (index === levels - 1) cursor.value = null;
+      else {
+        const next: Record<string, unknown> = {};
+        cursor.value = next;
+        cursor = next;
+      }
+    }
+    return root;
+  }
+
+  const boundary = envelope() as { content: Record<string, unknown> };
+  boundary.content.arguments = nestedArguments(KAKAO_TEMPLATE_LIMITS.json_depth);
+  expect(() => validateKakaoTemplateEnvelope(boundary, expectation)).not.toThrow();
+
+  const oversized = envelope() as { content: Record<string, unknown> };
+  oversized.content.arguments = nestedArguments(KAKAO_TEMPLATE_LIMITS.json_depth + 1);
+  expect(() => validateKakaoTemplateEnvelope(oversized, expectation)).toThrow(/depth/i);
+});
+
+test("enforces exact and one-over aggregate JSON node limits before encoding", () => {
+  function nodeArguments(lastArrayItems: number): Record<string, unknown> {
+    return Object.fromEntries(Array.from({ length: 10 }, (_, index) => [
+      `group${index}`,
+      Array.from({ length: index === 9 ? lastArrayItems : 999 }, () => null),
+    ]));
+  }
+
+  const boundary = envelope() as { content: Record<string, unknown> };
+  boundary.content.arguments = nodeArguments(998);
+  expect(() => validateKakaoTemplateEnvelope(boundary, expectation)).not.toThrow();
+
+  const oversized = envelope() as { content: Record<string, unknown> };
+  oversized.content.arguments = nodeArguments(999);
+  expect(() => validateKakaoTemplateEnvelope(oversized, expectation)).toThrow(/aggregate JSON node/i);
+});
+
+test("enforces per-object and aggregate JSON key limits at their boundaries", () => {
+  const exactObject = envelope() as { content: Record<string, unknown> };
+  exactObject.content.arguments = Object.fromEntries(
+    Array.from({ length: KAKAO_TEMPLATE_LIMITS.json_object_keys }, (_, index) => [`k${index}`, index]),
+  );
+  expect(() => validateKakaoTemplateEnvelope(exactObject, expectation)).not.toThrow();
+
+  const aggregate = Object.fromEntries(Array.from({ length: 16 }, (_, group) => [
+    `group${group}`,
+    Object.fromEntries(Array.from({ length: 255 }, (_, index) => [`k${index}`, index])),
+  ]));
+  const exactAggregate = envelope() as { content: Record<string, unknown> };
+  exactAggregate.content.arguments = aggregate;
+  expect(() => validateKakaoTemplateEnvelope(exactAggregate, expectation)).not.toThrow();
+
+  (aggregate.group0 as Record<string, unknown>).extra = true;
+  const oversizedAggregate = envelope() as { content: Record<string, unknown> };
+  oversizedAggregate.content.arguments = aggregate;
+  expect(() => validateKakaoTemplateEnvelope(oversizedAggregate, expectation)).toThrow(/aggregate JSON key/i);
+});
+
+test("enforces JSON key and string UTF-8 byte limits before the encoded-object ceiling", () => {
+  const boundaryKey = "k".repeat(KAKAO_TEMPLATE_LIMITS.json_key_bytes);
+  const exactKey = envelope() as { content: Record<string, unknown> };
+  exactKey.content.arguments = { [boundaryKey]: null };
+  expect(() => validateKakaoTemplateEnvelope(exactKey, expectation)).not.toThrow();
+
+  const oversizedKey = envelope() as { content: Record<string, unknown> };
+  oversizedKey.content.arguments = { ["한".repeat(Math.floor(KAKAO_TEMPLATE_LIMITS.json_key_bytes / 3) + 1)]: null };
+  expect(() => validateKakaoTemplateEnvelope(oversizedKey, expectation)).toThrow(/key.*byte/i);
+
+  const exactString = envelope() as { content: Record<string, unknown> };
+  exactString.content.arguments = { values: ["x".repeat(KAKAO_TEMPLATE_LIMITS.json_string_bytes)] };
+  expect(() => validateKakaoTemplateEnvelope(exactString, expectation)).toThrow(/encoded UTF-8 bytes/i);
+
+  const oversizedString = envelope() as { content: Record<string, unknown> };
+  oversizedString.content.arguments = { values: ["한".repeat(Math.floor(KAKAO_TEMPLATE_LIMITS.json_string_bytes / 3) + 1)] };
+  expect(() => validateKakaoTemplateEnvelope(oversizedString, expectation)).toThrow(/string byte/i);
+});
+
+test("distinguishes the aggregate JSON string budget from the smaller encoded-object ceiling", () => {
+  const exactTotal = envelope() as { content: Record<string, unknown> };
+  exactTotal.content.arguments = {
+    values: Array.from({ length: 16 }, () => "x".repeat(KAKAO_TEMPLATE_LIMITS.json_string_bytes)),
+  };
+  expect(() => validateKakaoTemplateEnvelope(exactTotal, expectation)).toThrow(/encoded UTF-8 bytes/i);
+
+  const oversizedTotal = envelope() as { content: Record<string, unknown> };
+  oversizedTotal.content.arguments = {
+    values: [
+      ...Array.from({ length: 16 }, () => "x".repeat(KAKAO_TEMPLATE_LIMITS.json_string_bytes)),
+      "x",
+    ],
+  };
+  expect(() => validateKakaoTemplateEnvelope(oversizedTotal, expectation)).toThrow(/aggregate JSON string/i);
+});
+
+test("keeps the Kakao destination write-only and the acknowledgement ceiling Sent-only", () => {
+  const chatEnvelope = envelope() as { destination: Record<string, unknown> };
+  chatEnvelope.destination = {
+    v: 1,
+    kind: "chat",
+    platform: "kakao",
+    account: "official-app",
+    chat_id: "room-7",
+  };
+  expect(() => validateKakaoTemplateEnvelope(chatEnvelope, expectation)).toThrow(/destination|field|match/i);
+  expect(() => parseKakaoTemplateSendOutcome({
+    outcome: "verified",
+    evidence: { destination, receipt_id: "receipt-1" },
+  })).toThrow(/verified|unsupported|outcome/i);
+});

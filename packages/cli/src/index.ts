@@ -12,15 +12,21 @@ import {
   type CliHandlers,
   type CliRole,
 } from "./handlers.ts";
+import { launchPackagedDaemon } from "./daemon-launcher.ts";
 import { connectUdsTransport } from "./transport.ts";
 
+export * from "./daemon-launcher.ts";
 export * from "./handlers.ts";
 export * from "./transport.ts";
 
 export const defaultSocketPath = join(homedir(), ".inboxd", "sock");
 
-export interface UdsCliOptions extends Omit<CliHandlerOptions, "connect"> {
+export interface UdsCliOptions extends Omit<CliHandlerOptions, "connect" | "launchDaemon"> {
   readonly socketPath?: string;
+  readonly daemonBinary?: string;
+  readonly configPath?: string;
+  readonly readinessTimeoutMs?: number;
+  readonly launchDaemon?: false | (() => Promise<void>);
 }
 
 export function readCliApproverToken(socketPath: string): string {
@@ -40,12 +46,22 @@ export function createUdsCliHandlers(options: UdsCliOptions = {}): CliHandlers {
   const approverToken = options.role === "approver"
     ? options.approverToken ?? readCliApproverToken(socketPath)
     : undefined;
-  return createCliHandlers({ ...options, approverToken, connect: () => connectUdsTransport(socketPath) });
+  const { daemonBinary, configPath, readinessTimeoutMs, launchDaemon: injectedLaunchDaemon, socketPath: _socketPath, ...handlerOptions } = options;
+  const launchDaemon = injectedLaunchDaemon === false
+    ? undefined
+    : injectedLaunchDaemon ?? (() => launchPackagedDaemon({ daemonBinary, configPath, socketPath, readinessTimeoutMs }).then(() => {}));
+  return createCliHandlers({
+    ...handlerOptions,
+    approverToken,
+    connect: () => connectUdsTransport(socketPath),
+    ...(launchDaemon === undefined ? {} : { launchDaemon }),
+  });
 }
 
 export function createUdsAgentHandlers(options: Omit<UdsCliOptions, "role"> = {}): AgentHandlers {
   const socketPath = options.socketPath ?? defaultSocketPath;
-  return createAgentHandlers({ ...options, connect: () => connectUdsTransport(socketPath) });
+  const { daemonBinary: _daemonBinary, configPath: _configPath, readinessTimeoutMs: _readinessTimeoutMs, launchDaemon: _launchDaemon, socketPath: _socketPath, ...handlerOptions } = options;
+  return createAgentHandlers({ ...handlerOptions, connect: () => connectUdsTransport(socketPath) });
 }
 
 function jsonArgument(value: string | undefined, label: string): JsonObject {

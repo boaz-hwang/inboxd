@@ -9,7 +9,7 @@ mod worker;
 pub use capability::TrustedBinding;
 #[cfg(feature = "test-worker")]
 pub use worker::TestWorkerConfig;
-pub use worker::{WorkerError, WorkerSupervisor};
+pub use worker::{ProductionWorkerConfig, WorkerError, WorkerSupervisor};
 
 use inboxd_storage::{StorageActor, StorageActorConfig};
 use serde_json::{Value, json};
@@ -160,6 +160,7 @@ pub struct Daemon {
     server: Option<JoinHandle<Arc<ServerOwner>>>,
     events: Arc<EventHub>,
     capabilities: Arc<CapabilityRegistry>,
+    #[cfg(feature = "test-worker")]
     connection_tasks: Arc<AtomicUsize>,
 }
 
@@ -293,6 +294,7 @@ pub async fn launch(config: DaemonConfig) -> Result<Daemon> {
         server: Some(server),
         events,
         capabilities,
+        #[cfg(feature = "test-worker")]
         connection_tasks,
     })
 }

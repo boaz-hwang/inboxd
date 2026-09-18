@@ -1,9 +1,20 @@
 import { expect, test } from "bun:test";
 import { createInitialState, createTuiController, renderScreen } from "../src/index.ts";
-import type { JsonObject } from "../../protocol/src/schema.ts";
+import type { JsonObject, ResourceCapabilityV1 } from "../../protocol/src/schema.ts";
 
 const slack = { platform: "slack", account: "work:one", chat_id: "ops:one" };
 const empty = { ...slack, chat_id: "uncollected" };
+
+function capability(send: boolean): ResourceCapabilityV1 {
+  return {
+    v: 1,
+    resource: { v: 1, kind: "chat", ...slack },
+    read: { mode: "bounded_history", limits: { max_page_size: 100, max_pages: 1, cursor: "opaque" } },
+    write: send ? { mode: "send", content_mode: "text", reply: true } : { mode: "none", content_mode: "none", reply: false },
+    receipt: { level: send ? "independent_readback" : "none" },
+    auth: { state: "authenticated", reason: null, observed_at: 1_726_650_000 },
+  };
+}
 
 test.each(["Uncertain", "Sent", "Verified", "Sending"])("never approves or retries %s even with a supplied code after reconnect", async state => {
   const calls: string[] = [];
@@ -181,13 +192,13 @@ test.each([false, true])("rejected approval exits Sending without replay even if
   controller.stop();
 });
 
-test.each([undefined, false, true])("compose requires observed daemon send capability (%s), not Slack name", async (send) => {
+test.each([undefined, false, true])("compose requires an authenticated exact-resource send capability (%s)", async (send) => {
   let proposals = 0;
   const controller = createTuiController({ client: {
     start: async () => {}, stop: () => {},
     request: async method => {
       if (method === "safety.intent.claimApprovalCode") return { code: "123456" };
-      if (method === "system.status") return send === undefined ? {} : { send_capable: send };
+      if (method === "capability.list") return { v: 1, resources: send === undefined ? [] : [capability(send)] };
       if (method === "safety.intent.create") { proposals++; throw new Error("server policy denied"); }
       return {};
     },
@@ -200,7 +211,7 @@ test.each([undefined, false, true])("compose requires observed daemon send capab
     expect(controller.state.notice).toContain("server policy denied");
     expect(proposals).toBe(1);
   } else {
-    expect(controller.state.notice).toContain("send capability");
+    expect(controller.state.notice).toContain(send === false ? "read-only" : "capability");
     expect(proposals).toBe(0);
   }
   controller.stop();
@@ -273,7 +284,7 @@ test("Inbox discovers explicit chats before recent retrieval and preserves its o
   expect(first!.params.chats).toEqual([slack, empty]);
   const interval = first!.params.interval as { from_ts: number; to_ts: number };
   expect(interval.to_ts).toBeGreaterThan(interval.from_ts);
-  expect(calls.slice(0, 3).map(call => call.method)).toEqual(["chat.list", "chat.list", "message.recent"]);
+  expect(calls.slice(0, 4).map(call => call.method)).toEqual(["capability.list", "chat.list", "chat.list", "message.recent"]);
   expect(controller.state.views.inbox.data.find(row => row.id === "first")).toMatchObject({ chat: slack, body: "recent body", edited: false, deleted: false });
   expect(controller.state.views.inbox.nextCursor).toBe("aggregate:opaque+/=");
   await Promise.all([controller.dispatchKey("n"), controller.dispatchKey("n")]);
@@ -380,7 +391,7 @@ test("Inbox retains per-chat coverage and sourced unread evidence including conf
     expect(renderScreen(controller.state, size)).toContain("Unread: 0 (platform)");
   }
   await controller.dispatchKey("j");
-  await controller.dispatchKey("Enter");
+  await controller.dispatchKey("d");
   for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
     const text = renderScreen(controller.state, size);
     expect(text).toContain("Unread: ? (unknown)");
