@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod capability;
+mod coordinator;
 mod server;
 mod worker;
 
@@ -216,7 +217,9 @@ pub async fn launch(config: DaemonConfig) -> Result<Daemon> {
     let state_lock = acquire_state_lock(&config.state_dir)?;
     remove_stale_socket(&config.socket_path).await?;
     let approver_token = Arc::new(ensure_approver_token(&config.state_dir)?);
-    let actor_config = StorageActorConfig::new(&config.database_path, config.database_key.to_vec());
+    let policy_capabilities = Arc::clone(&capabilities);
+    let actor_config = StorageActorConfig::new(&config.database_path, config.database_key.to_vec())
+        .with_send_policy(move |intent| policy_capabilities.allows_send(intent));
     let actor = StorageActor::start(actor_config)
         .map_err(|error| DaemonError::new(format!("{}: {}", error.name, error.message)))?;
     let actor = Arc::new(actor);

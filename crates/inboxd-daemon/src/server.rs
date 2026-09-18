@@ -21,7 +21,7 @@ use tokio::{
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::{CapabilityRegistry, DaemonError, Result};
+use crate::{CapabilityRegistry, DaemonError, Result, coordinator};
 
 const DEFAULT_INTERVAL_END: u64 = 9_007_199_254_740_991;
 const APPROVAL_TTL_MS: u64 = 15 * 60 * 1_000;
@@ -655,7 +655,14 @@ async fn dispatch(
                 false,
             )?;
             publish_safety(events, actor, &intent_id);
-            Ok(approved)
+            if !capabilities.has_workers() {
+                return Ok(approved);
+            }
+            let outcome = coordinator::execute(actor, capabilities, &intent_id, approved)
+                .await
+                .map_err(|error| RpcError::unsupported(error.message))?;
+            publish_safety(events, actor, &intent_id);
+            Ok(outcome)
         }
         "safety.intent.reject" => {
             assert_trusted_approver(session)?;

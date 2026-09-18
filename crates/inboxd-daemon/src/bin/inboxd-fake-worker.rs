@@ -53,14 +53,14 @@ fn state_path() -> Option<String> {
     env::var("INBOXD_FAKE_WORKER_STATE").ok()
 }
 
-fn record_call() {
+fn record_call(operation: &str) {
     if let Some(path) = state_path() {
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
             .unwrap();
-        writeln!(file, "send").unwrap();
+        writeln!(file, "{operation}").unwrap();
         file.flush().unwrap();
     }
 }
@@ -75,6 +75,7 @@ fn main() {
         Ok(request) => request,
         Err(_) => return,
     };
+    let operation = request["operation"]["op"].as_str().unwrap_or_default();
     if scenario == "crash_once" {
         let path = state_path().expect("crash_once requires state path");
         if !std::path::Path::new(&path).exists() {
@@ -85,9 +86,13 @@ fn main() {
     if scenario == "eof" {
         return;
     }
-    if matches!(scenario.as_str(), "timeout" | "send_timeout") {
-        if scenario == "send_timeout" {
-            record_call();
+    if scenario == "send_eof" && operation == "send" {
+        record_call(operation);
+        return;
+    }
+    if scenario == "timeout" || (scenario == "send_timeout" && operation == "send") {
+        if operation == "send" {
+            record_call(operation);
         }
         thread::sleep(Duration::from_secs(2));
         return;
@@ -111,17 +116,46 @@ fn main() {
         return;
     }
 
-    let mut value = match scenario.as_str() {
-        "fragmented_health" => response(
-            &request,
-            json!({
-                "state":"degraded",
-                "auth":{"state":"unknown","reason":"로그인🙂","observed_at":1726650002}
-            }),
-        ),
-        "read_ok" => read_page(&request, false),
-        "read_scope_mismatch" => read_page(&request, true),
-        _ => health(&request),
+    let mut value = if operation == "send" {
+        record_call(operation);
+        match scenario.as_str() {
+            "send_failed" => response(
+                &request,
+                json!({"outcome":"failed","reason":"definite_rejection"}),
+            ),
+            "send_uncertain" => response(
+                &request,
+                json!({"outcome":"uncertain","reason":"remote_outcome_unknown"}),
+            ),
+            _ => response(&request, json!({"outcome":"sent","receipt_id":"receipt-1"})),
+        }
+    } else if operation == "read_receipt" {
+        record_call(operation);
+        let mut evidence = json!({
+            "receipt_id":request["operation"]["receipt_id"],
+            "destination":request["operation"]["expected"]["destination"],
+            "content":request["operation"]["expected"]["content"],
+        });
+        if let Some(reply) = request["operation"]["expected"].get("reply") {
+            evidence["reply"] = reply.clone();
+        }
+        if scenario == "send_sent_mismatch" {
+            evidence["content"]["body"] = json!("different body");
+        }
+        response(&request, json!({"outcome":"verified","evidence":evidence}))
+    } else {
+        match scenario.as_str() {
+            "fragmented_health" => response(
+                &request,
+                json!({
+                    "state":"degraded",
+                    "auth":{"state":"unknown","reason":"로그인🙂","observed_at":1726650002}
+                }),
+            ),
+            "read_ok" => read_page(&request, false),
+            "read_scope_mismatch" => read_page(&request, true),
+            _ => health(&request),
+        }
     };
     match scenario.as_str() {
         "wrong_request_id" => value["request_id"] = json!("wrong"),

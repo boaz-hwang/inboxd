@@ -412,10 +412,7 @@ async fn subscriptions_replace_topics_and_terminal_overflow_closes_the_connectio
 #[tokio::test]
 async fn capability_registry_refreshes_exact_resources_notifies_and_revokes() {
     fn fake_worker() -> PathBuf {
-        PathBuf::from(
-            option_env!("CARGO_BIN_EXE_inboxd-fake-worker")
-                .expect("cargo did not expose the fake worker binary"),
-        )
+        PathBuf::from(env!("CARGO_BIN_EXE_inboxd-fake-worker"))
     }
     fn binding(id: &str, chat_id: &str, scenario: &str, writable: bool) -> TrustedBinding {
         TrustedBinding::for_test(

@@ -5,10 +5,7 @@ use serde_json::{Value, json};
 use std::{path::PathBuf, time::Duration};
 
 fn fake_worker() -> PathBuf {
-    PathBuf::from(
-        option_env!("CARGO_BIN_EXE_inboxd-fake-worker")
-            .expect("cargo did not expose the fake worker binary"),
-    )
+    PathBuf::from(env!("CARGO_BIN_EXE_inboxd-fake-worker"))
 }
 
 fn supervisor(scenario: &str) -> WorkerSupervisor {

@@ -146,6 +146,24 @@ impl CapabilityRegistry {
         self.entries.write().unwrap().remove(id).is_some()
     }
 
+    pub(crate) fn has_workers(&self) -> bool {
+        self.entries
+            .read()
+            .unwrap()
+            .values()
+            .any(|entry| entry.worker.is_some())
+    }
+
+    pub(crate) fn exact_for_intent(&self, intent: &Value) -> Option<BindingAccess> {
+        self.exact(&intent_resource(intent)?)
+    }
+
+    pub(crate) fn allows_send(&self, intent: &Value) -> bool {
+        self.exact_for_intent(intent).is_some_and(|binding| {
+            binding.worker.is_some() && binding.claims["write"]["mode"] == "send"
+        })
+    }
+
     pub(crate) fn exact(&self, resource: &Value) -> Option<BindingAccess> {
         let key = resource_key(resource).ok()?;
         self.entries
@@ -159,6 +177,20 @@ impl CapabilityRegistry {
                 worker: entry.worker.clone(),
             })
     }
+}
+
+fn intent_resource(intent: &Value) -> Option<Value> {
+    if let Some(destination) = intent.pointer("/envelope/destination") {
+        return Some(destination.clone());
+    }
+    let scope = intent.get("scope")?;
+    Some(json!({
+        "v":1,
+        "kind":"chat",
+        "platform":scope.get("platform")?,
+        "account":scope.get("account")?,
+        "chat_id":scope.get("chat_id")?,
+    }))
 }
 
 fn unknown_auth(reason: &str) -> Value {
