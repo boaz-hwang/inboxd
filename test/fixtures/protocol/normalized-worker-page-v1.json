@@ -1,0 +1,47 @@
+{
+  "v": 1,
+  "mode": "bounded_history",
+  "chat": { "v": 1, "kind": "chat", "platform": "slack", "account": "work", "chat_id": "C0123" },
+  "interval": { "from_ts": 1726650000, "to_ts": 1726653600 },
+  "messages": [
+    {
+      "kind": "create",
+      "revision": { "source": "adapter", "value": 1 },
+      "message": {
+        "key": { "platform": "slack", "account": "work", "chat_id": "C0123", "msg_id": "m1" },
+        "author_id": "U1",
+        "ts": 1726650001.25,
+        "body": "hello",
+        "attachments": []
+      }
+    }
+  ],
+  "tombstones": [],
+  "identity": {
+    "chat": { "platform": "slack", "account": "work", "chat_id": "C0123" },
+    "status": "known",
+    "self_id": "U-self",
+    "source": "authenticated_adapter",
+    "observed_at": 1726650002
+  },
+  "unread": {
+    "chat": { "platform": "slack", "account": "work", "chat_id": "C0123" },
+    "status": "known",
+    "source": "platform",
+    "count": 1,
+    "observed_at": 1726650002
+  },
+  "coverage": [
+    {
+      "chat": { "platform": "slack", "account": "work", "chat_id": "C0123" },
+      "interval": { "from_ts": 1726650000, "to_ts": 1726653600 },
+      "kind": "backfill",
+      "collected_at": 1726650002,
+      "mutations_verified_at": 1726650002
+    }
+  ],
+  "limits": [],
+  "next_cursor": "opaque_1",
+  "authoritative": true,
+  "observed_at": 1726650002
+}
