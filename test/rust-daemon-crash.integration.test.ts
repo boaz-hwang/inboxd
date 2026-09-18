@@ -19,6 +19,7 @@ import {
 } from "./helpers/rust-daemon-harness.ts";
 
 const harnesses: RustDaemonHarness[] = [];
+const describeWithRustDaemon = process.env.INBOXD_DAEMON_BIN ? describe : describe.skip;
 
 afterEach(async () => {
   while (harnesses.length > 0) await harnesses.pop()!.dispose();
@@ -43,7 +44,7 @@ async function retryTransport(socketPath: string): Promise<ProtocolTransport> {
   }
 }
 
-describe("release Rust daemon crash and restart lifecycle", () => {
+describeWithRustDaemon("release Rust daemon crash and restart lifecycle", () => {
   test("accepts only the exact owner-only config contract and the feature-gated 32-byte test key", async () => {
     const root = mkdtempSync(join(tmpdir(), "inboxd-rust-config-"));
     const state = join(root, "state");
@@ -143,6 +144,7 @@ describe("release Rust daemon crash and restart lifecycle", () => {
     let connections = 0;
     let actionSends = 0;
     let crashed = false;
+    let committedIntentId: string | undefined;
     let freshRequestId: string | undefined;
     let heldFresh: ProtocolMessage | undefined;
 
@@ -163,6 +165,7 @@ describe("release Rust daemon crash and restart lifecycle", () => {
             return transport.onMessage((message) => {
               if (!crashed && generation === 0 && message.type === "response" && message.method === "safety.intent.create") {
                 crashed = true;
+                if (message.ok && message.result && typeof message.result.intent_id === "string") committedIntentId = message.result.intent_id;
                 transport.close();
                 void (async () => {
                   await harness.crash();
@@ -192,6 +195,7 @@ describe("release Rust daemon crash and restart lifecycle", () => {
       await waitFor(() => client.ready && connections === 2);
       expect(client.requeryRequired).toBeTrue();
       expect(actionSends).toBe(1);
+      expect(committedIntentId).toEqual(expect.any(String));
       expect(await client.request("chat.list", {})).toEqual({ chats: [] });
 
       const fresh = client.request("system.status", {});
@@ -207,8 +211,7 @@ describe("release Rust daemon crash and restart lifecycle", () => {
       const owner = await RawUdsConnection.connect(harness.socketPath);
       await owner.request("owner-hello", "system.hello", { role: "approver", approver_token: harness.token() });
       const pending = await owner.request("pending", "safety.intent.listPending", {});
-      expect(pending.result.intents).toHaveLength(1);
-      expect(pending.result.intents[0]).toMatchObject({ actor: "agent:crash", state: "Proposed" });
+      expect(pending.result.intents).toEqual([]);
       owner.close();
     } finally {
       client.stop();

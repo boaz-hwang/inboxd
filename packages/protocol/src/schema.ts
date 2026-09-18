@@ -1,4 +1,4 @@
-export const REQUEST_METHODS = [
+export const LEGACY_REQUEST_METHODS = [
   "system.hello",
   "system.ping",
   "system.status",
@@ -22,11 +22,15 @@ export const REQUEST_METHODS = [
   "subscribe",
 ] as const;
 
-export const EVENT_METHODS = [
+export const REQUEST_METHODS = [...LEGACY_REQUEST_METHODS, "capability.list"] as const;
+
+export const LEGACY_EVENT_METHODS = [
   "message.upserted",
   "coverage.changed",
   "safety.intent.changed",
 ] as const;
+
+export const EVENT_METHODS = [...LEGACY_EVENT_METHODS, "capability.changed"] as const;
 
 /** Frozen host boundary implemented by both Bun and Rust compatibility hosts. */
 export const HOST_OPERATIONS = [
@@ -1012,7 +1016,10 @@ export function parseResponse(value: unknown, role?: ClientRole): ProtocolRespon
   const ok = frame.ok;
   if (typeof ok !== "boolean") throw new ProtocolSchemaError("response ok must be boolean");
   const result = frame.result === undefined ? undefined : object(frame.result, "response result");
-  if (containsApprovalCode(result) && (role !== "approver" || method !== "safety.intent.claimApprovalCode")) {
+  if (
+    containsApprovalCode(result)
+    && (method !== "safety.intent.claimApprovalCode" || (role !== undefined && role !== "approver"))
+  ) {
     throw new ProtocolSchemaError("approval code requires the dedicated approver claim response");
   }
   const error = frame.error === undefined ? undefined : object(frame.error, "response error");

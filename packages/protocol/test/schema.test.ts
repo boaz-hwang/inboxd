@@ -4,6 +4,8 @@ import {
   createHandshake,
   EVENT_METHODS,
   HOST_OPERATIONS,
+  LEGACY_EVENT_METHODS,
+  LEGACY_REQUEST_METHODS,
   normalizeSendEnvelope,
   parseEvent,
   parseRequest,
@@ -37,6 +39,7 @@ describe("protocol schemas", () => {
     for (const role of ["reader", "agent", "mcp"] as const) {
       expect(() => parseRequest({ type: "request", id: "x", method: "safety.intent.claimApprovalCode", params: { intent_id: "i" } }, role)).toThrow(/approver/i);
     }
+    expect(parseResponse({ type: "response", id: "x", method: "safety.intent.claimApprovalCode", ok: true, result: { code: "123456" } }).result).toEqual({ code: "123456" });
     expect(parseResponse({ type: "response", id: "x", method: "safety.intent.claimApprovalCode", ok: true, result: { code: "123456" } }, "approver").result).toEqual({ code: "123456" });
   });
   test("aggregate reads require explicit bounded scope and reject caller ingestion fields", () => {
@@ -70,7 +73,7 @@ describe("protocol schemas", () => {
       "system.ping", "system.status", "chat.list", "message.inbox", "message.get",
       "message.search", "sync.status", "sync.backfill", "auth.status",
       "safety.intent.create", "safety.intent.listPending", "safety.intent.approve",
-      "safety.intent.reject", "send.status", "settings.get", "settings.update",
+      "safety.intent.reject", "send.status", "settings.get", "settings.update", "capability.list",
     ] as const;
 
     for (const method of methods) {
@@ -172,8 +175,10 @@ describe("v1 wire golden bytes", () => {
   });
 
   test("pins every existing method and event including unsupported settings", () => {
-    expect(REQUEST_METHODS).toEqual(compat.request_methods);
-    expect(EVENT_METHODS).toEqual(compat.event_methods);
+    expect(LEGACY_REQUEST_METHODS).toEqual(compat.request_methods);
+    expect(LEGACY_EVENT_METHODS).toEqual(compat.event_methods);
+    expect([...REQUEST_METHODS]).toEqual([...compat.request_methods, "capability.list"]);
+    expect([...EVENT_METHODS]).toEqual([...compat.event_methods, "capability.changed"]);
     expect(compat.unsupported_methods).toEqual(["settings.get", "settings.update"]);
     for (const method of compat.unsupported_methods) expect(REQUEST_METHODS).toContain(method);
   });

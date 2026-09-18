@@ -190,6 +190,7 @@ dependencies = [
  "inboxd-protocol",
  "inboxd-storage",
  "libc",
+ "rustix",
  "serde",
  "serde_json",
  "subtle",

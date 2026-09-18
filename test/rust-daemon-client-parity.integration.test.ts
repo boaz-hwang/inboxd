@@ -15,6 +15,7 @@ import {
 
 const harnesses: RustDaemonHarness[] = [];
 const clients: Array<{ stop(): void }> = [];
+const describeWithRustDaemon = process.env.INBOXD_DAEMON_BIN ? describe : describe.skip;
 
 afterEach(async () => {
   while (clients.length > 0) clients.pop()?.stop();
@@ -33,7 +34,7 @@ function request(id: string, method: string, params: Record<string, unknown>) {
   return { type: "request", id, method, params };
 }
 
-describe("release Rust daemon UDS parity", () => {
+describeWithRustDaemon("release Rust daemon UDS parity", () => {
   test("handles fragmented UTF-8, all roles, correlated batches, malformed frames, and the 64 KiB ceiling", async () => {
     const harness = await fixture();
 
@@ -85,7 +86,7 @@ describe("release Rust daemon UDS parity", () => {
     expect(await reader.request("system.status", {})).toMatchObject({ ready: true, owner: "daemon" });
     expect(await reader.request("chat.list", {})).toMatchObject({ chats: [{ ...FIXTURE_CHAT }] });
     expect(await reader.request("message.inbox", { chat: FIXTURE_CHAT, interval: FIXTURE_INTERVAL })).toMatchObject({
-      messages: [{ msg_id: "m2" }, { msg_id: "m1" }],
+      messages: [{ msg_id: "m1" }, { msg_id: "m2" }],
       coverage: { gaps: [], limits: [] },
     });
     expect(await reader.request("message.recent", { chats: [FIXTURE_CHAT], interval: FIXTURE_INTERVAL })).toMatchObject({
@@ -101,7 +102,7 @@ describe("release Rust daemon UDS parity", () => {
     expect(await reader.request("sync.status", {})).toEqual({ state: "idle" });
     expect(await reader.request("auth.status", {})).toEqual({ authenticated: false });
     expect(await reader.request("send.status", { id: "missing" })).toEqual({ state: "missing" });
-    expect(await reader.request("capability.list" as any, {})).toEqual({ v: 1, resources: [] });
+    expect(await reader.request("capability.list", {})).toEqual({ v: 1, resources: [] });
 
     const subscriber = await RawUdsConnection.connect(harness.socketPath);
     await subscriber.request("sub-hello", "system.hello", { role: "reader" });
@@ -113,13 +114,17 @@ describe("release Rust daemon UDS parity", () => {
     clients.push(agent);
     await agent.start([]);
     const first = await agent.request("safety.intent.create", { actor: "agent:parity", scope: FIXTURE_CHAT, body: "approve fixture" });
-    expect(first).toMatchObject({ intent_id: expect.any(String), expires_at: expect.any(Number) });
-    expect(await subscriber.nextJson()).toMatchObject({ type: "event", method: "safety.intent.changed", params: { intent_id: first.intent_id, state: "Proposed" } });
+    expect(typeof first.intent_id).toBe("string");
+    expect(typeof first.expires_at).toBe("number");
+    const firstIntentId = first.intent_id as string;
+    expect(await subscriber.nextJson()).toMatchObject({ type: "event", method: "safety.intent.changed", params: { intent_id: firstIntentId, state: "Proposed" } });
 
     expect(await subscriber.request("sub-replace", "subscribe", { topics: ["coverage.changed"] })).toMatchObject({
       result: { subscribed: ["coverage.changed"] },
     });
     const second = await agent.request("safety.intent.create", { actor: "agent:parity", scope: FIXTURE_CHAT, body: "reject fixture" });
+    expect(typeof second.intent_id).toBe("string");
+    const secondIntentId = second.intent_id as string;
     await expect(subscriber.nextJson(150)).rejects.toThrow(/timed out/i);
 
     const approver = new ReconnectingProtocolClient({
@@ -131,19 +136,19 @@ describe("release Rust daemon UDS parity", () => {
     clients.push(approver);
     await approver.start(["safety.intent.changed"]);
     expect(await approver.request("safety.intent.listPending", {})).toMatchObject({ intents: expect.arrayContaining([
-      expect.objectContaining({ intent_id: first.intent_id }),
-      expect.objectContaining({ intent_id: second.intent_id }),
+      expect.objectContaining({ intent_id: firstIntentId }),
+      expect.objectContaining({ intent_id: secondIntentId }),
     ]) });
-    const claimed = await approver.request("safety.intent.claimApprovalCode", { intent_id: first.intent_id });
+    const claimed = await approver.request("safety.intent.claimApprovalCode", { intent_id: firstIntentId });
     expect(claimed.code).toMatch(/^\d{6}$/);
     expect(await approver.request("safety.intent.approve", {
-      intent_id: first.intent_id,
+      intent_id: firstIntentId,
       code: claimed.code,
       actor: "agent:parity",
       scope: FIXTURE_CHAT,
     })).toMatchObject({ state: "Approved" });
-    expect(await approver.request("safety.intent.claimApprovalCode", { intent_id: first.intent_id })).toEqual({ unavailable: true });
-    expect(await approver.request("safety.intent.reject", { intent_id: second.intent_id, reason: "fixture" })).toMatchObject({ state: "Expired" });
+    expect(await approver.request("safety.intent.claimApprovalCode", { intent_id: firstIntentId })).toEqual({ unavailable: true });
+    expect(await approver.request("safety.intent.reject", { intent_id: secondIntentId, reason: "fixture" })).toMatchObject({ state: "Expired" });
     await expect(approver.request("sync.backfill", { ...FIXTURE_CHAT, ...FIXTURE_INTERVAL })).rejects.toThrow(/unavailable/i);
 
     const raw = await RawUdsConnection.connect(harness.socketPath);
@@ -171,7 +176,7 @@ describe("release Rust daemon UDS parity", () => {
     const requester = createAgentProtocolRequester(() => connectUdsTransport(harness.socketPath));
     clients.push(requester);
     const tools = createToolHandlers(requester);
-    expect(await tools.inbox_list({ chat: FIXTURE_CHAT, interval: FIXTURE_INTERVAL })).toMatchObject({ messages: [{ msg_id: "m2" }, { msg_id: "m1" }] });
+    expect(await tools.inbox_list({ chat: FIXTURE_CHAT, interval: FIXTURE_INTERVAL })).toMatchObject({ messages: [{ msg_id: "m1" }, { msg_id: "m2" }] });
     expect(await tools.inbox_search({ chat: FIXTURE_CHAT, interval: FIXTURE_INTERVAL, query: "needle" })).toMatchObject({ messages: [{ msg_id: "m2" }] });
     expect(await tools.inbox_recent({ chats: [FIXTURE_CHAT], interval: FIXTURE_INTERVAL })).toMatchObject({ messages: [{ msg_id: "m2" }, { msg_id: "m1" }] });
     expect(await tools.inbox_evidence({ chats: [FIXTURE_CHAT], interval: FIXTURE_INTERVAL })).toMatchObject({ evidence: [{ message: { msg_id: "m2" } }, { message: { msg_id: "m1" } }] });

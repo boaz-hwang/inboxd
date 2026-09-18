@@ -1,5 +1,4 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createConnection, type Socket } from "node:net";
 
@@ -103,7 +102,7 @@ async function exitWithin(child: DaemonProcess, milliseconds: number): Promise<n
 }
 
 export class RustDaemonHarness {
-  readonly root = mkdtempSync(join(tmpdir(), "inboxd-rust-daemon-"));
+  readonly root = mkdtempSync("/private/tmp/inboxd-rd-");
   readonly stateDir = join(this.root, "state");
   readonly databasePath = join(this.stateDir, "inboxd.db");
   readonly socketPath = join(this.stateDir, "sock");
@@ -152,6 +151,10 @@ export class RustDaemonHarness {
       if (!process) throw new Error("Rust daemon fixture has no process");
       if (process.child.exitCode !== null) {
         throw new Error(`Rust daemon exited ${process.child.exitCode}: ${(await process.stderr).trim()}`);
+      }
+      if (!existsSync(this.socketPath)) {
+        await Bun.sleep(10);
+        continue;
       }
       try {
         const transport = await connectUdsTransport(this.socketPath);

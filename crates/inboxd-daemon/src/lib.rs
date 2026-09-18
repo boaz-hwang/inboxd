@@ -18,7 +18,7 @@ use std::{
     fmt,
     fs::{self, OpenOptions},
     io::Write,
-    os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Command,
     sync::Arc,
@@ -265,6 +265,11 @@ fn prepare_private_directory(path: &Path) -> Result<()> {
             "daemon state directory must be a real directory",
         ));
     }
+    if metadata.uid() != rustix::process::geteuid().as_raw() {
+        return Err(DaemonError::new(
+            "daemon state directory must be owned by the current user",
+        ));
+    }
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
         .map_err(|error| DaemonError::new(format!("unable to secure state directory: {error}")))?;
     Ok(())
@@ -296,6 +301,17 @@ fn acquire_state_lock(directory: &Path) -> Result<StateLock> {
                 return Ok(StateLock { path });
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let metadata = fs::symlink_metadata(&path)
+                    .map_err(|_| DaemonError::new("unable to inspect existing daemon lock"))?;
+                if metadata.file_type().is_symlink()
+                    || !metadata.is_file()
+                    || metadata.permissions().mode() & 0o777 != 0o600
+                    || metadata.uid() != rustix::process::geteuid().as_raw()
+                {
+                    return Err(DaemonError::new(
+                        "daemon lock is not an owner-only regular file",
+                    ));
+                }
                 if lock_owner_alive(&path) {
                     return Err(DaemonError::new(
                         "another inboxd daemon already owns this state directory",
@@ -395,6 +411,7 @@ fn ensure_approver_token(directory: &Path) -> Result<Zeroizing<String>> {
     if metadata.file_type().is_symlink()
         || !metadata.is_file()
         || metadata.permissions().mode() & 0o777 != 0o600
+        || metadata.uid() != rustix::process::geteuid().as_raw()
     {
         return Err(DaemonError::new(
             "local approver token is not an owner-only regular file",

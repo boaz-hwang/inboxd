@@ -7,6 +7,7 @@ license.workspace = true
 
 [features]
 default = []
+test-key-provider = []
 test-worker = []
 
 [dependencies]
@@ -14,6 +15,7 @@ getrandom.workspace = true
 inboxd-protocol = { path = "../inboxd-protocol" }
 inboxd-storage = { path = "../inboxd-storage" }
 libc.workspace = true
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 subtle.workspace = true
