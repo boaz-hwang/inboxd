@@ -1,0 +1,116 @@
+{
+  "schema_version": "inboxd-worker-contract/v1",
+  "requests": {
+    "read_page": {
+      "v": 1,
+      "type": "worker_request",
+      "request_id": "req-read-1",
+      "generation": 7,
+      "binding_id": "slack-work",
+      "limits": { "timeout_ms": 30000, "max_response_bytes": 1048576, "max_queue_depth": 8 },
+      "operation": {
+        "op": "read_page",
+        "chat": { "v": 1, "kind": "chat", "platform": "slack", "account": "work", "chat_id": "C0123" },
+        "interval": { "from_ts": 1726650000, "to_ts": 1726653600 },
+        "limit": 100,
+        "cursor": null
+      }
+    },
+    "send": {
+      "v": 1,
+      "type": "worker_request",
+      "request_id": "req-send-1",
+      "generation": 7,
+      "binding_id": "slack-work",
+      "limits": { "timeout_ms": 30000, "max_response_bytes": 65536, "max_queue_depth": 8 },
+      "operation": {
+        "op": "send",
+        "envelope": {
+          "v": 2,
+          "destination": { "v": 1, "kind": "chat", "platform": "slack", "account": "work", "chat_id": "C0123" },
+          "content": { "mode": "text", "body": "deploy" },
+          "reply": { "parent_id": "1700000000.000001" }
+        },
+        "idempotency_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    "read_receipt": {
+      "v": 1,
+      "type": "worker_request",
+      "request_id": "req-receipt-1",
+      "generation": 7,
+      "binding_id": "slack-work",
+      "limits": { "timeout_ms": 30000, "max_response_bytes": 65536, "max_queue_depth": 8 },
+      "operation": {
+        "op": "read_receipt",
+        "destination": { "v": 1, "kind": "chat", "platform": "slack", "account": "work", "chat_id": "C0123" },
+        "receipt_id": "1700000001.000002",
+        "expected": {
+          "v": 2,
+          "destination": { "v": 1, "kind": "chat", "platform": "slack", "account": "work", "chat_id": "C0123" },
+          "content": { "mode": "text", "body": "deploy" },
+          "reply": { "parent_id": "1700000000.000001" }
+        }
+      }
+    },
+    "health": {
+      "v": 1,
+      "type": "worker_request",
+      "request_id": "req-health-1",
+      "generation": 7,
+      "binding_id": "slack-work",
+      "limits": { "timeout_ms": 5000, "max_response_bytes": 16384, "max_queue_depth": 8 },
+      "operation": { "op": "health" }
+    }
+  },
+  "responses": {
+    "read_page": {
+      "v": 1,
+      "type": "worker_response",
+      "request_id": "req-read-1",
+      "generation": 7,
+      "operation": "read_page",
+      "ok": true,
+      "result": {
+        "items": [{ "msg_id": "m1", "author_id": "U1", "ts": 1726650001.25, "body": "hello" }],
+        "next_cursor": "opaque_1",
+        "authoritative": true
+      }
+    },
+    "send": {
+      "v": 1,
+      "type": "worker_response",
+      "request_id": "req-send-1",
+      "generation": 7,
+      "operation": "send",
+      "ok": true,
+      "result": { "outcome": "sent", "receipt_id": "1700000001.000002" }
+    },
+    "read_receipt": {
+      "v": 1,
+      "type": "worker_response",
+      "request_id": "req-receipt-1",
+      "generation": 7,
+      "operation": "read_receipt",
+      "ok": true,
+      "result": {
+        "outcome": "verified",
+        "evidence": {
+          "destination": { "v": 1, "kind": "chat", "platform": "slack", "account": "work", "chat_id": "C0123" },
+          "receipt_id": "1700000001.000002",
+          "content": { "mode": "text", "body": "deploy" },
+          "reply": { "parent_id": "1700000000.000001" }
+        }
+      }
+    },
+    "health": {
+      "v": 1,
+      "type": "worker_response",
+      "request_id": "req-health-1",
+      "generation": 7,
+      "operation": "health",
+      "ok": true,
+      "result": { "state": "ready", "auth": { "state": "authenticated", "reason": null, "observed_at": 1726650002 } }
+    }
+  }
+}

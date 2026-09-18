@@ -1,0 +1,134 @@
+{
+  "schema_version": "inboxd-protocol-compat/v1",
+  "request_methods": [
+    "system.hello",
+    "system.ping",
+    "system.status",
+    "chat.list",
+    "message.inbox",
+    "message.recent",
+    "message.evidence",
+    "message.get",
+    "message.search",
+    "sync.status",
+    "sync.backfill",
+    "auth.status",
+    "safety.intent.create",
+    "safety.intent.listPending",
+    "safety.intent.claimApprovalCode",
+    "safety.intent.approve",
+    "safety.intent.reject",
+    "send.status",
+    "settings.get",
+    "settings.update",
+    "subscribe"
+  ],
+  "event_methods": [
+    "message.upserted",
+    "coverage.changed",
+    "safety.intent.changed"
+  ],
+  "unsupported_methods": [
+    "settings.get",
+    "settings.update"
+  ],
+  "host_operations": [
+    "host.now",
+    "host.id",
+    "host.approvalCode",
+    "host.allowSend",
+    "host.canonicalSha256",
+    "host.canonicalJson",
+    "host.sha256Text",
+    "host.jsonStringify",
+    "host.jsonParse",
+    "host.numberToString",
+    "host.utf16Compare",
+    "host.codePointLength",
+    "host.base64urlEncode",
+    "host.base64urlDecode",
+    "sql.run",
+    "sql.get",
+    "sql.all",
+    "sql.exec",
+    "sql.transaction.begin",
+    "sql.transaction.commit",
+    "sql.transaction.rollback"
+  ],
+  "time_units": {
+    "host_now": "milliseconds",
+    "safety_deadline": "milliseconds",
+    "adapter_timestamp": "seconds",
+    "adapter_retry_at": "seconds",
+    "worker_timeout": "milliseconds"
+  },
+  "legacy_slack": {
+    "actor": "agent:fixture",
+    "input": {
+      "scope": {
+        "platform": "slack",
+        "account": "work",
+        "chat_id": "C0123"
+      },
+      "body": "Deploy \ud83d\ude00 \ud800 \ue000",
+      "parent_id": "1700000000.000001"
+    },
+    "normalized": {
+      "envelope": {
+        "v": 2,
+        "destination": {
+          "v": 1,
+          "kind": "chat",
+          "platform": "slack",
+          "account": "work",
+          "chat_id": "C0123"
+        },
+        "content": {
+          "mode": "text",
+          "body": "Deploy \ud83d\ude00 \ud800 \ue000"
+        },
+        "reply": {
+          "parent_id": "1700000000.000001"
+        }
+      },
+      "approval": {
+        "v": 1,
+        "payload": {
+          "scope": {
+            "platform": "slack",
+            "account": "work",
+            "chat_id": "C0123"
+          },
+          "body": "Deploy \ud83d\ude00 \ud800 \ue000",
+          "parent_id": "1700000000.000001"
+        }
+      }
+    },
+    "approval_payload": {
+      "actor": "agent:fixture",
+      "scope": {
+        "platform": "slack",
+        "account": "work",
+        "chat_id": "C0123"
+      },
+      "body": "Deploy \ud83d\ude00 \ud800 \ue000",
+      "parent_id": "1700000000.000001"
+    },
+    "approval_payload_json": "{\"actor\":\"agent:fixture\",\"scope\":{\"platform\":\"slack\",\"account\":\"work\",\"chat_id\":\"C0123\"},\"body\":\"Deploy \ud83d\ude00 \\ud800 \ue000\",\"parent_id\":\"1700000000.000001\"}",
+    "approval_payload_canonical": "{\"actor\":\"agent:fixture\",\"body\":\"Deploy \ud83d\ude00 \\ud800 \ue000\",\"parent_id\":\"1700000000.000001\",\"scope\":{\"account\":\"work\",\"chat_id\":\"C0123\",\"platform\":\"slack\"}}",
+    "payload_hash": "0a27697c7e6330232ca1f4862992c90bd28e49e0bba796149f032a8b22daba64",
+    "bound_hash_input_canonical": "{\"actor\":\"agent:fixture\",\"expires_at\":901234.75,\"intent_id\":\"intent-\ud83d\ude00\",\"payload_hash\":\"0a27697c7e6330232ca1f4862992c90bd28e49e0bba796149f032a8b22daba64\",\"scope\":{\"account\":\"work\",\"chat_id\":\"C0123\",\"platform\":\"slack\"}}",
+    "bound_hash": "92a5e7e078e95f6ee981ec3bc882ecf5930ed2e64bc653024a0de482c5b25736",
+    "idempotency_input_canonical": "{\"expires_at\":901234.75,\"intent_id\":\"intent-\ud83d\ude00\",\"payload_hash\":\"0a27697c7e6330232ca1f4862992c90bd28e49e0bba796149f032a8b22daba64\",\"scope\":{\"account\":\"work\",\"chat_id\":\"C0123\",\"platform\":\"slack\"}}",
+    "idempotency_key": "94f4dfcdcb74985289224fe2211825e0d523e3a516e50b3ea28f64e4d68ea4b3",
+    "quota_scope_bytes": "{\"account\":\"work\",\"chat_id\":\"C0123\",\"platform\":\"slack\"}"
+  },
+  "wire_bytes": {
+    "number_json": "[0,1e+21,1e-7,0.000001,333333333.3333333]",
+    "utf16_json": "{\"lone\":\"\\ud800\",\"pua\":\"\ue000\",\"emoji\":\"\ud83d\ude00\"}",
+    "absent_json": "{\"body\":\"x\"}",
+    "null_json": "{\"body\":\"x\",\"parent_id\":null}",
+    "cursor_json": "{\"v\":1,\"scope\":\"safety.intent.listPending:v1\",\"created_at\":1000,\"id\":\"a\udb80\udc00\"}",
+    "cursor_base64url": "eyJ2IjoxLCJzY29wZSI6InNhZmV0eS5pbnRlbnQubGlzdFBlbmRpbmc6djEiLCJjcmVhdGVkX2F0IjoxMDAwLCJpZCI6ImHzsICAIn0"
+  }
+}
