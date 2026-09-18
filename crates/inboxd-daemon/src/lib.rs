@@ -1,7 +1,14 @@
 //! Rust-owned inboxd daemon and UDS lifecycle.
 #![forbid(unsafe_code)]
 
+mod capability;
 mod server;
+mod worker;
+
+pub use capability::TrustedBinding;
+#[cfg(feature = "test-worker")]
+pub use worker::TestWorkerConfig;
+pub use worker::{WorkerError, WorkerSupervisor};
 
 use inboxd_storage::{StorageActor, StorageActorConfig};
 use serde_json::{Value, json};
@@ -22,6 +29,7 @@ use tokio::{
 };
 use zeroize::Zeroizing;
 
+use capability::CapabilityRegistry;
 use server::{EventHub, run_server};
 
 const DEFAULT_MAX_QUEUED_EVENTS: usize = 256;
@@ -52,6 +60,7 @@ pub struct DaemonConfig {
     pub socket_path: PathBuf,
     database_key: Zeroizing<Vec<u8>>,
     max_queued_events: usize,
+    bindings: Vec<TrustedBinding>,
 }
 
 impl fmt::Debug for DaemonConfig {
@@ -63,6 +72,7 @@ impl fmt::Debug for DaemonConfig {
             .field("socket_path", &self.socket_path)
             .field("database_key", &"<redacted>")
             .field("max_queued_events", &self.max_queued_events)
+            .field("bindings", &self.bindings.len())
             .finish()
     }
 }
@@ -75,6 +85,7 @@ impl Clone for DaemonConfig {
             socket_path: self.socket_path.clone(),
             database_key: Zeroizing::new(self.database_key.to_vec()),
             max_queued_events: self.max_queued_events,
+            bindings: self.bindings.clone(),
         }
     }
 }
@@ -92,11 +103,17 @@ impl DaemonConfig {
             socket_path: socket_path.as_ref().to_owned(),
             database_key: Zeroizing::new(database_key.into()),
             max_queued_events: DEFAULT_MAX_QUEUED_EVENTS,
+            bindings: Vec::new(),
         }
     }
 
     pub fn with_max_queued_events(mut self, maximum: usize) -> Self {
         self.max_queued_events = maximum;
+        self
+    }
+
+    pub fn with_bindings(mut self, bindings: Vec<TrustedBinding>) -> Self {
+        self.bindings = bindings;
         self
     }
 
@@ -142,6 +159,7 @@ pub struct Daemon {
     server: Option<JoinHandle<Arc<StorageActor>>>,
     state_lock: Option<StateLock>,
     events: Arc<EventHub>,
+    capabilities: Arc<CapabilityRegistry>,
 }
 
 impl Daemon {
@@ -157,6 +175,17 @@ impl Daemon {
         params: Value,
     ) -> std::result::Result<usize, DaemonError> {
         self.events.publish(method, params)
+    }
+
+    /// Removes a trusted fixed binding. Capability notifications are emitted
+    /// only when the registry actually changed.
+    pub fn revoke_binding(&self, binding_id: &str) -> Result<bool> {
+        let revoked = self.capabilities.revoke(binding_id);
+        if revoked {
+            self.events
+                .publish("capability.changed", json!({"binding_id":binding_id}))?;
+        }
+        Ok(revoked)
     }
 
     pub async fn shutdown(mut self) -> Result<()> {
@@ -182,6 +211,7 @@ impl Daemon {
 
 pub async fn launch(config: DaemonConfig) -> Result<Daemon> {
     config.validate()?;
+    let capabilities = Arc::new(CapabilityRegistry::new(config.bindings.clone())?);
     prepare_private_directory(&config.state_dir)?;
     let state_lock = acquire_state_lock(&config.state_dir)?;
     remove_stale_socket(&config.socket_path).await?;
@@ -198,6 +228,7 @@ pub async fn launch(config: DaemonConfig) -> Result<Daemon> {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let server_actor = Arc::clone(&actor);
     let server_events = Arc::clone(&events);
+    let server_capabilities = Arc::clone(&capabilities);
     let maximum = config.max_queued_events;
     let server = tokio::spawn(async move {
         run_server(
@@ -205,6 +236,7 @@ pub async fn launch(config: DaemonConfig) -> Result<Daemon> {
             server_actor,
             approver_token,
             server_events,
+            server_capabilities,
             maximum,
             shutdown_rx,
         )
@@ -216,6 +248,7 @@ pub async fn launch(config: DaemonConfig) -> Result<Daemon> {
         server: Some(server),
         state_lock: Some(state_lock),
         events,
+        capabilities,
     })
 }
 

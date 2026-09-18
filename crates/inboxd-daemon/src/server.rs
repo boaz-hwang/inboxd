@@ -21,7 +21,7 @@ use tokio::{
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::{DaemonError, Result};
+use crate::{CapabilityRegistry, DaemonError, Result};
 
 const DEFAULT_INTERVAL_END: u64 = 9_007_199_254_740_991;
 const APPROVAL_TTL_MS: u64 = 15 * 60 * 1_000;
@@ -101,6 +101,7 @@ pub(crate) async fn run_server(
     actor: Arc<StorageActor>,
     approver_token: Arc<Zeroizing<String>>,
     events: Arc<EventHub>,
+    capabilities: Arc<CapabilityRegistry>,
     max_queued_events: usize,
     mut shutdown: oneshot::Receiver<()>,
 ) -> Arc<StorageActor> {
@@ -112,8 +113,17 @@ pub(crate) async fn run_server(
                     let actor = Arc::clone(&actor);
                     let token = Arc::clone(&approver_token);
                     let events = Arc::clone(&events);
+                    let capabilities = Arc::clone(&capabilities);
                     connections.spawn(async move {
-                        handle_connection(socket, actor, token, events, max_queued_events).await;
+                        handle_connection(
+                            socket,
+                            actor,
+                            token,
+                            events,
+                            capabilities,
+                            max_queued_events,
+                        )
+                        .await;
                     });
                 }
                 Err(_) => break,
@@ -138,6 +148,7 @@ async fn handle_connection(
     actor: Arc<StorageActor>,
     approver_token: Arc<Zeroizing<String>>,
     events: Arc<EventHub>,
+    capabilities: Arc<CapabilityRegistry>,
     max_queued_events: usize,
 ) {
     let mut decoder = match JsonLinesDecoder::new(MAX_CLIENT_FRAME_BYTES) {
@@ -201,7 +212,16 @@ async fn handle_connection(
                             continue;
                         }
                     };
-                    let response = match dispatch(&mut session, &actor, &approver_token, &events, &request).await {
+                    let response = match dispatch(
+                        &mut session,
+                        &actor,
+                        &approver_token,
+                        &events,
+                        &capabilities,
+                        &request,
+                    )
+                    .await
+                    {
                         Ok(result) => success(&request.id, &request.method, result),
                         Err(error) => failure(&request.id, &request.method, error.code, &error.message),
                     };
@@ -411,6 +431,7 @@ async fn dispatch(
     actor: &StorageActor,
     approver_token: &str,
     events: &EventHub,
+    capabilities: &CapabilityRegistry,
     request: &ProtocolRequest,
 ) -> RpcResult {
     if request.method == "system.hello" {
@@ -559,6 +580,24 @@ async fn dispatch(
         }
         "sync.status" => Ok(json!({"state":"idle"})),
         "auth.status" => Ok(json!({"authenticated":false})),
+        "capability.list" => {
+            if request.params.keys().any(|key| key != "refresh")
+                || request
+                    .params
+                    .get("refresh")
+                    .is_some_and(|value| !value.is_boolean())
+            {
+                return Err(RpcError::bad_request(
+                    "capability.list params must be exactly {refresh?: boolean}",
+                ));
+            }
+            if request.params.get("refresh") == Some(&Value::Bool(true)) {
+                for binding_id in capabilities.refresh().await {
+                    let _ = events.publish("capability.changed", json!({"binding_id":binding_id}));
+                }
+            }
+            Ok(capabilities.list())
+        }
         "safety.intent.create" => {
             let created = actor_call(
                 actor,

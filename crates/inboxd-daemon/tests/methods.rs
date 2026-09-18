@@ -4,9 +4,9 @@ use inboxd_daemon::{Daemon, DaemonConfig, launch};
 use inboxd_daemon::{TestWorkerConfig, TrustedBinding};
 use inboxd_storage::{NativeHost, StorageActor, StorageActorConfig, StorageOperation};
 use serde_json::{Value, json};
-use std::{fs, os::unix::fs::PermissionsExt, path::Path, time::Duration};
 #[cfg(feature = "test-worker")]
 use std::path::PathBuf;
+use std::{fs, os::unix::fs::PermissionsExt, path::Path, time::Duration};
 use tempfile::TempDir;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf},
@@ -450,9 +450,15 @@ async fn capability_registry_refreshes_exact_resources_notifies_and_revokes() {
     let initial = client.request("capability.list", json!({})).await;
     assert_eq!(initial["v"], 1);
     assert_eq!(initial["resources"].as_array().unwrap().len(), 2);
-    assert!(initial["resources"].as_array().unwrap().iter().all(|entry| {
-        entry["auth"]["state"] == "unknown" && entry["auth"]["reason"] == "unobserved"
-    }));
+    assert!(
+        initial["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| {
+                entry["auth"]["state"] == "unknown" && entry["auth"]["reason"] == "unobserved"
+            })
+    );
 
     let refreshed = client
         .request("capability.list", json!({"refresh":true}))
@@ -482,10 +488,7 @@ async fn capability_registry_refreshes_exact_resources_notifies_and_revokes() {
     assert_eq!(client.next_frame().await["method"], "capability.changed");
     let remaining = client.request("capability.list", json!({})).await;
     assert_eq!(remaining["resources"].as_array().unwrap().len(), 1);
-    assert_eq!(
-        remaining["resources"][0]["resource"]["chat_id"],
-        "C999"
-    );
+    assert_eq!(remaining["resources"][0]["resource"]["chat_id"], "C999");
 
     for role in ["agent", "mcp", "approver"] {
         let mut role_client = Client::connect(daemon.socket_path()).await;
@@ -493,9 +496,7 @@ async fn capability_registry_refreshes_exact_resources_notifies_and_revokes() {
             .request("system.hello", json!({"role":role}))
             .await;
         assert_eq!(
-            role_client
-                .request("capability.list", json!({}))
-                .await["resources"]
+            role_client.request("capability.list", json!({})).await["resources"]
                 .as_array()
                 .unwrap()
                 .len(),

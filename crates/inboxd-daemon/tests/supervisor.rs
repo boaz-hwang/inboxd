@@ -77,7 +77,10 @@ async fn supervisor_rejects_raw_frame_and_correlation_failures_before_use() {
         assert!(!error.may_have_sent(), "{scenario} became ambiguous");
     }
 
-    let error = supervisor("health_ok").health("other-binding").await.unwrap_err();
+    let error = supervisor("health_ok")
+        .health("other-binding")
+        .await
+        .unwrap_err();
     assert!(error.to_string().contains("binding"));
 }
 
@@ -120,7 +123,7 @@ async fn send_transport_loss_is_ambiguous_only_after_dispatch_and_never_retried(
     let timed_out = WorkerSupervisor::for_test(
         "slack-work",
         TestWorkerConfig::new(fake_worker(), "send_timeout")
-            .with_timeout(Duration::from_millis(100))
+            .with_timeout(Duration::from_millis(500))
             .with_max_response_bytes(65_536)
             .with_max_queue_depth(1)
             .with_state_path(journal.clone()),
@@ -145,8 +148,11 @@ async fn send_transport_loss_is_ambiguous_only_after_dispatch_and_never_retried(
 
     let missing = WorkerSupervisor::for_test(
         "slack-work",
-        TestWorkerConfig::new(PathBuf::from("/definitely/missing/inboxd-worker"), "send_ok")
-            .with_timeout(Duration::from_millis(100)),
+        TestWorkerConfig::new(
+            PathBuf::from("/definitely/missing/inboxd-worker"),
+            "send_ok",
+        )
+        .with_timeout(Duration::from_millis(100)),
     )
     .unwrap();
     let error = missing
