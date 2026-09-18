@@ -3,10 +3,14 @@ use serde_json::{Value, json};
 use std::fs;
 
 fn fixture() -> Value {
-    serde_json::from_str(&fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../test/fixtures/protocol/normalized-worker-page-v1.json"
-    )).unwrap()).unwrap()
+    serde_json::from_str(
+        &fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/fixtures/protocol/normalized-worker-page-v1.json"
+        ))
+        .unwrap(),
+    )
+    .unwrap()
 }
 
 fn request() -> Value {
@@ -29,10 +33,20 @@ fn normalized_page_requires_explicit_identity_unread_coverage_and_exact_scope() 
     assert_eq!(parsed.identity["status"], "known");
     assert_eq!(parsed.unread["status"], "known");
 
-    for field in ["identity", "unread", "coverage", "limits", "messages", "tombstones"] {
+    for field in [
+        "identity",
+        "unread",
+        "coverage",
+        "limits",
+        "messages",
+        "tombstones",
+    ] {
         let mut invalid = page.clone();
         invalid.as_object_mut().unwrap().remove(field);
-        assert!(validate_normalized_worker_page(&invalid, &request()).is_err(), "accepted missing {field}");
+        assert!(
+            validate_normalized_worker_page(&invalid, &request()).is_err(),
+            "accepted missing {field}"
+        );
     }
 
     for pointer in [
@@ -44,7 +58,10 @@ fn normalized_page_requires_explicit_identity_unread_coverage_and_exact_scope() 
     ] {
         let mut invalid = page.clone();
         *invalid.pointer_mut(pointer).unwrap() = json!("other");
-        assert!(validate_normalized_worker_page(&invalid, &request()).is_err(), "accepted scope mismatch {pointer}");
+        assert!(
+            validate_normalized_worker_page(&invalid, &request()).is_err(),
+            "accepted scope mismatch {pointer}"
+        );
     }
 }
 

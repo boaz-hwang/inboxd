@@ -2,7 +2,10 @@ use inboxd_daemon::{DaemonConfig, launch};
 use serde_json::{Value, json};
 use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 use tempfile::TempDir;
-use tokio::{io::{AsyncBufReadExt, AsyncWriteExt, BufReader}, net::UnixStream};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::UnixStream,
+};
 
 fn private_tempdir() -> TempDir {
     let directory = tempfile::tempdir().unwrap();
@@ -34,18 +37,33 @@ async fn rust_owner_serves_fragmented_json_lines_and_explicit_unsupported_settin
     let mut read = BufReader::new(read);
 
     let hello = serde_json::to_vec(&json!({"type":"request","id":"hello","method":"system.hello","params":{"role":"reader","label":"한🙂"}})).unwrap();
-    let split = hello.windows(3).position(|bytes| bytes == "한".as_bytes()).unwrap() + 1;
+    let split = hello
+        .windows(3)
+        .position(|bytes| bytes == "한".as_bytes())
+        .unwrap()
+        + 1;
     write.write_all(&hello[..split]).await.unwrap();
     write.write_all(&hello[split..]).await.unwrap();
     write.write_all(b"\n").await.unwrap();
-    assert_eq!(read_frame(&mut read).await["result"], json!({"protocol":"inboxd","ready":true}));
+    assert_eq!(
+        read_frame(&mut read).await["result"],
+        json!({"protocol":"inboxd","ready":true})
+    );
 
-    write.write_all(b"{\"type\":\"request\",\"id\":\"ping\",\"method\":\"system.ping\",\"params\":{}}\n").await.unwrap();
+    write
+        .write_all(
+            b"{\"type\":\"request\",\"id\":\"ping\",\"method\":\"system.ping\",\"params\":{}}\n",
+        )
+        .await
+        .unwrap();
     assert_eq!(read_frame(&mut read).await["result"], json!({"pong":true}));
 
     for method in ["settings.get", "settings.update"] {
         let frame = json!({"type":"request","id":method,"method":method,"params":{}});
-        write.write_all(serde_json::to_string(&frame).unwrap().as_bytes()).await.unwrap();
+        write
+            .write_all(serde_json::to_string(&frame).unwrap().as_bytes())
+            .await
+            .unwrap();
         write.write_all(b"\n").await.unwrap();
         let response = read_frame(&mut read).await;
         assert_eq!(response["ok"], false);
@@ -59,8 +77,15 @@ async fn lifecycle_is_private_single_instance_and_reclaims_stale_resources() {
     let directory = private_tempdir();
     let config = config(directory.path());
     let daemon = launch(config.clone()).await.unwrap();
-    for path in [daemon.socket_path(), &directory.path().join("inboxd.lock"), &directory.path().join("approver.token")] {
-        assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+    for path in [
+        daemon.socket_path(),
+        &directory.path().join("inboxd.lock"),
+        &directory.path().join("approver.token"),
+    ] {
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
     assert!(launch(config.clone()).await.is_err());
     daemon.shutdown().await.unwrap();
@@ -82,10 +107,20 @@ async fn hello_is_required_and_malformed_stream_fails_closed() {
     let stream = UnixStream::connect(daemon.socket_path()).await.unwrap();
     let (read, mut write) = stream.into_split();
     let mut read = BufReader::new(read);
-    write.write_all(b"{\"type\":\"request\",\"id\":\"p\",\"method\":\"system.ping\",\"params\":{}}\n").await.unwrap();
+    write
+        .write_all(
+            b"{\"type\":\"request\",\"id\":\"p\",\"method\":\"system.ping\",\"params\":{}}\n",
+        )
+        .await
+        .unwrap();
     let response = read_frame(&mut read).await;
     assert_eq!(response["error"]["code"], "UNSUPPORTED");
-    assert!(response["error"]["message"].as_str().unwrap().contains("system.hello"));
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("system.hello")
+    );
 
     write.write_all(b"not-json\n").await.unwrap();
     let malformed = read_frame(&mut read).await;

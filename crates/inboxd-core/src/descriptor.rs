@@ -42,12 +42,20 @@ pub fn descriptor_identity(fd: RawFd) -> io::Result<DescriptorIdentity> {
     }
     // SAFETY: a successful `fstat` initialized the complete `libc::stat` value.
     let status = unsafe { status.assume_init() };
+    let is_regular = status.st_mode & libc::S_IFMT == libc::S_IFREG;
+    if !is_regular {
+        return Ok(DescriptorIdentity {
+            device: 0,
+            inode: 0,
+            is_regular: false,
+        });
+    }
     let device = identity_field(status.st_dev, "device")?;
     let inode = identity_field(status.st_ino, "inode")?;
 
     Ok(DescriptorIdentity {
         device,
         inode,
-        is_regular: status.st_mode & libc::S_IFMT == libc::S_IFREG,
+        is_regular,
     })
 }

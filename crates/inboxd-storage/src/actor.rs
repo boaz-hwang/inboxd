@@ -611,9 +611,20 @@ fn snapshot_open_descriptors_once() -> CoreResult<OpenDescriptorSnapshot> {
         // lock this process holds on the file, including locks owned by another
         // SQLite connection. The ReadDir's non-file descriptor stays in the
         // snapshot so fd-number reuse still changes identity.
-        let identity = descriptor_identity(descriptor).map_err(|_| {
-            descriptor_proof_error("a process descriptor closed during database identity proof")
-        })?;
+        // A descriptor may close after `/dev/fd` enumerates it (Tokio and
+        // other runtimes legitimately create short-lived descriptors). Ignore
+        // that raced entry: the database proof below still requires exactly
+        // one live descriptor with the leased inode in two consecutive
+        // snapshots, so a raced database descriptor cannot be accepted.
+        let identity = match descriptor_identity(descriptor) {
+            Ok(identity) => identity,
+            Err(error) if error.raw_os_error() == Some(libc::EBADF) => continue,
+            Err(_) => {
+                return Err(descriptor_proof_error(
+                    "unable to inspect a live process descriptor during database identity proof",
+                ));
+            }
+        };
         if identities.insert(descriptor, identity).is_some() {
             return Err(descriptor_proof_error(
                 "process descriptor enumeration contained a duplicate number",
