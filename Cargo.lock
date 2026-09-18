@@ -186,6 +186,7 @@ name = "inboxd-daemon"
 version = "0.0.0"
 dependencies = [
  "getrandom",
+ "inboxd-core",
  "inboxd-protocol",
  "inboxd-storage",
  "libc",

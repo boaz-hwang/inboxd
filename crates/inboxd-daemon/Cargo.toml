@@ -22,6 +22,7 @@ uuid.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+inboxd-core = { path = "../inboxd-core" }
 tempfile = "=3.19.1"
 
 [[bin]]
