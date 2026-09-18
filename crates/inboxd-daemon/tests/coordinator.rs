@@ -14,6 +14,7 @@ use tempfile::TempDir;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf},
     net::UnixStream,
+    time::{Instant, sleep},
 };
 
 const KEY: [u8; 32] = [0x73; 32];
@@ -34,13 +35,22 @@ fn scope() -> Value {
 }
 
 fn binding(scenario: &str, receipt_level: &str, journal: &Path) -> TrustedBinding {
+    binding_with_reply(scenario, receipt_level, journal, true)
+}
+
+fn binding_with_reply(
+    scenario: &str,
+    receipt_level: &str,
+    journal: &Path,
+    reply: bool,
+) -> TrustedBinding {
     TrustedBinding::for_test(
         "slack-work",
         json!({
             "v":1,
             "resource":{"v":1,"kind":"chat","platform":"slack","account":"work","chat_id":"C0123"},
             "read":{"mode":"bounded_history","limits":{"max_page_size":100,"max_pages":10,"cursor":"opaque"}},
-            "write":{"mode":"send","content_mode":"text","reply":true},
+            "write":{"mode":"send","content_mode":"text","reply":reply},
             "receipt":{"level":receipt_level}
         }),
         TestWorkerConfig::new(fake_worker(), scenario)
@@ -187,6 +197,141 @@ async fn approval_claims_once_sends_once_and_verifies_only_exact_receipt() {
 
     drop((agent, approver));
     daemon.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn revocation_after_durable_claim_prevents_provider_io_and_releases_quota() {
+    let directory = private_tempdir();
+    let calls = directory.path().join("worker-calls");
+    let daemon = launch(config(
+        directory.path(),
+        binding("send_sent_verified", "independent_readback", &calls),
+    ))
+    .await
+    .unwrap();
+    let (mut agent, mut approver) = clients(directory.path(), &daemon).await;
+    daemon.revoke_binding_after_next_claim("slack-work");
+
+    let (_, outcome) = approved_send(&mut agent, &mut approver, "revoke after claim").await;
+    assert_eq!(outcome["state"], "Failed", "{outcome}");
+    assert!(journal(&calls).is_empty());
+
+    drop((agent, approver));
+    daemon.shutdown().await.unwrap();
+    let (sends, quota) = persisted_rows(directory.path());
+    assert_eq!(sends, [json!({"state":"Failed"})]);
+    assert!(quota.iter().all(|row| row["used"] == 0), "{quota:?}");
+}
+
+#[tokio::test]
+async fn revocation_waits_for_an_acquired_dispatch_lease_and_blocks_every_later_send() {
+    let directory = private_tempdir();
+    let calls = directory.path().join("worker-calls");
+    let daemon = launch(config(
+        directory.path(),
+        binding("send_timeout", "ack_only", &calls),
+    ))
+    .await
+    .unwrap();
+    let (mut agent, mut approver) = clients(directory.path(), &daemon).await;
+
+    let mut send = Box::pin(approved_send(
+        &mut agent,
+        &mut approver,
+        "in flight before revoke",
+    ));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while journal(&calls).is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "worker dispatch was not observed"
+        );
+        tokio::select! {
+            outcome = &mut send => panic!("send completed before its dispatch was observed: {outcome:?}"),
+            () = sleep(Duration::from_millis(5)) => {}
+        }
+    }
+    let mut revoke = Box::pin(daemon.revoke_binding("slack-work"));
+    tokio::select! {
+        result = &mut revoke => panic!("revoke completed while the dispatch lease was held: {result:?}"),
+        () = sleep(Duration::from_millis(50)) => {}
+    }
+    let ((_, first_outcome), revoked) = tokio::join!(send, revoke);
+    let revoked = revoked.unwrap();
+    assert_eq!(first_outcome["state"], "Uncertain");
+    assert!(revoked);
+    assert_eq!(journal(&calls), ["send"]);
+
+    let (_, later_outcome) = approved_send(&mut agent, &mut approver, "after revoke").await;
+    assert_eq!(later_outcome["state"], "Approved");
+    assert_eq!(journal(&calls), ["send"]);
+
+    drop((agent, approver));
+    daemon.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn reply_disabled_binding_rejects_legacy_and_v2_reply_envelopes_without_provider_io() {
+    for (label, proposal, resource_field) in [
+        (
+            "legacy-parent",
+            json!({"actor":ACTOR,"scope":scope(),"body":"legacy reply","parent_id":"thread-1"}),
+            ("scope", scope()),
+        ),
+        (
+            "v2-reply",
+            json!({
+                "actor":ACTOR,
+                "envelope":{
+                    "v":2,
+                    "destination":{"v":1,"kind":"chat","platform":"slack","account":"work","chat_id":"C0123"},
+                    "content":{"mode":"text","body":"v2 reply"},
+                    "reply":{"parent_id":"thread-2"}
+                }
+            }),
+            (
+                "resource",
+                json!({"v":1,"kind":"chat","platform":"slack","account":"work","chat_id":"C0123"}),
+            ),
+        ),
+    ] {
+        let directory = private_tempdir();
+        let calls = directory.path().join("worker-calls");
+        let daemon = launch(config(
+            directory.path(),
+            binding_with_reply("send_sent_verified", "independent_readback", &calls, false),
+        ))
+        .await
+        .unwrap();
+        let (mut agent, mut approver) = clients(directory.path(), &daemon).await;
+        let created = agent.request("safety.intent.create", proposal).await;
+        let claimed = approver
+            .request(
+                "safety.intent.claimApprovalCode",
+                json!({"intent_id":created["intent_id"]}),
+            )
+            .await;
+        let mut approval = json!({
+            "intent_id":created["intent_id"],
+            "code":claimed["code"],
+            "actor":ACTOR,
+        });
+        approval[resource_field.0] = resource_field.1;
+        let denied = approver
+            .request_frame("safety.intent.approve", approval)
+            .await;
+
+        assert_eq!(denied["ok"], true, "{label}: {denied}");
+        assert_eq!(denied["result"]["state"], "Failed", "{label}: {denied}");
+        assert!(journal(&calls).is_empty(), "{label}");
+        drop((agent, approver));
+        daemon.shutdown().await.unwrap();
+        let (_, quota) = persisted_rows(directory.path());
+        assert!(
+            quota.iter().all(|row| row["used"] == 0),
+            "{label}: {quota:?}"
+        );
+    }
 }
 
 #[tokio::test]

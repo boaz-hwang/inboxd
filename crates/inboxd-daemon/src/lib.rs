@@ -21,7 +21,7 @@ use std::{
     os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Command,
-    sync::Arc,
+    sync::{Arc, atomic::AtomicUsize},
 };
 use tokio::{
     net::{UnixListener, UnixStream},
@@ -31,7 +31,7 @@ use tokio::{
 use zeroize::Zeroizing;
 
 use capability::CapabilityRegistry;
-use server::{EventHub, run_server};
+use server::{EventHub, ServerRuntime, run_server};
 
 const DEFAULT_MAX_QUEUED_EVENTS: usize = 256;
 const MAX_QUEUED_EVENTS: usize = 4_096;
@@ -157,10 +157,15 @@ impl Drop for StateLock {
 pub struct Daemon {
     socket_path: PathBuf,
     shutdown: Option<oneshot::Sender<()>>,
-    server: Option<JoinHandle<Arc<StorageActor>>>,
-    state_lock: Option<StateLock>,
+    server: Option<JoinHandle<Arc<ServerOwner>>>,
     events: Arc<EventHub>,
     capabilities: Arc<CapabilityRegistry>,
+    connection_tasks: Arc<AtomicUsize>,
+}
+
+pub(crate) struct ServerOwner {
+    pub(crate) actor: Arc<StorageActor>,
+    state_lock: StateLock,
 }
 
 impl Daemon {
@@ -180,8 +185,8 @@ impl Daemon {
 
     /// Removes a trusted fixed binding. Capability notifications are emitted
     /// only when the registry actually changed.
-    pub fn revoke_binding(&self, binding_id: &str) -> Result<bool> {
-        let revoked = self.capabilities.revoke(binding_id);
+    pub async fn revoke_binding(&self, binding_id: &str) -> Result<bool> {
+        let revoked = self.capabilities.revoke(binding_id).await;
         if revoked {
             self.events
                 .publish("capability.changed", json!({"binding_id":binding_id}))?;
@@ -189,24 +194,55 @@ impl Daemon {
         Ok(revoked)
     }
 
+    /// Arms a deterministic test-only revocation between durable claim and
+    /// provider dispatch.
+    #[cfg(feature = "test-worker")]
+    pub fn revoke_binding_after_next_claim(&self, binding_id: impl Into<String>) {
+        self.capabilities.revoke_after_next_claim(binding_id);
+    }
+
+    #[cfg(feature = "test-worker")]
+    pub fn retained_connection_tasks(&self) -> usize {
+        self.connection_tasks
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub async fn shutdown(mut self) -> Result<()> {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
-        let actor = self
+        let owner = self
             .server
-            .take()
+            .as_mut()
             .ok_or_else(|| DaemonError::new("daemon server is not running"))?
             .await
             .map_err(|_| DaemonError::new("daemon server task failed"))?;
-        let mut actor = Arc::try_unwrap(actor)
+        self.server.take();
+        let owner = Arc::try_unwrap(owner)
             .map_err(|_| DaemonError::new("daemon connections did not shut down"))?;
-        actor
+        let ServerOwner { actor, state_lock } = owner;
+        let mut actor = Arc::try_unwrap(actor)
+            .map_err(|_| DaemonError::new("daemon connections retained storage ownership"))?;
+        let actor_result = actor
             .shutdown()
-            .map_err(|error| DaemonError::new(format!("{}: {}", error.name, error.message)))?;
-        remove_socket(&self.socket_path)?;
-        self.state_lock.take();
-        Ok(())
+            .map_err(|error| DaemonError::new(format!("{}: {}", error.name, error.message)));
+        drop(actor);
+        let socket_result = remove_socket(&self.socket_path);
+        drop(state_lock);
+        actor_result?;
+        socket_result
+    }
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(server) = self.server.take() {
+            server.abort();
+        }
+        let _ = remove_socket(&self.socket_path);
     }
 }
 
@@ -229,18 +265,24 @@ pub async fn launch(config: DaemonConfig) -> Result<Daemon> {
         .map_err(|error| DaemonError::new(format!("unable to secure daemon socket: {error}")))?;
     let events = Arc::new(EventHub::default());
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let server_actor = Arc::clone(&actor);
+    let owner = Arc::new(ServerOwner { actor, state_lock });
+    let server_owner = Arc::clone(&owner);
     let server_events = Arc::clone(&events);
     let server_capabilities = Arc::clone(&capabilities);
+    let connection_tasks = Arc::new(AtomicUsize::new(0));
+    let server_connection_tasks = Arc::clone(&connection_tasks);
     let maximum = config.max_queued_events;
     let server = tokio::spawn(async move {
         run_server(
             listener,
-            server_actor,
+            server_owner,
             approver_token,
-            server_events,
-            server_capabilities,
-            maximum,
+            ServerRuntime {
+                events: server_events,
+                capabilities: server_capabilities,
+                connection_tasks: server_connection_tasks,
+                max_queued_events: maximum,
+            },
             shutdown_rx,
         )
         .await
@@ -249,9 +291,9 @@ pub async fn launch(config: DaemonConfig) -> Result<Daemon> {
         socket_path: config.socket_path,
         shutdown: Some(shutdown_tx),
         server: Some(server),
-        state_lock: Some(state_lock),
         events,
         capabilities,
+        connection_tasks,
     })
 }
 

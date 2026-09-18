@@ -1,6 +1,6 @@
 use inboxd_protocol::{
     ClientRole, EVENT_METHODS, JsonLinesDecoder, MAX_CLIENT_FRAME_BYTES, ProtocolRequest,
-    parse_request,
+    encode_json_line, parse_request,
 };
 use inboxd_storage::{StorageActor, StorageOperation};
 use serde_json::{Map, Value, json};
@@ -8,7 +8,7 @@ use std::{
     collections::{BTreeSet, HashMap},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 use subtle::ConstantTimeEq;
@@ -21,7 +21,7 @@ use tokio::{
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::{CapabilityRegistry, DaemonError, Result, coordinator};
+use crate::{CapabilityRegistry, DaemonError, Result, ServerOwner, coordinator};
 
 const DEFAULT_INTERVAL_END: u64 = 9_007_199_254_740_991;
 const APPROVAL_TTL_MS: u64 = 15 * 60 * 1_000;
@@ -72,6 +72,8 @@ impl EventHub {
             return Err(DaemonError::new("event params must be an object"));
         }
         let event = json!({"type":"event","method":method,"params":params});
+        encode_json_line(&event, MAX_CLIENT_FRAME_BYTES)
+            .map_err(|error| DaemonError::new(error.message))?;
         let mut overflowed = Vec::new();
         let mut disconnected = Vec::new();
         let mut subscribers = self.subscribers.lock().unwrap();
@@ -96,24 +98,33 @@ impl EventHub {
     }
 }
 
+pub(crate) struct ServerRuntime {
+    pub(crate) events: Arc<EventHub>,
+    pub(crate) capabilities: Arc<CapabilityRegistry>,
+    pub(crate) connection_tasks: Arc<AtomicUsize>,
+    pub(crate) max_queued_events: usize,
+}
+
 pub(crate) async fn run_server(
     listener: UnixListener,
-    actor: Arc<StorageActor>,
+    owner: Arc<ServerOwner>,
     approver_token: Arc<Zeroizing<String>>,
-    events: Arc<EventHub>,
-    capabilities: Arc<CapabilityRegistry>,
-    max_queued_events: usize,
+    runtime: ServerRuntime,
     mut shutdown: oneshot::Receiver<()>,
-) -> Arc<StorageActor> {
+) -> Arc<ServerOwner> {
     let mut connections = JoinSet::new();
     loop {
         tokio::select! {
+            Some(_) = connections.join_next(), if !connections.is_empty() => {
+                runtime.connection_tasks.store(connections.len(), Ordering::Release);
+            }
             accepted = listener.accept() => match accepted {
                 Ok((socket, _)) => {
-                    let actor = Arc::clone(&actor);
+                    let actor = Arc::clone(&owner.actor);
                     let token = Arc::clone(&approver_token);
-                    let events = Arc::clone(&events);
-                    let capabilities = Arc::clone(&capabilities);
+                    let events = Arc::clone(&runtime.events);
+                    let capabilities = Arc::clone(&runtime.capabilities);
+                    let max_queued_events = runtime.max_queued_events;
                     connections.spawn(async move {
                         handle_connection(
                             socket,
@@ -125,6 +136,7 @@ pub(crate) async fn run_server(
                         )
                         .await;
                     });
+                    runtime.connection_tasks.store(connections.len(), Ordering::Release);
                 }
                 Err(_) => break,
             },
@@ -133,7 +145,8 @@ pub(crate) async fn run_server(
     }
     connections.abort_all();
     while connections.join_next().await.is_some() {}
-    actor
+    runtime.connection_tasks.store(0, Ordering::Release);
+    owner
 }
 
 struct Session {
@@ -225,7 +238,10 @@ async fn handle_connection(
                         Ok(result) => success(&request.id, &request.method, result),
                         Err(error) => failure(&request.id, &request.method, error.code, &error.message),
                     };
-                    if write_frame(&mut socket, response).await.is_err() {
+                    if write_response(&mut socket, response, &request.id, &request.method)
+                        .await
+                        .is_err()
+                    {
                         break 'connection;
                     }
                 }
@@ -723,9 +739,29 @@ fn failure(id: &str, method: &str, code: &str, message: &str) -> Value {
 }
 
 async fn write_frame(socket: &mut UnixStream, value: Value) -> std::io::Result<()> {
-    let mut frame = serde_json::to_vec(&value).map_err(std::io::Error::other)?;
-    frame.push(b'\n');
-    socket.write_all(&frame).await
+    let frame = encode_json_line(&value, MAX_CLIENT_FRAME_BYTES)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.message))?;
+    socket.write_all(frame.as_bytes()).await
+}
+
+async fn write_response(
+    socket: &mut UnixStream,
+    response: Value,
+    id: &str,
+    method: &str,
+) -> std::io::Result<()> {
+    match encode_json_line(&response, MAX_CLIENT_FRAME_BYTES) {
+        Ok(frame) => socket.write_all(frame.as_bytes()).await,
+        Err(_) => {
+            let bounded = failure(
+                id,
+                method,
+                "RESPONSE_TOO_LARGE",
+                "response exceeds the 65536 byte client frame limit",
+            );
+            write_frame(socket, bounded).await
+        }
+    }
 }
 
 fn token_matches(expected: &str, supplied: Option<&str>) -> bool {

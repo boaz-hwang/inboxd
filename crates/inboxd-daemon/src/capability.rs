@@ -1,9 +1,10 @@
 use serde_json::{Map, Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::RwLock,
+    sync::{Arc, Mutex, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
+use tokio::sync::{OwnedRwLockReadGuard, RwLock as AsyncRwLock};
 
 #[cfg(feature = "test-worker")]
 use crate::TestWorkerConfig;
@@ -49,21 +50,40 @@ impl TrustedBinding {
 
 #[derive(Clone)]
 struct BindingEntry {
+    generation: u64,
     claims: Value,
     auth: Value,
     worker: Option<WorkerSupervisor>,
     resource_key: String,
+    dispatch_gate: Arc<AsyncRwLock<()>>,
 }
 
 pub(crate) struct CapabilityRegistry {
     entries: RwLock<BTreeMap<String, BindingEntry>>,
+    #[cfg(feature = "test-worker")]
+    post_claim_revocation: Mutex<Option<String>>,
 }
 
 #[derive(Clone)]
 pub(crate) struct BindingAccess {
     pub id: String,
+    generation: u64,
     pub claims: Value,
     pub worker: Option<WorkerSupervisor>,
+    dispatch_gate: Arc<AsyncRwLock<()>>,
+}
+
+pub(crate) struct DispatchLease {
+    pub binding: BindingAccess,
+    _guard: OwnedRwLockReadGuard<()>,
+}
+
+impl BindingAccess {
+    pub(crate) fn allows_send(&self, intent: &Value) -> bool {
+        self.worker.is_some()
+            && self.claims["write"]["mode"] == "send"
+            && (self.claims["write"]["reply"] == true || !intent_requests_reply(intent))
+    }
 }
 
 impl CapabilityRegistry {
@@ -86,6 +106,8 @@ impl CapabilityRegistry {
             entries.insert(
                 binding.id,
                 BindingEntry {
+                    generation: u64::try_from(entries.len() + 1)
+                        .map_err(|_| DaemonError::new("too many capability bindings"))?,
                     claims: binding.claims,
                     auth: json!({
                         "state":"unknown",
@@ -94,11 +116,14 @@ impl CapabilityRegistry {
                     }),
                     worker: binding.worker,
                     resource_key,
+                    dispatch_gate: Arc::new(AsyncRwLock::new(())),
                 },
             );
         }
         Ok(Self {
             entries: RwLock::new(entries),
+            #[cfg(feature = "test-worker")]
+            post_claim_revocation: Mutex::new(None),
         })
     }
 
@@ -142,9 +167,44 @@ impl CapabilityRegistry {
         changed
     }
 
-    pub(crate) fn revoke(&self, id: &str) -> bool {
-        self.entries.write().unwrap().remove(id).is_some()
+    pub(crate) async fn revoke(&self, id: &str) -> bool {
+        let Some((generation, gate)) = self
+            .entries
+            .read()
+            .unwrap()
+            .get(id)
+            .map(|entry| (entry.generation, Arc::clone(&entry.dispatch_gate)))
+        else {
+            return false;
+        };
+        let _dispatch_exclusion = gate.write_owned().await;
+        let mut entries = self.entries.write().unwrap();
+        if entries
+            .get(id)
+            .is_some_and(|entry| entry.generation == generation)
+        {
+            entries.remove(id);
+            true
+        } else {
+            false
+        }
     }
+
+    #[cfg(feature = "test-worker")]
+    pub(crate) fn revoke_after_next_claim(&self, id: impl Into<String>) {
+        *self.post_claim_revocation.lock().unwrap() = Some(id.into());
+    }
+
+    #[cfg(feature = "test-worker")]
+    pub(crate) async fn run_post_claim_test_hook(&self) {
+        let id = self.post_claim_revocation.lock().unwrap().take();
+        if let Some(id) = id {
+            self.revoke(&id).await;
+        }
+    }
+
+    #[cfg(not(feature = "test-worker"))]
+    pub(crate) async fn run_post_claim_test_hook(&self) {}
 
     pub(crate) fn has_workers(&self) -> bool {
         self.entries
@@ -158,10 +218,24 @@ impl CapabilityRegistry {
         self.exact(&intent_resource(intent)?)
     }
 
-    pub(crate) fn allows_send(&self, intent: &Value) -> bool {
-        self.exact_for_intent(intent).is_some_and(|binding| {
-            binding.worker.is_some() && binding.claims["write"]["mode"] == "send"
+    pub(crate) async fn acquire_dispatch_lease(
+        &self,
+        intent: &Value,
+        expected: &BindingAccess,
+    ) -> Option<DispatchLease> {
+        let guard = Arc::clone(&expected.dispatch_gate).read_owned().await;
+        let binding = self.exact_for_intent(intent).filter(|current| {
+            current.id == expected.id && current.generation == expected.generation
+        })?;
+        Some(DispatchLease {
+            binding,
+            _guard: guard,
         })
+    }
+
+    pub(crate) fn allows_send(&self, intent: &Value) -> bool {
+        self.exact_for_intent(intent)
+            .is_some_and(|binding| binding.allows_send(intent))
     }
 
     pub(crate) fn exact(&self, resource: &Value) -> Option<BindingAccess> {
@@ -173,10 +247,16 @@ impl CapabilityRegistry {
             .find(|(_, entry)| entry.resource_key == key)
             .map(|(id, entry)| BindingAccess {
                 id: id.clone(),
+                generation: entry.generation,
                 claims: entry.claims.clone(),
                 worker: entry.worker.clone(),
+                dispatch_gate: Arc::clone(&entry.dispatch_gate),
             })
     }
+}
+
+fn intent_requests_reply(intent: &Value) -> bool {
+    intent.get("parent_id").is_some() || intent.pointer("/envelope/reply").is_some()
 }
 
 fn intent_resource(intent: &Value) -> Option<Value> {

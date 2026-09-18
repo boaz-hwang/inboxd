@@ -93,9 +93,9 @@ pub(crate) async fn execute(
     approved: Value,
 ) -> Result<Value> {
     let binding = capabilities.exact_for_intent(&approved);
-    let send_capable = binding.as_ref().is_some_and(|binding| {
-        binding.worker.is_some() && binding.claims["write"]["mode"] == "send"
-    });
+    let send_capable = binding
+        .as_ref()
+        .is_some_and(|binding| binding.allows_send(&approved));
     let claimed = actor_call(
         actor,
         StorageOperation::SafetyClaim,
@@ -110,12 +110,30 @@ pub(crate) async fn execute(
     if let Some(summary) = claimed.get("summary") {
         return Ok(summary.clone());
     }
+    capabilities.run_post_claim_test_hook().await;
     let request = claimed
         .get("request")
         .ok_or_else(|| CoordinatorError::new("storage safety claim omitted its send request"))?;
     let binding = binding.ok_or_else(|| {
         CoordinatorError::new("storage claimed a send without an exact trusted binding")
     })?;
+    let Some(dispatch) = capabilities.acquire_dispatch_lease(request, &binding).await else {
+        return finalize(
+            actor,
+            intent_id,
+            "Failed",
+            final_payload(request, "reason", json!("binding_revoked_after_claim")),
+        );
+    };
+    let binding = &dispatch.binding;
+    if !binding.allows_send(request) {
+        return finalize(
+            actor,
+            intent_id,
+            "Failed",
+            final_payload(request, "reason", json!("capability_disallows_reply")),
+        );
+    }
     let worker = binding
         .worker
         .as_ref()

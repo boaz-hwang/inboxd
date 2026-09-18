@@ -1,10 +1,11 @@
 use inboxd_daemon::{DaemonConfig, launch};
 use serde_json::{Value, json};
-use std::{fs, os::unix::fs::PermissionsExt, path::Path};
+use std::{fs, os::unix::fs::PermissionsExt, path::Path, time::Duration};
 use tempfile::TempDir;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
+    time::timeout,
 };
 
 fn private_tempdir() -> TempDir {
@@ -127,5 +128,65 @@ async fn hello_is_required_and_malformed_stream_fails_closed() {
     assert_eq!(malformed["error"]["code"], "BAD_REQUEST");
     let mut trailing = String::new();
     assert_eq!(read.read_line(&mut trailing).await.unwrap(), 0);
+    daemon.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn drop_and_cancelled_shutdown_abort_owned_tasks_clean_socket_and_allow_safe_restart() {
+    for cancel_shutdown in [false, true] {
+        let directory = private_tempdir();
+        let config = config(directory.path());
+        let daemon = launch(config.clone()).await.unwrap();
+        let mut connection = UnixStream::connect(daemon.socket_path()).await.unwrap();
+
+        if cancel_shutdown {
+            let cancelled = daemon.shutdown();
+            drop(cancelled);
+        } else {
+            drop(daemon);
+        }
+
+        assert!(
+            !config.socket_path.exists(),
+            "socket survived cleanup (cancel_shutdown={cancel_shutdown})"
+        );
+        let mut byte = [0_u8; 1];
+        let read = timeout(Duration::from_secs(2), connection.read(&mut byte))
+            .await
+            .expect("owned connection task did not terminate")
+            .unwrap();
+        assert_eq!(read, 0);
+
+        let restarted = timeout(Duration::from_secs(2), async {
+            loop {
+                match launch(config.clone()).await {
+                    Ok(daemon) => break daemon,
+                    Err(_) => tokio::task::yield_now().await,
+                }
+            }
+        })
+        .await
+        .expect("cleanup ownership never released for a safe restart");
+        restarted.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn completed_connection_tasks_are_reaped_while_the_daemon_keeps_serving() {
+    let directory = private_tempdir();
+    let daemon = launch(config(directory.path())).await.unwrap();
+
+    for _ in 0..200 {
+        drop(UnixStream::connect(daemon.socket_path()).await.unwrap());
+    }
+
+    timeout(Duration::from_secs(2), async {
+        while daemon.retained_connection_tasks() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("completed connection tasks accumulated instead of being reaped");
+
     daemon.shutdown().await.unwrap();
 }

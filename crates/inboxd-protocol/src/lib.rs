@@ -8,6 +8,7 @@ use std::{error::Error, fmt};
 pub const MAX_CLIENT_FRAME_BYTES: usize = 65_536;
 pub const MAX_WORKER_FRAME_BYTES: usize = 16_777_216;
 pub const MAX_CURSOR_BYTES: usize = 4_096;
+const MAX_SAFE_NUMBER: f64 = 9_007_199_254_740_991.0;
 
 pub const LEGACY_REQUEST_METHODS: [&str; 21] = [
     "system.hello",
@@ -174,12 +175,12 @@ pub fn parse_request(value: &Value, role: Option<ClientRole>) -> Result<Protocol
 pub fn encode_json_line(value: &Value, maximum: usize) -> Result<String> {
     let mut bytes = serde_json::to_vec(value)
         .map_err(|_| ProtocolError::bad_request("frame must be JSON serializable"))?;
+    bytes.push(b'\n');
     if bytes.len() > maximum {
         return Err(ProtocolError::bad_request(format!(
             "frame exceeds {maximum} bytes"
         )));
     }
-    bytes.push(b'\n');
     String::from_utf8(bytes).map_err(|_| ProtocolError::bad_request("frame must be valid UTF-8"))
 }
 
@@ -658,8 +659,19 @@ pub fn validate_normalized_worker_page(
             "page interval must match the request",
         ));
     }
+    let (requested_from, requested_to) = validate_interval(requested_interval)?;
     validate_interval(page.get("interval").unwrap_or(&Value::Null))?;
     let messages = array(page.get("messages"), "messages")?.clone();
+    let requested_limit = request
+        .pointer("/operation/limit")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| ProtocolError::bad_request("read_page limit is invalid"))?;
+    if messages.len() > requested_limit {
+        return Err(ProtocolError::bad_request(
+            "normalized messages exceed the requested limit",
+        ));
+    }
     let tombstones = array(page.get("tombstones"), "tombstones")?.clone();
     let requested_key = chat_key(requested_chat)?;
     for (index, event) in messages.iter().enumerate() {
@@ -674,6 +686,21 @@ pub fn validate_normalized_worker_page(
             &requested_key,
             "message scope",
         )?;
+        let timestamp = event
+            .get("message")
+            .and_then(|value| value.get("ts"))
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite() && value.abs() <= MAX_SAFE_NUMBER)
+            .ok_or_else(|| {
+                ProtocolError::bad_request(format!(
+                    "message event {index} timestamp must be a finite safe number"
+                ))
+            })?;
+        if timestamp < requested_from || timestamp >= requested_to {
+            return Err(ProtocolError::bad_request(format!(
+                "message event {index} timestamp is outside the requested interval"
+            )));
+        }
     }
     for tombstone in &tombstones {
         let event = object(tombstone, "tombstone event")?;
@@ -937,13 +964,13 @@ fn validate_interval(value: &Value) -> Result<(f64, f64)> {
     let from = interval
         .get("from_ts")
         .and_then(Value::as_f64)
-        .filter(|value| value.is_finite())
-        .ok_or_else(|| ProtocolError::bad_request("from_ts must be finite"))?;
+        .filter(|value| value.is_finite() && value.abs() <= MAX_SAFE_NUMBER)
+        .ok_or_else(|| ProtocolError::bad_request("from_ts must be a finite safe number"))?;
     let to = interval
         .get("to_ts")
         .and_then(Value::as_f64)
-        .filter(|value| value.is_finite())
-        .ok_or_else(|| ProtocolError::bad_request("to_ts must be finite"))?;
+        .filter(|value| value.is_finite() && value.abs() <= MAX_SAFE_NUMBER)
+        .ok_or_else(|| ProtocolError::bad_request("to_ts must be a finite safe number"))?;
     if from >= to {
         return Err(ProtocolError::bad_request("from_ts must precede to_ts"));
     }

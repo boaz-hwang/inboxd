@@ -55,3 +55,25 @@ fn json_lines_preserve_fragmented_utf8_and_enforce_raw_byte_bounds() {
             .contains("8")
     );
 }
+
+#[test]
+fn encoded_json_line_limit_includes_newline_escapes_and_multibyte_utf8() {
+    fn padded(prefix: &str, total: usize) -> serde_json::Value {
+        let mut body = prefix.to_owned();
+        let base = serde_json::to_vec(&json!({"body":body})).unwrap().len() + 1;
+        body.push_str(&"a".repeat(total - base));
+        json!({"body":body})
+    }
+
+    for prefix in ["", "\"", "한🙂"] {
+        let exact = padded(prefix, MAX_CLIENT_FRAME_BYTES);
+        let encoded = encode_json_line(&exact, MAX_CLIENT_FRAME_BYTES).unwrap();
+        assert_eq!(encoded.len(), MAX_CLIENT_FRAME_BYTES, "{prefix:?}");
+
+        let oversized = padded(prefix, MAX_CLIENT_FRAME_BYTES + 1);
+        assert!(
+            encode_json_line(&oversized, MAX_CLIENT_FRAME_BYTES).is_err(),
+            "accepted oversized encoded line for {prefix:?}"
+        );
+    }
+}
