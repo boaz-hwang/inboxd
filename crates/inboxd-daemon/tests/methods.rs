@@ -1,8 +1,12 @@
 use inboxd_core::SqlHost;
 use inboxd_daemon::{Daemon, DaemonConfig, launch};
+#[cfg(feature = "test-worker")]
+use inboxd_daemon::{TestWorkerConfig, TrustedBinding};
 use inboxd_storage::{NativeHost, StorageActor, StorageActorConfig, StorageOperation};
 use serde_json::{Value, json};
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, time::Duration};
+#[cfg(feature = "test-worker")]
+use std::path::PathBuf;
 use tempfile::TempDir;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf},
@@ -399,6 +403,105 @@ async fn subscriptions_replace_topics_and_terminal_overflow_closes_the_connectio
         1
     );
     overflow.assert_closed().await;
+
+    drop(client);
+    shutdown(daemon).await;
+}
+
+#[cfg(feature = "test-worker")]
+#[tokio::test]
+async fn capability_registry_refreshes_exact_resources_notifies_and_revokes() {
+    fn fake_worker() -> PathBuf {
+        PathBuf::from(
+            option_env!("CARGO_BIN_EXE_inboxd-fake-worker")
+                .expect("cargo did not expose the fake worker binary"),
+        )
+    }
+    fn binding(id: &str, chat_id: &str, scenario: &str, writable: bool) -> TrustedBinding {
+        TrustedBinding::for_test(
+            id,
+            json!({
+                "v":1,
+                "resource":{"v":1,"kind":"chat","platform":"slack","account":"work","chat_id":chat_id},
+                "read":{"mode":"bounded_history","limits":{"max_page_size":100,"max_pages":10,"cursor":"opaque"}},
+                "write":if writable { json!({"mode":"send","content_mode":"text","reply":true}) } else { json!({"mode":"none","content_mode":"none","reply":false}) },
+                "receipt":{"level":if writable { "independent_readback" } else { "none" }}
+            }),
+            TestWorkerConfig::new(fake_worker(), scenario)
+                .with_timeout(Duration::from_millis(500)),
+        )
+        .unwrap()
+    }
+
+    let directory = private_tempdir();
+    let daemon = launch(config(directory.path()).with_bindings(vec![
+        binding("slack-work", "C0123", "health_ok", true),
+        binding("slack-broken", "C999", "malformed", false),
+    ]))
+    .await
+    .unwrap();
+    let mut client = Client::connect(daemon.socket_path()).await;
+    client
+        .request("system.hello", json!({"role":"reader"}))
+        .await;
+    client
+        .request("subscribe", json!({"topics":["capability.changed"]}))
+        .await;
+    let initial = client.request("capability.list", json!({})).await;
+    assert_eq!(initial["v"], 1);
+    assert_eq!(initial["resources"].as_array().unwrap().len(), 2);
+    assert!(initial["resources"].as_array().unwrap().iter().all(|entry| {
+        entry["auth"]["state"] == "unknown" && entry["auth"]["reason"] == "unobserved"
+    }));
+
+    let refreshed = client
+        .request("capability.list", json!({"refresh":true}))
+        .await;
+    let resources = refreshed["resources"].as_array().unwrap();
+    let ready = resources
+        .iter()
+        .find(|entry| entry["resource"]["chat_id"] == "C0123")
+        .unwrap();
+    assert_eq!(ready["auth"]["state"], "authenticated");
+    let broken = resources
+        .iter()
+        .find(|entry| entry["resource"]["chat_id"] == "C999")
+        .unwrap();
+    assert_eq!(broken["auth"]["state"], "unknown");
+    assert_eq!(broken["auth"]["reason"], "malformed_response");
+    for _ in 0..2 {
+        assert_eq!(client.next_frame().await["method"], "capability.changed");
+    }
+
+    let invalid = client
+        .request_frame("capability.list", json!({"refresh":false,"extra":true}))
+        .await;
+    assert_eq!(invalid["error"]["code"], "BAD_REQUEST");
+
+    assert!(daemon.revoke_binding("slack-work").unwrap());
+    assert_eq!(client.next_frame().await["method"], "capability.changed");
+    let remaining = client.request("capability.list", json!({})).await;
+    assert_eq!(remaining["resources"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        remaining["resources"][0]["resource"]["chat_id"],
+        "C999"
+    );
+
+    for role in ["agent", "mcp", "approver"] {
+        let mut role_client = Client::connect(daemon.socket_path()).await;
+        role_client
+            .request("system.hello", json!({"role":role}))
+            .await;
+        assert_eq!(
+            role_client
+                .request("capability.list", json!({}))
+                .await["resources"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
 
     drop(client);
     shutdown(daemon).await;
