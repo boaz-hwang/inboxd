@@ -33,3 +33,46 @@ fn rollback_cas_tombstone_and_fts_use_the_owned_connection() {
         0
     );
 }
+
+#[test]
+fn serialized_unversioned_observations_replace_old_id_revisions_without_resurrecting_deletes() {
+    let dir = tempfile::tempdir().unwrap();
+    let host =
+        NativeHost::open_development(&dir.path().join("observations.db"), &[43; 32]).unwrap();
+    host.execute("store.migrate", &Value::Null).unwrap();
+    let chat = json!({"platform":"telegram","account":"a","chat_id":"telegram:chat:1"});
+    let key = json!({"platform":"telegram","account":"a","chat_id":"telegram:chat:1","msg_id":"telegram:message:1:200"});
+    let batch = |sequence, revision: Value, body| json!({"events":[{"kind":"create","revision":revision,"message":{"key":key,"author_id":"telegram:user:1","ts":10,"body":body,"attachments":[]}}],"sync":{"chat":chat,"cursor":"page","updated_at":20},"expected_page_sequence":sequence});
+    host.execute(
+        "store.applySyncBatch",
+        &batch(0, json!({"source":"adapter","value":"200"}), "old body"),
+    )
+    .unwrap();
+    let observation = json!({"source":"observation","value":"unversioned"});
+    host.execute(
+        "store.applySyncBatch",
+        &batch(1, observation.clone(), "edited body"),
+    )
+    .unwrap();
+    assert_eq!(
+        host.execute("store.getMessage", &key).unwrap()["body"],
+        "edited body"
+    );
+    assert!(
+        host.execute(
+            "store.applySyncBatch",
+            &batch(1, observation.clone(), "stale body")
+        )
+        .is_err()
+    );
+    host.execute("store.applySyncBatch", &json!({"events":[{"kind":"delete","revision":observation,"tombstone":{"key":key,"body":null,"deleted_at":30}}]})).unwrap();
+    host.execute(
+        "store.applySyncBatch",
+        &batch(2, observation, "resurrection"),
+    )
+    .unwrap();
+    assert_eq!(
+        host.execute("store.getMessage", &key).unwrap()["deleted_at"],
+        30.0
+    );
+}

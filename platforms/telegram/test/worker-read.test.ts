@@ -133,7 +133,7 @@ describe("Telegram bounded read_page", () => {
       messages: [
         {
           kind: "create",
-          revision: { source: "adapter", value: "200" },
+          revision: { source: "observation", value: "unversioned" },
           message: {
             key: { platform: "telegram", account: binding.account, chat_id: chatId, msg_id: `telegram:message:${rawChatId}:200` },
             author_id: `telegram:user:${selfUserId}`,
@@ -144,7 +144,7 @@ describe("Telegram bounded read_page", () => {
         },
         {
           kind: "create",
-          revision: { source: "adapter", value: "100" },
+          revision: { source: "observation", value: "unversioned" },
           message: {
             key: { platform: "telegram", account: binding.account, chat_id: chatId, msg_id: `telegram:message:${rawChatId}:100` },
             author_id: "telegram:user:888000",
@@ -221,7 +221,7 @@ describe("Telegram bounded read_page", () => {
       interval,
       kind: "backfill",
       collected_at: 121,
-      mutations_verified_at: 121,
+      mutations_verified_at: null,
     }]);
     expect(historyRequests).toEqual([
       { chat_id: rawChatId, from_message_id: "0", offset: 0, limit: 2, only_local: false },

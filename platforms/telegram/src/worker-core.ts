@@ -322,7 +322,9 @@ function messageEvent(
   };
   return {
     kind: "create",
-    revision: { source: "adapter", value: canonicalInt53(raw.id, "TDLib message id", true) },
+    // A message ID identifies a message, not its mutation order. The daemon's
+    // page CAS serializes observations; equal IDs must not suppress edits.
+    revision: { source: "observation", value: "unversioned" },
     message: {
       key,
       author_id: normalized.sender.id,
@@ -655,7 +657,8 @@ export function createTelegramWorkerCore(options: TelegramWorkerCoreOptions): Te
           interval: request.operation.interval,
           kind: "backfill",
           collected_at: observedAt,
-          mutations_verified_at: observedAt,
+          // History traversal supplies no deletion reconciliation evidence.
+          mutations_verified_at: null,
         }] : [];
         const page = {
           v: 1,
