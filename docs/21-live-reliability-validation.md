@@ -10,7 +10,7 @@ only the owner's self conversation. No historical ingestion was started.
 | --- | --- | --- | --- |
 | Daemon send followed by actual provider read | One matching message | One matching message | One matching message |
 | Independently generated new message | Observed after provider API send | Pending | Pending |
-| Independent edit | Updated body observed | Pending manual app action | Pending manual app action/support check |
+| Independent edit | Updated body observed | Manual app edit confirmed in remote read and local search | Manual app edit confirmed in remote read and local search |
 | Independent delete | Absent remotely, **still present in local search** | Pending | Pending |
 | Wi-Fi off for 20 seconds, then on | Connected; earlier probe still present once | Same | Same |
 | Account worker termination and recovery | Connected; earlier probe still present once | Same | Same |
@@ -51,8 +51,11 @@ change.
 
 - Official-app UI automation could not start: its session authentication broker
   rejected this environment. No authentication checks were bypassed. Manual
-  Telegram/Kakao edit actions have been requested; only the newly created probe
-  messages should be modified or deleted.
+  Telegram/Kakao edits were subsequently confirmed in both refreshed remote reads
+  and local search, with one matching message and identical edited bodies in each.
+  This establishes read/persistence correctness after a manual edit, not automatic
+  TUI refresh or precise event latency. Deletion of those same probes has been
+  requested and remains pending.
 - Automatic wake scheduling returned an administrator-required error. Sleep was
   not triggered without an established wake mechanism.
 - The first restart scenario returned an error before recording its final check.
