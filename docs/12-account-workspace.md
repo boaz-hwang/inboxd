@@ -1,7 +1,10 @@
 # Account-wide messaging workspace
 
 Personal-account connections expose the provider's chat directory, message pages,
-search through `account.list`, `account.messages`, and `account.search`.
+search through `account.list`, `account.messages`, and common `message.search`
+local/remote/refresh modes. `account.search` remains a compatibility read path.
+Returned history/search messages enter the same encrypted index used by MCP;
+see [shared search](20-search-foundation.md) for paging and freshness semantics.
 TUI, CLI and delegated MCP sends use the single `message.send` entrypoint. Scope-bound workers remain
 available for supported replies, templates and independent receipt readback.
 

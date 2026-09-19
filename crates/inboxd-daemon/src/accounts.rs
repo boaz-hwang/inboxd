@@ -1,7 +1,6 @@
 //! Account-wide directory and direct owner-TUI operations. Credentials never cross RPC.
 use crate::accounts_backend::{AccountBackend, ProviderIo, pagination::MessagePages};
-#[cfg(test)]
-use inboxd_storage::StorageActor;
+use inboxd_storage::{StorageActor, StorageOperation};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, process::Stdio, sync::Arc, time::Duration};
 use tokio::{
@@ -15,6 +14,8 @@ use zeroize::Zeroizing;
 mod live;
 #[path = "accounts_schedule.rs"]
 mod schedule;
+#[path = "accounts_search.rs"]
+mod search;
 use schedule::Schedule;
 
 #[derive(Clone)]
@@ -31,6 +32,7 @@ struct Slot {
     backend: Option<AccountBackend>,
     backend_seed: AccountBackend,
     generation: u64,
+    last_read_order: u64,
     sending: std::sync::Weak<()>,
     message_pages: MessagePages,
 }
@@ -72,8 +74,11 @@ struct Entry {
 }
 pub(crate) struct AccountService {
     run_worker: Option<WorkerCall>,
-    #[cfg(test)]
     storage: Option<Arc<StorageActor>>,
+    events: Option<Arc<crate::server::EventHub>>,
+    pub(crate) work: crate::work_status::WorkStatus,
+    searches: std::sync::Mutex<search::SearchJobs>,
+    observation_sequence: std::sync::atomic::AtomicU64,
     slots: Vec<Entry>,
     pages: std::sync::Mutex<BTreeMap<u64, (std::time::Instant, Value)>>,
     sequence: std::sync::atomic::AtomicU64,
@@ -82,8 +87,11 @@ impl AccountService {
     pub(crate) fn new(configs: Vec<AccountConfig>) -> Self {
         Self {
             run_worker: None,
-            #[cfg(test)]
             storage: None,
+            events: None,
+            work: Default::default(),
+            searches: Default::default(),
+            observation_sequence: std::sync::atomic::AtomicU64::new(0),
             pages: Default::default(),
             sequence: std::sync::atomic::AtomicU64::new(0),
             slots: configs
@@ -97,6 +105,7 @@ impl AccountService {
                         backend: Some(AccountBackend::new(&config.platform)),
                         backend_seed: AccountBackend::new(&config.platform),
                         generation: 0,
+                        last_read_order: 0,
                         sending: Default::default(),
                         message_pages: MessagePages::default(),
                         config,
@@ -108,9 +117,12 @@ impl AccountService {
                 .collect(),
         }
     }
-    #[cfg(test)]
     pub(crate) fn with_storage(mut self, storage: Arc<StorageActor>) -> Self {
         self.storage = Some(storage);
+        self
+    }
+    pub(crate) fn with_events(mut self, events: Arc<crate::server::EventHub>) -> Self {
+        self.events = Some(events);
         self
     }
     pub(crate) async fn list(&self, params: &Value) -> Result<Value, String> {
@@ -270,7 +282,25 @@ impl AccountService {
             )
             .await;
         }
-        self.dispatch_query(op, params).await
+        let work = self.work.start(&format!("account.{op}"), json!({"platform":params["platform"],"account":params["account"],"chat_id":params["chat_id"]}))?;
+        let observed = self.next_observation();
+        let mut request = params.clone();
+        request["_observation_order"] = json!(observed);
+        let result = async {
+            let mut result = self.dispatch_query(op, &request).await?;
+            let observed = result
+                .as_object_mut()
+                .and_then(|r| r.remove("_observation_order"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(observed);
+            if op != "send" {
+                self.persist_observations(params, &result, observed).await?;
+            }
+            Ok(result)
+        }
+        .await;
+        work.finish(result.is_ok());
+        result
     }
     /// Fixed binding workers and account reads use different provider sessions,
     /// but must share the same cache invalidation boundary. Keep the marker alive
@@ -472,27 +502,37 @@ impl AccountService {
             let (buffered, seen) = slot.message_pages.begin(&mut request)?;
             let generation = slot.generation;
             let overlapped_send = slot.sending.upgrade().is_some();
-            let mut backend = slot.take_backend();
+            let mut backend = if buffered.is_none() {
+                Some(slot.take_backend())
+            } else {
+                None
+            };
             drop(slot);
             let mut result = match buffered {
                 Some(buffered) => buffered,
                 None => {
-                    call_account(
+                    let mut result = call_account(
                         &entry.config,
-                        &mut backend,
+                        backend.as_mut().unwrap(),
                         &entry.schedule,
                         &request,
                         self.run_worker,
                     )
-                    .await?
+                    .await?;
+                    result["_observation_order"] = request["_observation_order"].clone();
+                    result
                 }
             };
             let mut slot = entry.slot.lock().await;
             let superseded = overlapped_send
                 || slot.sending.upgrade().is_some()
                 || slot.generation != generation;
-            if !superseded {
-                slot.backend = Some(backend);
+            let read_order = result["_observation_order"].as_u64().unwrap_or(0);
+            if !superseded && read_order >= slot.last_read_order {
+                if let Some(backend) = backend {
+                    slot.backend = Some(backend);
+                    slot.last_read_order = read_order;
+                }
             }
             if let Some(messages) = result["messages"].as_array_mut() {
                 messages.retain(|m| {
@@ -705,7 +745,7 @@ mod tests {
                     Ok(json!({"state":"Sent","receipt":"provider-id"}))
                 }
                 _ => Ok(
-                    json!({"messages":[{"id":"ok","chat_id":"room"},{"id":"foreign","chat_id":"other-account-room"}]}),
+                    json!({"messages":[{"id":"ok","chat_id":"room","author_id":"u","author_name":"Name","ts":42,"body":"hi"},{"id":"foreign","chat_id":"other-account-room","author_id":"u","author_name":"Name","ts":42,"body":"foreign"}]}),
                 ),
             }
         })

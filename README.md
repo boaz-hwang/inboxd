@@ -2,6 +2,10 @@
 
 A local-first messaging runtime with encrypted search and authenticated direct writes.
 
+TUI and MCP share `message.search` with explicit local, remote, and refresh modes.
+Messages returned by account reads are saved to the encrypted index; full-history
+collection remains a separate action. See [shared search and work status](docs/20-search-foundation.md).
+
 - **Local search:** SQLCipher-encrypted message index with Korean and mixed-language search.
 - **Honest results:** retrieval includes coverage and limits, distinguishing “no matches” from “not collected.”
 - **Authenticated writes:** TUI, CLI and delegated MCP clients send directly through one durable path. Uncertain sends are never automatically retried.

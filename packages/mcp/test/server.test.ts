@@ -201,3 +201,19 @@ test("MCP delegated sender credential is handshake-only and non-TTY", async () =
   await expect(pending).resolves.toEqual({ request_id: "stable-mcp-request-0001", state: "sent" });
   requester.stop();
 });
+
+test("common account search exposes modes and preserves refresh evidence without treating failure as empty history", async () => {
+  const requester = new FakeRequester();
+  requester.result = { messages: [], source: "local", coverage: { covered: [], gaps: [{ reason: "unknown" }], limits: [] }, refresh: { id: "refresh-1", state: "failed" } };
+  const tools = createToolHandlers(requester);
+  const params = { platform: "slack", account: "a", query: "needle", mode: "refresh", refresh_id: "refresh-1" };
+  expect(await tools.inbox_search(params)).toEqual(requester.result);
+  expect(requester.calls).toEqual([{ method: "message.search", params }]);
+  for (const invalid of [
+    { ...params, account: undefined },
+    { ...params, chat: { platform: "slack", account: "a", chat_id: "r" } },
+    { ...params, mode: "local" },
+    { ...params, cursor: "remote-cursor" },
+  ]) await expect(tools.inbox_search(invalid)).rejects.toBeInstanceOf(McpInputError);
+  expect(requester.calls).toHaveLength(1);
+});

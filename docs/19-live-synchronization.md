@@ -70,9 +70,11 @@ Kakao's patched `getChats({all:true})` traverses the server directory from zero
 instead of returning the login snapshot, including after a fresh login. This is
 necessary for new rooms and current previews to become visible during a session.
 
-Account workspace histories remain provider-backed, bounded pages held in memory.
-This does not introduce a durable full-history index, guarantee every offline
-edit/deletion is retained, or make legacy local search cover all account history.
+Live directory reconciliation alone does not populate a full-history index.
+Explicit account history/search reads now persist returned messages through the
+[shared search foundation](20-search-foundation.md). Unopened history and offline
+edits/deletions are not guaranteed collected. `sync.status` separates receiving
+state from read/persistence/backfill work status.
 
 Slack RTM availability depends on the existing personal session. Official Slack
 RTM is a legacy API; new Slack apps cannot use it. This implementation does not

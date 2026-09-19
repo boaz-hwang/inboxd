@@ -1001,6 +1001,7 @@ export class TuiController {
   private capabilityRequest = 0;
   private accountDirectoryRequest = 0;
   private accountSearchCursors = new Map<string, string | undefined>();
+  private accountLocalSearchCursors = new Map<string, string | undefined>();
   private accountSearchQuery = "";
   private accountSearchRequest = 0;
   private liveRefresh?: Promise<void>;
@@ -1397,7 +1398,7 @@ export class TuiController {
     const request = ++this.accountSearchRequest;
     const current = () => generation === this.generation && request === this.accountSearchRequest && !this.current.searchActive;
     this.accountSearchQuery = query;
-    if (!append) this.accountSearchCursors.clear();
+    if (!append) { this.accountSearchCursors.clear(); this.accountLocalSearchCursors.clear(); }
     this.update({ type: "queryLoading", generation, screen: "search" });
     const accounts = [...new Map((this.current.directory ?? [])
       .filter(row => !this.current.platform || row.chat?.platform === this.current.platform)
@@ -1406,10 +1407,12 @@ export class TuiController {
     const identity = (row: Row) => JSON.stringify([row.chat?.platform, row.chat?.account, row.chat?.chat_id, row.id]);
     if (append) for (const row of this.current.views.search.data) rows.set(identity(row), row);
     let failed = false;
+    let localFailed = false;
+    const hasNext = () => [...this.accountSearchCursors.values(), ...this.accountLocalSearchCursors.values()].some(Boolean);
     const publish = () => {
       const selected = this.current.views.search.data[this.current.focus];
       const data = [...rows.values()].sort((a,b) => Number(b.ts ?? 0)-Number(a.ts ?? 0));
-      this.update({ type: "querySucceeded", generation, screen: "search", data, coverage: { freshness: "partial" }, nextCursor: [...this.accountSearchCursors.values()].some(Boolean) ? "accounts-next" : undefined });
+      this.update({ type: "querySucceeded", generation, screen: "search", data, coverage: { freshness: "partial" }, nextCursor: hasNext() ? "accounts-next" : undefined });
       if (selected) {
         const focus = data.findIndex(row => identity(row) === identity(selected));
         if (focus >= 0) this.replace({ ...this.current, focus, selected: { ...this.current.selected, search: focus } });
@@ -1417,17 +1420,29 @@ export class TuiController {
     };
     await Promise.all(accounts.map(async ([key, chat]) => {
       if (!current()) return;
-      if (append && this.accountSearchCursors.has(key) && !this.accountSearchCursors.get(key)) return;
+      if (append && this.accountSearchCursors.has(key) && !this.accountSearchCursors.get(key) && !this.accountLocalSearchCursors.get(key)) return;
       const seen = new Set<string>();
       try {
+        if (!append || this.accountLocalSearchCursors.get(key)) {
+          try {
+            const cursor = this.accountLocalSearchCursors.get(key);
+            const local = await this.options.client.request("message.search", { platform: chat.platform, account: chat.account, query, mode: "local", ...(cursor ? { cursor } : {}) });
+            if (!current()) return;
+            for (const row of messageRows(local.messages)) rows.set(identity(row), { ...row, evidenceLines: ["출처: 저장 기록 · 부분 문자열 검색"] });
+            this.accountLocalSearchCursors.set(key, stringValue(local.next_cursor));
+            publish();
+            this.replace({ ...this.current, notice: "저장된 검색 결과 · 원격 확인 중…" });
+          } catch { localFailed = true; }
+        }
+        if (append && this.accountSearchCursors.has(key) && !this.accountSearchCursors.get(key)) return;
         for (let page = 0; page < 25; page++) {
           const cursor = this.accountSearchCursors.get(key);
           if (cursor && seen.has(cursor)) throw new Error("검색 커서 반복");
           if (cursor) seen.add(cursor);
           this.replace({ ...this.current, notice: "메시지 검색 중…" });
-          const result = await this.options.client.request("account.search", { platform: chat.platform, account: chat.account, query, ...(cursor ? { cursor } : {}) });
+          const result = await this.options.client.request("message.search", { platform: chat.platform, account: chat.account, query, mode: "remote", ...(cursor ? { cursor } : {}) });
           if (!current()) return;
-          for (const row of messageRows(result.messages)) rows.set(identity(row), row);
+          for (const row of messageRows(result.messages)) rows.set(identity(row), { ...row, evidenceLines: ["출처: 원격 확인 · 제공자 검색"] });
           const next = stringValue(result.next_cursor);
           this.accountSearchCursors.set(key, next);
           publish();
@@ -1437,7 +1452,7 @@ export class TuiController {
     }));
     if (current()) {
       publish();
-      this.replace({ ...this.current, notice: failed ? "일부 메신저의 검색이 실패했습니다. 검색 결과는 일부입니다." : [...this.accountSearchCursors.values()].some(Boolean) ? "검색 결과 더 있음 · n 계속 검색" : undefined });
+      this.replace({ ...this.current, notice: failed ? "일부 원격 확인 실패 · 저장된 결과는 최신이 아닐 수 있습니다." : localFailed ? "로컬 조회 실패 · 원격 결과만 표시" : hasNext() ? "저장 기록 + 원격 검색 · 더 있음 · n 계속 검색" : "저장 기록 + 원격 검색 · 조회한 페이지 확인 완료" });
     }
   }
 
@@ -1705,7 +1720,10 @@ export class TuiController {
       { id: "authentication", state: auth.error !== undefined ? "unknown" : diagnosticSummary(status.auth) ?? (typeof auth.authenticated === "boolean" ? `authenticated=${auth.authenticated}` : "unknown"),
         evidenceLines: auth.error === undefined ? [] : [`auth.status: ${auth.error}`] },
       { id: "sync", state: sync.error !== undefined ? "unknown" : diagnosticSummary(status.sync) ?? stringValue(sync.state) ?? "unknown",
-        evidenceLines: sync.error === undefined ? [] : [`sync.status: ${sync.error}`] },
+        evidenceLines: sync.error !== undefined ? [`sync.status: ${sync.error}`] : [
+          ...(typeof sync.receiving_state === "string" ? [`Receiving: ${sync.receiving_state}`] : []),
+          ...(record(sync.work) ? [`Active work: ${numberValue(record(sync.work)?.active) ?? 0}`, ...records(record(sync.work)?.jobs).slice(-3).map(job => `${stringValue(job.operation) ?? "work"}: ${stringValue(job.state) ?? "unknown"}`)] : []),
+        ] },
       { id: "isolation", state: isolation === undefined ? "unknown" : `grade=${stringValue(isolation.grade) ?? "unknown"} protected=${typeof isolation.protected === "boolean" ? isolation.protected : "unknown"}`,
         evidenceLines: stringValue(isolation?.warning) === undefined ? [] : [stringValue(isolation?.warning)!] },
     ] });

@@ -99,6 +99,7 @@ impl AccountService {
     }
 
     pub(crate) async fn stop_live(&self) {
+        self.stop_searches().await;
         for entry in &self.slots {
             if let Some(task) = entry.refresh_task.lock().unwrap().take() {
                 task.abort();

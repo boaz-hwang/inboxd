@@ -17,24 +17,6 @@ fn text<'a>(v: &'a Value, k: &str) -> CoreResult<&'a str> {
         .filter(|s| !s.is_empty() && s.len() <= 16000)
         .ok_or_else(|| error("invalid observation field"))
 }
-pub(crate) fn chat_id(platform: &str, chat: &str) -> String {
-    if platform == "telegram" && !chat.starts_with("telegram:chat:") {
-        format!("telegram:chat:{chat}")
-    } else {
-        chat.into()
-    }
-}
-fn message_id(platform: &str, chat: &str, id: &str) -> String {
-    if platform == "telegram" && !id.starts_with("telegram:message:") {
-        format!(
-            "telegram:message:{}:{id}",
-            chat.strip_prefix("telegram:chat:").unwrap_or(chat)
-        )
-    } else {
-        id.into()
-    }
-}
-
 pub(crate) fn observe(connection: &Connection, input: &Value) -> CoreResult<Value> {
     let platform = text(input, "platform")?;
     let account = text(input, "account")?;
@@ -46,24 +28,13 @@ pub(crate) fn observe(connection: &Connection, input: &Value) -> CoreResult<Valu
         .filter(|m| m.len() <= 1000)
         .ok_or_else(|| error("invalid observation page"))?;
     let tx = connection.unchecked_transaction().map_err(sql_error)?;
+    let mut changed = 0;
     for row in rows {
-        let chat = chat_id(platform, text(row, "chat_id")?);
-        let id = message_id(platform, &chat, text(row, "id")?);
+        let chat = text(row, "chat_id")?;
+        let id = text(row, "id")?;
         let author = row["author_id"]
             .as_str()
             .ok_or_else(|| error("author required"))?;
-        let author = if platform == "telegram" && !author.starts_with("telegram:") {
-            format!(
-                "telegram:{}:{author}",
-                if row["author_kind"] == "chat" {
-                    "chat"
-                } else {
-                    "user"
-                }
-            )
-        } else {
-            author.into()
-        };
         let body = row["body"]
             .as_str()
             .filter(|s| s.len() <= 65536)
@@ -72,10 +43,11 @@ pub(crate) fn observe(connection: &Connection, input: &Value) -> CoreResult<Valu
             .as_f64()
             .filter(|n| n.is_finite() && *n >= 0.)
             .ok_or_else(|| error("invalid timestamp"))?;
-        let existing: Option<(Option<f64>, String)> = tx.query_row(
-            "SELECT deleted_at, revision_value FROM messages WHERE platform=? AND account=? AND chat_id=? AND msg_id=?",
-            params![platform,account,chat,id], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(sql_error)?;
-        if let Some((deleted, revision)) = existing {
+        type Existing = (Option<f64>, String, Option<String>, Option<String>, f64);
+        let existing: Option<Existing> = tx.query_row(
+            "SELECT deleted_at, revision_value, body, author_id, ts FROM messages WHERE platform=? AND account=? AND chat_id=? AND msg_id=?",
+            params![platform,account,chat,id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(sql_error)?;
+        if let Some((deleted, revision, _, _, _)) = &existing {
             if deleted.is_some()
                 || revision
                     .strip_prefix("observed:")
@@ -84,6 +56,16 @@ pub(crate) fn observe(connection: &Connection, input: &Value) -> CoreResult<Valu
             {
                 continue;
             }
+        }
+        if existing
+            .as_ref()
+            .is_none_or(|(_, _, old_body, old_author, old_ts)| {
+                old_body.as_deref() != Some(body)
+                    || old_author.as_deref() != Some(author)
+                    || *old_ts != ts
+            })
+        {
+            changed += 1;
         }
         tx.execute(
             "INSERT OR IGNORE INTO chats(platform,account,chat_id) VALUES(?,?,?)",
@@ -108,14 +90,14 @@ pub(crate) fn observe(connection: &Connection, input: &Value) -> CoreResult<Valu
         }
     }
     tx.commit().map_err(sql_error)?;
-    Ok(json!({"stored":rows.len()}))
+    Ok(json!({"stored":rows.len(),"changed":changed}))
 }
 
 pub(crate) fn search(connection: &Connection, input: &Value) -> CoreResult<Value> {
     let platform = text(input, "platform")?;
     let account = text(input, "account")?;
     let query = text(input, "query")?;
-    let chat = input["chat_id"].as_str().map(|c| chat_id(platform, c));
+    let chat = input["chat_id"].as_str();
     let interval = input
         .get("interval")
         .cloned()
@@ -152,7 +134,7 @@ pub(crate) fn search(connection: &Connection, input: &Value) -> CoreResult<Value
     ];
     if let Some(chat) = &chat {
         filter.push_str(" AND m.chat_id=?");
-        args.push(chat.clone().into());
+        args.push((*chat).to_owned().into());
     }
     if let Some(cursor) = input.get("cursor") {
         let raw = cursor
@@ -223,26 +205,6 @@ pub(crate) fn search(connection: &Connection, input: &Value) -> CoreResult<Value
     } else {
         None
     };
-    if platform == "telegram" {
-        for row in &mut messages {
-            let chat = row["chat_id"]
-                .as_str()
-                .unwrap()
-                .strip_prefix("telegram:chat:")
-                .unwrap_or(row["chat_id"].as_str().unwrap())
-                .to_owned();
-            let prefix = format!("telegram:message:{chat}:");
-            row["id"] = json!(
-                row["msg_id"]
-                    .as_str()
-                    .unwrap()
-                    .strip_prefix(&prefix)
-                    .unwrap_or(row["msg_id"].as_str().unwrap())
-            );
-            row["msg_id"] = row["id"].clone();
-            row["chat_id"] = json!(chat);
-        }
-    }
     // Account-wide partial observations do not establish interval completeness.
     Ok(
         json!({"messages":messages,"next_cursor":next,"source":"local","semantics":"substring","coverage":{"covered":[],"gaps":[{"interval":interval,"reason":"unknown"}],"limits":[],"freshness":[]}}),

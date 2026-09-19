@@ -7,6 +7,7 @@ pub use accounts::AccountConfig;
 mod capability;
 mod direct_send;
 mod server;
+mod work_status;
 mod worker;
 
 pub use capability::TrustedBinding;
@@ -284,13 +285,18 @@ pub async fn launch(config: DaemonConfig) -> Result<Daemon> {
     let connection_tasks = Arc::new(AtomicUsize::new(0));
     let server_connection_tasks = Arc::clone(&connection_tasks);
     let maximum = config.max_queued_events;
+    let account_service = Arc::new(
+        accounts::AccountService::new(config.accounts)
+            .with_storage(Arc::clone(&owner.actor))
+            .with_events(Arc::clone(&events)),
+    );
     let server = tokio::spawn(async move {
         run_server(
             listener,
             server_owner,
             approver_token,
             ServerRuntime {
-                accounts: Arc::new(accounts::AccountService::new(config.accounts)),
+                accounts: account_service,
                 events: server_events,
                 capabilities: server_capabilities,
                 connection_tasks: server_connection_tasks,

@@ -237,8 +237,8 @@ async fn all_legacy_read_methods_are_storage_backed_and_audited_by_session() {
         1
     );
     assert_eq!(
-        client.request("sync.status", json!({})).await,
-        json!({"state":"idle", "accounts":[]})
+        client.request("sync.status", json!({})).await["state"],
+        json!("idle")
     );
     assert_eq!(
         client.request("auth.status", json!({})).await,

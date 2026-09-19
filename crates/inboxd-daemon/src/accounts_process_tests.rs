@@ -416,3 +416,38 @@ async fn live_side_channel_does_not_consume_request_responses_and_reads_while_id
     service.stop_live().await;
     assert_eq!(receiver.borrow().state, "disconnected");
 }
+
+#[tokio::test]
+async fn common_remote_search_persists_real_adapter_results_for_all_three_accounts() {
+    for platform in ["slack", "telegram", "kakao"] {
+        let (_directory, service) = service(platform).await;
+        let service = Arc::new(service);
+        let request = json!({"platform":platform,"account":"synthetic","mode":"remote","query":"needle","limit":5});
+        let remote = service.search(&request).await.unwrap();
+        assert_eq!(remote["source"], "remote");
+        assert_eq!(remote["messages"].as_array().unwrap().len(), 5);
+        let mut local_request = request.clone();
+        local_request["mode"] = json!("local");
+        let local = service.search(&local_request).await.unwrap();
+        assert_eq!(local["messages"].as_array().unwrap().len(), 5);
+        assert_eq!(local["messages"][0]["author_name"], "실제 이름");
+        assert_eq!(local["messages"][0]["chat_id"], "1");
+        let mut remote_ids = remote["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        let mut local_ids = local["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["msg_id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        remote_ids.sort();
+        local_ids.sort();
+        assert_eq!(local_ids, remote_ids);
+        assert!(local["coverage"]["covered"].as_array().unwrap().is_empty());
+        service.stop_live().await;
+    }
+}

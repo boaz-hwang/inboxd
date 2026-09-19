@@ -29,7 +29,13 @@ pub(crate) struct MessagePages {
 }
 
 fn scope(request: &Value) -> Value {
-    json!([request["op"], request["chat_id"], request["query"]])
+    json!([
+        request["op"],
+        request["chat_id"],
+        request["query"],
+        request["interval"],
+        request["limit"]
+    ])
 }
 impl MessagePages {
     /// Extract the per-request cycle chain before releasing the account lock.
@@ -131,7 +137,9 @@ impl MessagePages {
         // Reserve the exact length of a daemon-issued cursor while fitting the full
         // response, including platform/account tags and all result metadata.
         output["next_cursor"] = json!(format!("account:{}", Uuid::nil()));
-        let mut count = messages.len().min(80);
+        let mut count = messages
+            .len()
+            .min(request["limit"].as_u64().unwrap_or(80).clamp(1, 80) as usize);
         loop {
             output["messages"] = json!(&messages[..count]);
             if serde_json::to_vec(&output)

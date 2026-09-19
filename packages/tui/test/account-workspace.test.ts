@@ -52,7 +52,7 @@ function setup(send?: () => Promise<JsonObject>) {
               },
             ],
           };
-        if (method === "account.search")
+        if (method === "message.search" && params.mode === "remote")
           return {
             messages:
               params.platform === "telegram"
@@ -213,7 +213,7 @@ test("account searches start independently before a slow provider completes", as
     start: async () => {}, stop() {},
     async request(method, params) {
       if (method === "account.list") return { available: true, errors: [], chats: ["slack", "telegram"].map(platform => ({ platform, account: "a", chat_id: "r", display_name: "이름", latest_ts: 1 })) };
-      if (method === "account.search") { started.push(String(params.platform)); if (params.platform === "slack") await gate; return { messages: [] }; }
+      if (method === "message.search" && params.mode === "remote") { started.push(String(params.platform)); if (params.platform === "slack") await gate; return { messages: [] }; }
       return {};
     },
   } });
@@ -233,5 +233,35 @@ test("confirmed send returns the conversation viewport to its newest message", a
   expect(calls.filter(call => call.method === "message.send")).toHaveLength(1);
   expect(controller.state.focus).toBe(controller.state.views.chat.data.length - 1);
   expect(controller.state.selected.chat).toBe(controller.state.focus);
+  controller.stop();
+});
+
+test("account search renders local evidence before remote completes and keeps it on remote failure", async () => {
+  let rejectRemote!: (reason: Error) => void;
+  const remote = new Promise<JsonObject>((_, reject) => { rejectRemote = reject; });
+  const modes: unknown[] = [];
+  const controller = createTuiController({ client: {
+    start: async () => {}, stop() {},
+    async request(method, params) {
+      if (method === "account.list") return { available: true, errors: [], chats: [{ platform: "slack", account: "a", chat_id: "r", display_name: "Room", latest_ts: 1 }] };
+      if (method === "message.search") {
+        modes.push(params.mode);
+        if (params.mode === "remote") return remote;
+        return { source: "local", next_cursor: params.cursor ? undefined : "saved-next", messages: [{ platform: "slack", account: "a", chat_id: "r", msg_id: params.cursor ? "saved2" : "saved", ts: 1, body: params.cursor ? "saved second" : "saved needle" }] };
+      }
+      return {};
+    },
+  } });
+  await controller.start(); await controller.dispatchKey("/"); await controller.dispatchPaste("needle");
+  const searching = controller.dispatchKey("Enter");
+  for (let i = 0; i < 30 && modes.length < 2; i++) await Promise.resolve();
+  expect(controller.state.views.search.data[0]?.body).toBe("saved needle");
+  expect(modes).toEqual(["local", "remote"]);
+  rejectRemote(new Error("offline")); await searching;
+  expect(controller.state.views.search.data[0]?.body).toBe("saved needle");
+  expect(controller.state.notice).toContain("원격 확인 실패");
+  expect(controller.state.views.search.nextCursor).toBeDefined();
+  await controller.dispatchKey("n");
+  expect(controller.state.views.search.data.some(row => row.body === "saved second")).toBe(true);
   controller.stop();
 });

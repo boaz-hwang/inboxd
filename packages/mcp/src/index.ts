@@ -72,10 +72,23 @@ const intervalSchema = z.object({
   to_ts: z.number().finite(),
 }).strict().refine((value) => value.from_ts <= value.to_ts, "interval must be ordered");
 const inboxSearchSchema = z.object({
-  chat: chatSchema,
-  interval: intervalSchema,
+  chat: chatSchema.optional(),
+  platform: nonEmpty.max(1024).optional(),
+  account: nonEmpty.max(1024).optional(),
+  chat_id: nonEmpty.max(1024).optional(),
+  interval: intervalSchema.optional(),
   query: nonEmpty,
-}).strict();
+  mode: z.enum(["local", "remote", "refresh"]).optional(),
+  limit: z.number().int().min(1).max(80).optional(),
+  cursor: nonEmpty.max(4096).optional(),
+  refresh_id: nonEmpty.max(80).optional(),
+}).strict().superRefine((value, context) => {
+  const scoped = value.chat ? value.platform === undefined && value.account === undefined && value.chat_id === undefined : value.platform !== undefined && value.account !== undefined;
+  if (!scoped) context.addIssue({ code: "custom", message: "supply chat or platform/account scope" });
+  if (value.chat && !value.mode && !value.interval) context.addIssue({ code: "custom", message: "legacy chat search requires interval; otherwise specify mode" });
+  if (value.refresh_id && value.mode !== "refresh") context.addIssue({ code: "custom", message: "refresh_id requires refresh mode" });
+  if (value.cursor && value.mode === "refresh") context.addIssue({ code: "custom", message: "continue pages using local or remote mode" });
+});
 const inboxListSchema = z.object({
   chat: chatSchema,
   interval: intervalSchema,
@@ -178,7 +191,7 @@ export function createMcpServer(requester: ProtocolRequester): McpServer {
   const server = new McpServer({ name: "inboxd", version: "0.0.0" });
   server.registerTool("inbox_search", {
     title: "Search inbox",
-    description: "Search one chat and return messages plus coverage, gaps, and limits.",
+    description: "Search an explicit account (platform/account, optional chat_id) or chat. mode=local searches stored substrings; remote queries the provider and persists returned messages. refresh returns local results immediately plus refresh.id; poll with the same scope/query/mode and refresh_id until succeeded or failed. Continue next_cursor using the returned source as mode. Local and provider search semantics differ; unknown coverage does not mean empty history. A chat+interval request without mode retains legacy local behavior.",
     inputSchema: inboxSearchSchema,
   }, async (input) => textResult(await tools.inbox_search(input)));
   server.registerTool("inbox_list", {

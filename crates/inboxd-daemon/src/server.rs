@@ -155,6 +155,7 @@ pub(crate) async fn run_server(
     owner
 }
 
+#[derive(Clone)]
 struct Session {
     id: String,
     role: Option<ClientRole>,
@@ -240,19 +241,30 @@ async fn handle_connection(
                             continue;
                         }
                     };
-                    if session.role.is_some() && matches!(request.method.as_str(), "account.messages" | "account.search" | "account.list") {
+                    let common_search = request.method == "message.search" && (request.params.contains_key("mode") || request.params.contains_key("platform"));
+                    if session.role.is_some() && (common_search || matches!(request.method.as_str(), "account.messages" | "account.search" | "account.list")) {
                         if reads.len() >= 16 {
                             if write_frame(&mut socket, failure(&request.id, &request.method, "BAD_REQUEST", "동시 조회 제한")).await.is_err() { break 'connection; }
                             continue;
                         }
                         let accounts = Arc::clone(&accounts);
+                        let actor = Arc::clone(&actor);
+                        let read_session = session.clone();
                         reads.spawn(async move {
                             let params = Value::Object(request.params);
-                            let result = if request.method == "account.list" { accounts.list(&params).await }
+                            let result = if common_search { accounts.search(&params).await }
+                                else if request.method == "account.list" { accounts.list(&params).await }
                                 else { accounts.query(request.method.strip_prefix("account.").unwrap(), &params).await };
+                            let result = match result {
+                                Ok(value) if common_search => {
+                                    let subject = json!({"platform":params["platform"],"account":params["account"],"chat":params["chat"]}).to_string();
+                                    audit_read(&read_session,&actor,"read.search",subject,value["messages"].as_array().map_or(0,Vec::len)).await.map(|_|value).map_err(|e|e.message)
+                                }
+                                other => other,
+                            };
                             let response = match result {
                                 Ok(value) => success(&request.id, &request.method, value),
-                                Err(error) => failure(&request.id, &request.method, "UNSUPPORTED", &error),
+                                Err(error) => failure(&request.id, &request.method, if common_search {"BAD_REQUEST"}else{"UNSUPPORTED"}, &error),
                             };
                             (response, request.id, request.method)
                         });
@@ -779,61 +791,73 @@ async fn dispatch(
             if !session.trusted_sender {
                 assert_trusted_approver(session)?;
             }
-            let (chat, interval) = if request.params.contains_key("chat") {
-                (chat(&request.params)?, interval(&request.params)?)
-            } else {
-                (flat_chat(&request.params)?, flat_interval(&request.params)?)
-            };
-            let resource = json!({
-                "v":1,
-                "kind":"chat",
-                "platform":chat["platform"],
-                "account":chat["account"],
-                "chat_id":chat["chat_id"],
-            });
-            let binding = capabilities.exact(&resource).ok_or_else(|| {
-                RpcError::unsupported(
-                    "sync.backfill is unavailable because no adapter is configured",
+            let work = accounts
+                .work
+                .start(
+                    "sync.backfill",
+                    request.params.get("chat").cloned().unwrap_or(Value::Null),
                 )
-            })?;
-            if binding.claims["read"]["mode"] == "none" {
-                return Err(RpcError::unsupported(
-                    "sync.backfill is unavailable for this resource",
-                ));
+                .map_err(RpcError::bad_request)?;
+            let result = async {
+                let (chat, interval) = if request.params.contains_key("chat") {
+                    (chat(&request.params)?, interval(&request.params)?)
+                } else {
+                    (flat_chat(&request.params)?, flat_interval(&request.params)?)
+                };
+                let resource = json!({
+                    "v":1,
+                    "kind":"chat",
+                    "platform":chat["platform"],
+                    "account":chat["account"],
+                    "chat_id":chat["chat_id"],
+                });
+                let binding = capabilities.exact(&resource).ok_or_else(|| {
+                    RpcError::unsupported(
+                        "sync.backfill is unavailable because no adapter is configured",
+                    )
+                })?;
+                if binding.claims["read"]["mode"] == "none" {
+                    return Err(RpcError::unsupported(
+                        "sync.backfill is unavailable for this resource",
+                    ));
+                }
+                let worker = binding.worker.as_ref().ok_or_else(|| {
+                    RpcError::unsupported(
+                        "sync.backfill is unavailable because no worker is configured",
+                    )
+                })?;
+                let sync =
+                    actor_call(actor, StorageOperation::ReadSyncState, chat.clone(), false).await?;
+                let expected_page_sequence = sync
+                    .get("page_sequence")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let limit = binding.claims["read"]["limits"]["max_page_size"]
+                    .as_u64()
+                    .ok_or_else(|| RpcError::unsupported("configured read limit is invalid"))?;
+                let max_pages = binding.claims["read"]["limits"]["max_pages"]
+                    .as_u64()
+                    .ok_or_else(|| RpcError::unsupported("configured page budget is invalid"))?;
+                let plan = BackfillPagePlan::for_request(&sync, &interval, max_pages)?;
+                let cursor = plan.provider_cursor.clone();
+                let page = worker
+                    .read_page(&binding.id, resource, interval, limit, cursor)
+                    .await
+                    .map_err(|error| RpcError::unsupported(error.to_string()))?;
+                let event_count = page.messages.len() + page.tombstones.len();
+                let authoritative = page.authoritative;
+                let batch = plan.into_apply_sync_batch(page, expected_page_sequence)?;
+                actor_call(actor, StorageOperation::ApplySyncBatch, batch, false).await?;
+                // Notify only after durable commit, including empty-page coverage updates.
+                let _ = events.publish("message.upserted", json!({"chat":chat}));
+                let _ = events.publish("coverage.changed", json!({"chat":chat}));
+                Ok(json!({"event_count":event_count,"authoritative":authoritative}))
             }
-            let worker = binding.worker.as_ref().ok_or_else(|| {
-                RpcError::unsupported(
-                    "sync.backfill is unavailable because no worker is configured",
-                )
-            })?;
-            let sync =
-                actor_call(actor, StorageOperation::ReadSyncState, chat.clone(), false).await?;
-            let expected_page_sequence = sync
-                .get("page_sequence")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let limit = binding.claims["read"]["limits"]["max_page_size"]
-                .as_u64()
-                .ok_or_else(|| RpcError::unsupported("configured read limit is invalid"))?;
-            let max_pages = binding.claims["read"]["limits"]["max_pages"]
-                .as_u64()
-                .ok_or_else(|| RpcError::unsupported("configured page budget is invalid"))?;
-            let plan = BackfillPagePlan::for_request(&sync, &interval, max_pages)?;
-            let cursor = plan.provider_cursor.clone();
-            let page = worker
-                .read_page(&binding.id, resource, interval, limit, cursor)
-                .await
-                .map_err(|error| RpcError::unsupported(error.to_string()))?;
-            let event_count = page.messages.len() + page.tombstones.len();
-            let authoritative = page.authoritative;
-            let batch = plan.into_apply_sync_batch(page, expected_page_sequence)?;
-            actor_call(actor, StorageOperation::ApplySyncBatch, batch, false).await?;
-            // Notify only after durable commit, including empty-page coverage updates.
-            let _ = events.publish("message.upserted", json!({"chat":chat}));
-            let _ = events.publish("coverage.changed", json!({"chat":chat}));
-            Ok(json!({"event_count":event_count,"authoritative":authoritative}))
+            .await;
+            work.finish(result.is_ok());
+            result
         }
-        "sync.status" => Ok(accounts.live_status()),
+        "sync.status" => Ok(accounts.sync_status()),
         "auth.status" => {
             let directory = capabilities.list();
             let authenticated = directory["resources"].as_array().is_some_and(|resources| {
@@ -1116,5 +1140,106 @@ mod backfill_tests {
             .unwrap_or_else(|error| panic!("{}", error.message));
         assert_eq!(fresh.provider_cursor, Value::Null);
         assert_eq!(fresh.committed_pages, 0);
+    }
+}
+
+#[cfg(test)]
+mod common_search_wire_tests {
+    use super::*;
+    use crate::{AccountConfig, accounts::AccountService};
+    use inboxd_storage::StorageActorConfig;
+    use std::os::unix::fs::PermissionsExt;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    async fn request(
+        stream: &mut BufReader<UnixStream>,
+        id: &str,
+        method: &str,
+        params: Value,
+    ) -> Value {
+        stream
+            .get_mut()
+            .write_all(
+                format!(
+                    "{}\n",
+                    json!({"type":"request","id":id,"method":method,"params":params})
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut line = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream.read_line(&mut line),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+    #[tokio::test]
+    async fn common_local_search_is_protocol_only_shared_and_rejects_scope_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let actor = Arc::new(
+            StorageActor::start(StorageActorConfig::new(
+                dir.path().join("wire.db"),
+                [0x71; 32],
+            ))
+            .unwrap(),
+        );
+        actor.call_async(StorageOperation::ObserveMessages,json!({"platform":"slack","account":"a","observed_at":1,"messages":[{"id":"1","chat_id":"room","author_id":"u","author_name":"Author","ts":10,"body":"needle observed"}]})).await.unwrap();
+        let accounts = Arc::new(
+            AccountService::new(vec![AccountConfig {
+                platform: "slack".into(),
+                account: "a".into(),
+                config: Zeroizing::new("{}".into()),
+            }])
+            .with_storage(Arc::clone(&actor)),
+        );
+        for role in ["reader", "agent"] {
+            let (client, server) = UnixStream::pair().unwrap();
+            let task = tokio::spawn(handle_connection(
+                server,
+                Arc::clone(&actor),
+                Arc::new(Zeroizing::new("unused".into())),
+                Arc::new(EventHub::default()),
+                Arc::new(CapabilityRegistry::new(vec![]).unwrap()),
+                32,
+                Arc::clone(&accounts),
+            ));
+            let mut stream = BufReader::new(client);
+            assert_eq!(
+                request(&mut stream, "hello", "system.hello", json!({"role":role})).await["ok"],
+                true
+            );
+            let local = request(
+                &mut stream,
+                "local",
+                "message.search",
+                json!({"platform":"slack","account":"a","query":"needle","mode":"local"}),
+            )
+            .await;
+            assert_eq!(local["ok"], true, "{local}");
+            assert_eq!(local["result"]["messages"][0]["body"], "needle observed");
+            let legacy=request(&mut stream,"legacy","message.search",json!({"chat":{"platform":"slack","account":"a","chat_id":"room"},"interval":{"from_ts":0,"to_ts":20},"query":"needle"})).await;
+            assert_eq!(
+                legacy["result"]["messages"][0]["body"],
+                local["result"]["messages"][0]["body"]
+            );
+            let wrong = request(
+                &mut stream,
+                "wrong",
+                "message.search",
+                json!({"platform":"slack","account":"other","query":"needle","mode":"local"}),
+            )
+            .await;
+            assert_eq!(wrong["ok"], false);
+            let state = request(&mut stream, "status", "sync.status", json!({})).await;
+            assert_eq!(state["result"]["work"]["active"], 0);
+            drop(stream);
+            task.await.unwrap();
+        }
     }
 }

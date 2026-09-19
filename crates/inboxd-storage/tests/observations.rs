@@ -2,13 +2,13 @@ use inboxd_storage::NativeHost;
 use serde_json::{Value, json};
 
 fn page(at: u64, rows: Value) -> Value {
-    json!({"platform":"telegram","account":"a","observed_at":at,"messages":rows})
+    json!({"platform":"test","account":"a","observed_at":at,"messages":rows})
 }
 fn message(id: &str, chat: &str, body: &str) -> Value {
     json!({"id":id,"chat_id":chat,"author_id":"7","author_kind":"user","author_name":"작성자","ts":10,"body":body})
 }
 fn query() -> Value {
-    json!({"platform":"telegram","account":"a","query":"검색","limit":1})
+    json!({"platform":"test","account":"a","query":"검색","limit":1})
 }
 
 #[test]
@@ -54,7 +54,7 @@ fn observations_share_the_index_survive_restart_and_do_not_assert_coverage() {
     next["account"] = json!("a");
     next["query"] = json!("다른");
     assert!(host.execute("observations.search", &next).is_err());
-    let chat = json!({"platform":"telegram","account":"a","chat_id":"telegram:chat:20"});
+    let chat = json!({"platform":"test","account":"a","chat_id":"20"});
     assert!(
         host.execute("store.readSyncState", &chat)
             .unwrap()
@@ -91,7 +91,7 @@ fn malformed_pages_rollback_and_tombstones_never_resurrect() {
             .unwrap()
             .is_empty()
     );
-    let key = json!({"platform":"telegram","account":"a","chat_id":"telegram:chat:20","msg_id":"telegram:message:20:1"});
+    let key = json!({"platform":"test","account":"a","chat_id":"20","msg_id":"1"});
     host.execute("store.applySyncBatch",&json!({"events":[{"kind":"delete","revision":{"source":"observation","value":"unversioned"},"tombstone":{"key":key,"body":null,"deleted_at":11}}]})).unwrap();
     host.execute(
         "observations.store",
@@ -126,7 +126,7 @@ fn escaped_short_queries_and_fts_phrases_have_scope_bound_pagination() {
         let mut input = query();
         input["query"] = json!(q);
         let result = host.execute("observations.search", &input).unwrap();
-        assert_eq!(result["messages"][0]["id"], "1");
+        assert_eq!(result["messages"][0]["msg_id"], "1");
         assert!(result["next_cursor"].is_null());
     }
 }
@@ -142,8 +142,8 @@ fn bounded_provider_revisions_can_follow_partial_observations_and_rich_fields_su
         &page(1, json!([message("1", "20", "검색 partial")])),
     )
     .unwrap();
-    let key = json!({"platform":"telegram","account":"a","chat_id":"telegram:chat:20","msg_id":"telegram:message:20:1"});
-    let event = json!({"kind":"create","revision":{"source":"adapter","value":50},"message":{"key":key,"author_id":"telegram:user:7","ts":10,"body":"검색 full","edited_at":15,"parent_id":{"platform":"telegram","account":"a","chat_id":"telegram:chat:20","msg_id":"parent"},"attachments":[{"filename":"a.txt","mime":"text/plain","size":4}]}});
+    let key = json!({"platform":"test","account":"a","chat_id":"20","msg_id":"1"});
+    let event = json!({"kind":"create","revision":{"source":"adapter","value":50},"message":{"key":key,"author_id":"telegram:user:7","ts":10,"body":"검색 full","edited_at":15,"parent_id":{"platform":"test","account":"a","chat_id":"20","msg_id":"parent"},"attachments":[{"filename":"a.txt","mime":"text/plain","size":4}]}});
     host.execute("store.applySyncBatch", &json!({"events":[event]}))
         .unwrap();
     host.execute(
@@ -177,7 +177,7 @@ fn pages_obey_byte_budget_and_long_queries_use_compact_scope_cursors() {
         ),
     )
     .unwrap();
-    let input = json!({"platform":"telegram","account":"a","query":long,"limit":80});
+    let input = json!({"platform":"test","account":"a","query":long,"limit":80});
     let result = host.execute("observations.search", &input).unwrap();
     assert_eq!(result["messages"].as_array().unwrap().len(), 1);
     assert!(serde_json::to_vec(&result).unwrap().len() < 58000);
@@ -185,7 +185,7 @@ fn pages_obey_byte_budget_and_long_queries_use_compact_scope_cursors() {
     let mut next = input.clone();
     next["cursor"] = result["next_cursor"].clone();
     assert_eq!(
-        host.execute("observations.search", &next).unwrap()["messages"][0]["id"],
+        host.execute("observations.search", &next).unwrap()["messages"][0]["msg_id"],
         "2"
     );
 }

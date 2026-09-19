@@ -6,6 +6,7 @@ pub(crate) mod contract;
 mod kakao;
 pub(crate) mod pagination;
 mod slack;
+pub(crate) mod storage_keys;
 mod telegram;
 
 pub(crate) trait ProviderIo {
