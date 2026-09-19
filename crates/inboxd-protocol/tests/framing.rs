@@ -27,9 +27,9 @@ fn frozen_method_surface_and_additive_capability_event_are_exact() {
         [
             "message.upserted",
             "coverage.changed",
-            "account.changed",
             "safety.intent.changed",
             "capability.changed",
+            "account.changed",
         ]
     );
 }

@@ -11,7 +11,7 @@ const methods = new Set([
 export function createSlackAccount(config: {
   bot_token: string;
   session_cookie?: string;
-}, fetcher: typeof fetch = fetch): AccountAdapter {
+}, fetcher: typeof fetch = fetch, makeListener: (client: SlackClient) => Pick<SlackListener, "on" | "start" | "stop"> = client => new SlackListener(client)): AccountAdapter {
   let stopListening: (() => void) | undefined;
   async function call(
     method: string,
@@ -48,7 +48,7 @@ export function createSlackAccount(config: {
     async listen(emit) {
       if (!config.session_cookie) { emit({ event: "state", state: "unsupported" }); return () => {}; }
       const client = await new SlackClient().login({ token: config.bot_token, cookie: config.session_cookie });
-      const listener = new SlackListener(client);
+      const listener = makeListener(client);
       listener.on("connected", () => emit({ event: "state", state: "connected" }));
       listener.on("disconnected", () => emit({ event: "state", state: "disconnected" }));
       listener.on("error", () => emit({ event: "state", state: "disconnected" }));

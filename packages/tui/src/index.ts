@@ -1074,7 +1074,7 @@ export class TuiController {
 
   /** Called by the runtime's ReconnectingProtocolClient event callback. */
   async receiveEvent(method: ProtocolEventMethod, params: JsonObject = {}): Promise<void> {
-    if (method === "account.changed") {
+    if (method === "account.changed" && this.current.accountMode) {
       if (!this.current.accountMode || this.current.connection.status !== "connected" || params.phase === "refreshing") return;
       this.liveDirectoryDirty = true;
       this.liveChatDirty ||= !!this.activeChat && (!params.account || (params.account === this.activeChat.account && params.platform === this.activeChat.platform));

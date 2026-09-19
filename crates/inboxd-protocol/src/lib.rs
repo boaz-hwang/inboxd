@@ -96,9 +96,9 @@ pub const REQUEST_METHODS: [&str; 23] = [
 pub const EVENT_METHODS: [&str; 5] = [
     "message.upserted",
     "coverage.changed",
-    "account.changed",
     "safety.intent.changed",
     "capability.changed",
+    "account.changed",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

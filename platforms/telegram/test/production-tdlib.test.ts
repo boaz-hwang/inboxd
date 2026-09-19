@@ -544,3 +544,29 @@ describe("Telegram production TDLib adapter", () => {
     await port.close?.();
     expect(client.listenerCount("update")).toBe(0);
   });
+
+test("account observers reuse TDLib updates, replay connection state and detach on close", async () => {
+  const emitter = new EventEmitter();
+  const port = await createProductionTdlibPort({
+    ...options,
+    loadModule: async specifier => specifier === "tdl" ? {
+      configure() {},
+      createClient: () => ({
+        invoke: async () => ({ _: "authorizationStateReady" }),
+        on: emitter.on.bind(emitter), off: emitter.off.bind(emitter), close: async () => {},
+      }),
+    } : { getTdjson: () => "/synthetic/libtdjson.dylib" },
+  });
+  emitter.emit("update", { _: "updateConnectionState", state: { _: "connectionStateReady" } });
+  const updates: unknown[] = [];
+  const stop = port.onAccountUpdate!(update => updates.push(update));
+  expect(updates).toEqual([{ "@type": "updateConnectionState", state: { "@type": "connectionStateReady" } }]);
+  emitter.emit("update", { _: "updateDeleteMessages", chat_id: 1, message_ids: [2] });
+  expect(updates).toHaveLength(2);
+  stop();
+  emitter.emit("update", { _: "updateMessageContent", chat_id: 1, message_id: 2 });
+  expect(updates).toHaveLength(2);
+  await port.close!();
+  expect(emitter.listenerCount("update")).toBe(0);
+  expect(emitter.listenerCount("error")).toBe(0);
+});

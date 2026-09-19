@@ -78,6 +78,10 @@ if (platform === "slack") {
   } as never);
 } else throw new Error("synthetic platform required");
 
+if (process.env.INBOXD_SYNTHETIC_LIVE === "1") {
+  process.stderr.write('{"event":"state","state":"connected"}\n');
+  setTimeout(() => { process.stderr.write('{"event":"changed"}\n'); }, 100);
+}
 for await (const line of createInterface({input:process.stdin,crlfDelay:Infinity})) {
   try { process.stdout.write(JSON.stringify({ok:true,result:await dispatch(adapter,JSON.parse(line))})+"\n"); }
   catch { process.stdout.write(JSON.stringify({ok:false,error:"synthetic failure"})+"\n"); }

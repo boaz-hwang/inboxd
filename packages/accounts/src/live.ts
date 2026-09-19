@@ -21,7 +21,13 @@ export function liveEmitter(write: (line: string) => boolean, onDrain: (resume: 
   return {
     emit(event: AccountLiveEvent) {
       if (closed) return;
-      if (event.event === "changed") dirty = true; else state = event;
+      if (event.event === "changed") dirty = true;
+      else {
+        state = event;
+        // A fast disconnect/reconnect may collapse to the same final state.
+        // Preserve the need to reconcile any messages missed in that gap.
+        if (event.state === "connected") dirty = true;
+      }
       if (!timer && !blocked) timer = setTimeout(flush, 100);
     },
     close() { closed = true; clearTimeout(timer); },

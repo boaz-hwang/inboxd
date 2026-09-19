@@ -37,3 +37,24 @@ test("unsupported operations and provider errors fail without retries", async ()
   await expect(dispatch(account, { op: "slack.chat.postMessage", params: {channel:"c",text:"hello",client_msg_id:"request"} })).rejects.toThrow("Slack 조회 실패");
   expect(calls).toBe(1);
 });
+
+test("RTM lifecycle invalidates on edits/deletes and tears down without HTTP polling or sends", async () => {
+  const handlers = new Map<string, (...args: any[]) => void>();
+  let starts = 0, stops = 0;
+  const events: unknown[] = [];
+  const listener = {
+    on(name: string, handler: (...args: any[]) => void) { handlers.set(name, handler); return this; },
+    async start() { starts++; handlers.get("connected")!(); },
+    stop() { stops++; },
+  };
+  const adapter = createSlackAccount({ bot_token: "synthetic", session_cookie: "synthetic" }, (async () => { throw new Error("push must not invoke reads or sends"); }) as unknown as typeof fetch, () => listener as never);
+  const stop = await adapter.listen!(event => events.push(event));
+  handlers.get("slack_event")!({ type: "user_typing" });
+  for (const subtype of ["message_changed", "message_deleted"]) handlers.get("slack_event")!({ type: "message", subtype, text: "private" });
+  handlers.get("error")!(new Error("private"));
+  handlers.get("connected")!();
+  expect(events).toEqual([{ event: "state", state: "connected" }, { event: "changed" }, { event: "changed" }, { event: "state", state: "disconnected" }, { event: "state", state: "connected" }]);
+  expect(starts).toBe(1);
+  stop();
+  expect(stops).toBe(1);
+});

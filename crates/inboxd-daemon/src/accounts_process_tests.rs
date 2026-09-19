@@ -2,6 +2,10 @@
 use super::*;
 
 async fn service(platform: &str) -> (tempfile::TempDir, AccountService) {
+    service_with_live(platform, false).await
+}
+
+async fn service_with_live(platform: &str, live: bool) -> (tempfile::TempDir, AccountService) {
     let directory = tempfile::tempdir().unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -30,17 +34,26 @@ async fn service(platform: &str) -> (tempfile::TempDir, AccountService) {
     let mut child = Command::new(bun)
         .arg(fixture)
         .arg(platform)
+        .env("INBOXD_SYNTHETIC_LIVE", if live { "1" } else { "0" })
         .arg(directory.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(if live {
+            Stdio::piped()
+        } else {
+            Stdio::inherit()
+        })
         .kill_on_drop(true)
         .spawn()
         .expect("Bun is required for the account cross-runtime contract tests");
     let input = child.stdin.take().unwrap();
     let output = BufReader::new(child.stdout.take().unwrap());
+    let events = child
+        .stderr
+        .take()
+        .map(|stderr| live::read_events(stderr, service.slots[0].schedule.live.clone()));
     *service.slots[0].schedule.worker.lock().await = Some(WorkerProcess {
-        _events: None,
+        _events: events,
         _child: child,
         input,
         output,
@@ -376,4 +389,30 @@ async fn canceled_fixed_send_does_not_leave_a_live_cache_marker() {
     let slot = service.slots[0].slot.lock().await;
     assert!(slot.sending.upgrade().is_none());
     assert!(slot.backend.is_none());
+}
+
+#[tokio::test]
+async fn live_side_channel_does_not_consume_request_responses_and_reads_while_idle() {
+    let (_directory, service) = service_with_live("telegram", true).await;
+    let result = service.list(&json!({})).await.unwrap();
+    assert_eq!(result["errors"], json!([]));
+    let mut receiver = service.slots[0].schedule.live.subscribe();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while receiver.borrow().revision < 2 {
+            receiver.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(receiver.borrow().state, "connected");
+    let result = service
+        .query(
+            "messages",
+            &json!({"platform":"telegram","account":"synthetic","chat_id":"1"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result["messages"].as_array().unwrap().len(), 30);
+    service.stop_live().await;
+    assert_eq!(receiver.borrow().state, "disconnected");
 }

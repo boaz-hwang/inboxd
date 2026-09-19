@@ -91,7 +91,8 @@ filter; Enter on a hit returns to its conversation and highlights the message.
 Ctrl+K finds a conversation by name. Tab cycles filters, rooms and messages;
 left/right selects a messenger while filters are focused. Enter opens a chat,
 Enter again starts composing, and Enter sends. Shift+Enter inserts a newline.
-`b` refreshes chats and messages; `n` continues paginated results. `d` and `5`
+Connected accounts update automatically through daemon-owned push subscriptions;
+`b` also refreshes chats and messages; `n` continues paginated results. `d` and `5`
 show details and connections. See [workspace design](docs/11-tui-workspace.md)
 and [account adapters](docs/12-account-workspace.md).
 

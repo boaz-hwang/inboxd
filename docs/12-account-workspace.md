@@ -95,9 +95,10 @@ Schema v4 adds `owner_sends` through a validated atomic v3 migration. Older bina
 reject the upgraded schema; application rollback alone does not downgrade it.
 
 Startup displays the current directory snapshot and refreshes it in the background
-when absent or older than 30 seconds. `b` explicitly requests a remote directory refresh. Remote account-wide push
-subscriptions are not implemented. Cached titles/history are held in memory, not
-written to an unencrypted secondary database.
+when absent or older than 30 seconds. `b` explicitly requests a remote directory refresh.
+The daemon subscribes to account pushes and reconciles snapshots independently of
+clients; see [live synchronization](19-live-synchronization.md). Cached titles/history
+are held in memory, not written to an unencrypted secondary database.
 
 ## Call reduction before caching
 
@@ -116,7 +117,8 @@ the TUI to avoid a display-only history reread. Compatible fixed bindings retain
 through the common direct-send flow.
 
 Cache reuse and concurrency are additional improvements. Account caches are not
-yet a durable encrypted history index, and no new RTM/push subscription is enabled.
+yet a durable encrypted history index. Push notifications invalidate workspace
+snapshots; they do not claim a durable history commit.
 The first full directory still performs remote work; early display is not a claim
 that every account has already finished. See docs/15-startup-optimization-results.md.
 

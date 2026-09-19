@@ -136,7 +136,7 @@ describeWithRustDaemon("release Rust daemon UDS parity", () => {
     });
     expect(await reader.request("message.get", { chat: FIXTURE_CHAT, msg_id: "m1" })).toMatchObject({ message: { body: "fixture first" } });
     expect(await reader.request("message.search", { chat: FIXTURE_CHAT, interval: FIXTURE_INTERVAL, query: "needle" })).toMatchObject({ messages: [{ msg_id: "m2" }] });
-    expect(await reader.request("sync.status", {})).toEqual({ state: "idle" });
+    expect(await reader.request("sync.status", {})).toEqual({ state: "idle", accounts: [] });
     expect(await reader.request("auth.status", {})).toEqual({ authenticated: false });
     expect(await reader.request("send.status", { id: "missing" })).toEqual({ state: "missing" });
     expect(await reader.request("capability.list", {})).toEqual({ v: 1, resources: [] });
