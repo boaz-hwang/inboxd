@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod actor;
+mod observations;
 mod owner_sends;
 mod serialization;
 
@@ -247,6 +248,12 @@ impl NativeHost {
 
     /// Input and output are core wire values, not unencoded Rust strings.
     pub fn execute(&self, op: &str, input: &Value) -> CoreResult<Value> {
+        if op == "observations.store" {
+            return observations::observe(&self.connection, input);
+        }
+        if op == "observations.search" {
+            return observations::search(&self.connection, input);
+        }
         // These native daemon operations accept ordinary Unicode JSON, unlike
         // legacy UTF-16 core wire operations. Keep exact owner request identity.
         if op.starts_with("ownerSend.") {

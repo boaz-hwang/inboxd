@@ -329,6 +329,16 @@ fn compare_revision(host: &dyn Host, stored: &Value, incoming: &Value) -> CoreRe
             -1
         });
     }
+    // Partial observations carry collection order, not a provider revision.
+    // A bounded adapter page must not compare its token to the internal marker.
+    if field(stored, "revision_kind") == "string"
+        && field(stored, "revision_value").as_str().is_some_and(|s| {
+            s.strip_prefix("observed:")
+                .is_some_and(|n| n.parse::<u64>().is_ok())
+        })
+    {
+        return Ok(1);
+    }
     let (kind, value) = revision_parts(host, incoming)?;
     if field(stored, "revision_kind").as_str() != Some(kind) {
         return Err(CoreError::new(
