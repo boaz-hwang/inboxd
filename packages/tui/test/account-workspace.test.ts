@@ -69,7 +69,7 @@ function setup(send?: () => Promise<JsonObject>) {
                   ]
                 : [],
           };
-        if (method === "account.send")
+        if (method === "message.send")
           return send ? send() : { state: "Sent", receipt: "receipt" };
         return {};
       },
@@ -160,13 +160,10 @@ test("owner compose sends once without approval codes even if Enter repeats whil
   const sending = controller.dispatchKey("Enter");
   expect(controller.state.sendPending).toBe(true);
   await controller.dispatchKey("Enter");
-  expect(calls.filter((c) => c.method === "account.send")).toHaveLength(1);
+  expect(calls.filter((c) => c.method === "message.send")).toHaveLength(1);
   expect(calls.some((c) => c.method.startsWith("safety."))).toBe(false);
-  expect(calls.find((c) => c.method === "account.send")?.params).toMatchObject({
-    platform: "slack",
-    account: "personal",
-    chat_id: "44",
-    body: "직접 보낼 내용",
+  expect(calls.find((c) => c.method === "message.send")?.params).toMatchObject({
+    envelope: { destination: { platform: "slack", account: "personal", chat_id: "44" }, content: { mode: "text", body: "직접 보낼 내용" } },
   });
   finish({ state: "Sent" });
   await sending;
@@ -225,4 +222,16 @@ test("account searches start independently before a slow provider completes", as
   await new Promise(r => setTimeout(r, 0));
   expect(started.sort()).toEqual(["slack", "telegram"]);
   release(); await search; controller.stop();
+});
+
+test("confirmed send returns the conversation viewport to its newest message", async () => {
+  const { controller, calls } = setup(async () => ({ state: "Verified" }));
+  await controller.start(); await controller.selectConversation(0);
+  await controller.dispatchKey("ArrowUp");
+  expect(controller.state.focus).toBe(0);
+  await controller.dispatchKey("c"); await controller.dispatchPaste("new message"); await controller.dispatchKey("Enter");
+  expect(calls.filter(call => call.method === "message.send")).toHaveLength(1);
+  expect(controller.state.focus).toBe(controller.state.views.chat.data.length - 1);
+  expect(controller.state.selected.chat).toBe(controller.state.focus);
+  controller.stop();
 });

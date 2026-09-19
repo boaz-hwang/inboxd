@@ -4,9 +4,7 @@ import {
   ApproverTTYRequiredError,
   CliProtocolError,
   UdsTransportError,
-  createAgentHandlers,
   createCliHandlers,
-  formatCliResult,
   runCli,
 } from "../src/index.ts";
 import type { CliHandlers } from "../src/index.ts";
@@ -87,7 +85,7 @@ describe("protocol-only CLI handlers", () => {
   test("dispatcher rejects code-bearing approval argv before protocol I/O", async () => {
     let approvalCalls = 0;
     const handlers = { role: "approver", approve: async () => { approvalCalls += 1; return {}; } } as unknown as CliHandlers;
-    await expect(runCli(["safety", "approve", JSON.stringify(approval)], { handlers })).rejects.toThrow(/owner-local TUI/i);
+    await expect(runCli(["safety", "approve", JSON.stringify(approval)], { handlers })).rejects.toThrow(/retired/i);
     expect(approvalCalls).toBe(0);
   });
 
@@ -132,12 +130,6 @@ describe("protocol-only CLI handlers", () => {
     const evidence = { kind: "recent_messages_evidence", query: { ...input, order: "latest" }, evidence: [], ...metadata };
     expect(await respondToCall(transport, cli.evidence(input), evidence)).toEqual(evidence);
     expect(lastRequest(transport)).toMatchObject({ method: "message.evidence", params: input });
-    expect(JSON.parse(formatCliResult(evidence))).toEqual(evidence);
-  });
-
-  test("prints coverage and limits even for zero-hit searches", () => {
-    const output = formatCliResult({ messages: [], coverage: { covered: [], gaps: [], limits: [] } });
-    expect(JSON.parse(output)).toEqual({ messages: [], coverage: { covered: [], gaps: [], limits: [] } });
   });
 
   test("rejects all approver commands before connecting without a stdin TTY", async () => {
@@ -145,7 +137,6 @@ describe("protocol-only CLI handlers", () => {
     const cli = createCliHandlers({ connect: async () => transport, role: "approver", isTTY: () => false });
     clients.push(cli);
     await expect(cli.listPending()).rejects.toBeInstanceOf(ApproverTTYRequiredError);
-    await expect(cli.approve(approval)).rejects.toBeInstanceOf(ApproverTTYRequiredError);
     await expect(cli.reject({ intent_id: "i", reason: "no" })).rejects.toBeInstanceOf(ApproverTTYRequiredError);
     expect(transport.sent).toEqual([]);
   });
@@ -156,18 +147,13 @@ describe("protocol-only CLI handlers", () => {
     expect(transport.sent[0]).toMatchObject({ method: "system.hello", params: { role: "approver", approver_token: "owner-only-token" } });
     await respondToCall(transport, cli.listPending(), { intents: [] });
     expect(lastRequest(transport).method).toBe("safety.intent.listPending");
-    await respondToCall(transport, cli.approve(approval), { state: "approved" });
-    expect(lastRequest(transport)).toMatchObject({ method: "safety.intent.approve", params: approval });
     await respondToCall(transport, cli.reject({ intent_id: "i", reason: "no" }), { state: "rejected" });
     expect(lastRequest(transport).method).toBe("safety.intent.reject");
   });
 
-  test("agent surface cannot list or print approval codes", async () => {
+  test("uncredentialed agent declares only reader authority", async () => {
     const transport = new FakeTransport();
-    const agent = createAgentHandlers({ connect: async () => transport, isTTY: () => false });
-    expect("listPending" in agent).toBe(false);
-    expect(() => formatCliResult({ approval_code: "123456" }, "agent")).toThrow(/approval code/i);
-    expect(() => formatCliResult({ nested: { approval_code: "123456" } }, "approver")).toThrow(/approval code/i);
+    const agent = createCliHandlers({ role: "agent", connect: async () => transport, isTTY: () => false });
     expect("claimApprovalCode" in agent).toBe(false);
     const connecting = agent.connect();
     await ready(transport);
@@ -198,7 +184,7 @@ describe("protocol-only CLI handlers", () => {
     const failure = cli.daemonStatus();
     await Promise.resolve();
     second.fail(lastRequest(second), "LOCKED", "daemon locked");
-    await expect(failure).rejects.toMatchObject({ code: "DAEMON_ERROR", method: "system.status" });
+    await expect(failure).rejects.toMatchObject({ code: "LOCKED", method: "system.status" });
     const failedConnect = createCliHandlers({
       connect: async () => { throw new UdsTransportError("CONNECT_FAILED", "unreachable"); },
       role: "reader",
@@ -227,4 +213,19 @@ describe("protocol-only CLI handlers", () => {
     expect(launches).toBe(1);
     expect(lastRequest(transport).method).toBe("system.status");
   });
+});
+
+test("CLI direct send delegates non-TTY authority and preserves request IDs", async () => {
+  const transport = new FakeTransport();
+  const cli = createCliHandlers({ connect: async () => transport, role: "sender", senderToken: "owner-secret", isTTY: () => false });
+  clients.push(cli);
+  const connecting = cli.connect();
+  await ready(transport);
+  await connecting;
+  expect(transport.sent[0]).toMatchObject({ method: "system.hello", params: { role: "sender", sender_token: "owner-secret" } });
+  const input = { request_id: "stable-cli-request-0001", chat: { platform: "slack", account: "a", chat_id: "c" }, body: "hello" };
+  const command = runCli(["message", "send", JSON.stringify(input)], { handlers: cli, write: () => {} });
+  await respondToCall(transport, command, { request_id: input.request_id, state: "uncertain" });
+  expect(lastRequest(transport)).toMatchObject({ method: "message.send", params: input });
+  await expect(runCli(["safety", "propose", "{}"], { handlers: cli, write: () => {} })).rejects.toThrow(/retired/);
 });

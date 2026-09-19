@@ -1267,6 +1267,17 @@ mod tests {
 
     fn assert_zeroize_on_drop<T: ZeroizeOnDrop>(_: &T) {}
 
+    fn trusted_tempdir() -> tempfile::TempDir {
+        // Exercise the intended fixture violation, not macOS /var's symlink or
+        // a shared writable temporary ancestor rejected by production policy.
+        let home = fs::canonicalize(std::env::var_os("HOME").expect("HOME for trusted fixture"))
+            .expect("canonical home for trusted fixture");
+        tempfile::Builder::new()
+            .prefix(".inboxd-worker-")
+            .tempdir_in(home)
+            .expect("private trusted fixture directory")
+    }
+
     #[test]
     fn retained_worker_environment_zeroizes_values_on_drop_and_replacement() {
         let mut environment = ZeroizingEnvironment::default();
@@ -1395,7 +1406,7 @@ mod tests {
     #[test]
     fn telegram_state_directories_are_created_as_owner_only_hashed_children() {
         const HASH: &str = "44e00b8147e28b2132939aac9b08a31de529c8fee0143660c14cb3ad3b822bc2";
-        let directory = tempfile::tempdir().unwrap();
+        let directory = trusted_tempdir();
         let state = directory.path().join("state");
 
         let (database, files) =
@@ -1423,7 +1434,7 @@ mod tests {
     #[test]
     fn telegram_state_directories_reject_noncanonical_hashes_and_symlink_components() {
         const HASH: &str = "44e00b8147e28b2132939aac9b08a31de529c8fee0143660c14cb3ad3b822bc2";
-        let directory = tempfile::tempdir().unwrap();
+        let directory = trusted_tempdir();
         let state = directory.path().join("state");
         fs::create_dir(&state).unwrap();
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
@@ -1445,7 +1456,7 @@ mod tests {
     #[test]
     fn telegram_state_directories_reject_existing_non_private_final_directories() {
         const HASH: &str = "44e00b8147e28b2132939aac9b08a31de529c8fee0143660c14cb3ad3b822bc2";
-        let directory = tempfile::tempdir().unwrap();
+        let directory = trusted_tempdir();
         let state = directory.path().join("state");
         let binding = state.join("telegram").join(HASH);
         fs::create_dir_all(&binding).unwrap();
@@ -1530,7 +1541,7 @@ mod tests {
     #[test]
     fn telegram_state_directories_reject_acl_mutation_on_a_final_directory() {
         const HASH: &str = "44e00b8147e28b2132939aac9b08a31de529c8fee0143660c14cb3ad3b822bc2";
-        let directory = tempfile::tempdir().unwrap();
+        let directory = trusted_tempdir();
         let state = directory.path().join("state");
         let (database, _) =
             WorkerSupervisor::prepare_telegram_state_directories(&state, HASH).unwrap();
@@ -1554,7 +1565,7 @@ mod tests {
     #[test]
     fn telegram_state_directories_reject_acl_read_on_a_final_directory() {
         const HASH: &str = "44e00b8147e28b2132939aac9b08a31de529c8fee0143660c14cb3ad3b822bc2";
-        let directory = tempfile::tempdir().unwrap();
+        let directory = trusted_tempdir();
         let state = directory.path().join("state");
         let (database, _) =
             WorkerSupervisor::prepare_telegram_state_directories(&state, HASH).unwrap();
@@ -1573,7 +1584,7 @@ mod tests {
 
     #[test]
     fn trusted_executable_rejects_symlink_non_regular_non_owner_and_non_executable_paths() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = trusted_tempdir();
         let owner = geteuid().as_raw();
         let executable = directory.path().join("worker");
         fs::write(&executable, b"worker").unwrap();
@@ -1597,7 +1608,7 @@ mod tests {
 
     #[test]
     fn trusted_executable_rejects_symlinked_and_group_or_world_writable_ancestors() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = trusted_tempdir();
         let owner = geteuid().as_raw();
         let trusted = directory.path().join("trusted");
         fs::create_dir(&trusted).unwrap();
@@ -1620,7 +1631,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn trusted_executable_rejects_cross_uid_acl_mutation_on_mode_0700_ancestor() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = trusted_tempdir();
         let owner = geteuid().as_raw();
         let trusted = directory.path().join("trusted");
         fs::create_dir(&trusted).unwrap();
@@ -1653,7 +1664,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn trusted_executable_rejects_cross_uid_acl_mutation_on_final_file() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = trusted_tempdir();
         let owner = geteuid().as_raw();
         let executable = directory.path().join("worker");
         fs::write(&executable, b"worker").unwrap();

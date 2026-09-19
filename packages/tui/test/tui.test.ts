@@ -1,7 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 import {
   createInitialState,
@@ -15,7 +12,7 @@ import {
   truncateCells,
   type TuiState,
 } from "../src/index.ts";
-import { readTuiApproverToken, runTuiEntrypoint } from "../src/main.ts";
+import { runTuiEntrypoint } from "../src/main.ts";
 import type { JsonObject, ResourceCapabilityV1 } from "../../protocol/src/schema.ts";
 
 const slackChat = { platform: "slack", account: "work", chat_id: "ops" } as const;
@@ -44,7 +41,7 @@ const fixtures = {
     { id: "m1", resource: slackResource, chat: slackChat, author: "민수", ts: "09:41", body: "긴 한국어 메시지와 ASCII text", edited: true },
     { id: "m2", resource: slackResource, chat: slackChat, author: "Ari", ts: "09:40", body: "deleted message", deleted: true },
   ],
-  approvals: [{ id: "a1", resource: slackResource, chat: slackChat, state: "Uncertain", destination: "slack:#ops", expires: "10m", body: "Deploy now", codeRequired: true }],
+  approvals: [{ id: "a1", resource: slackResource, chat: slackChat, state: "Uncertain", destination: "slack:#ops", expires: "10m", body: "Deploy now" }],
 };
 
 function readyState(): TuiState {
@@ -72,20 +69,6 @@ describe("operational controller and explicit evidence inspector", () => {
     expect(exitCodes).toEqual([0]);
   });
 
-  test("reads only the daemon owner-only approver token beside the socket", () => {
-    const directory = mkdtempSync(join(tmpdir(), "inboxd-tui-token-"));
-    try {
-      const socketPath = join(directory, "sock");
-      const tokenPath = join(directory, "approver.token");
-      const token = "abcdefghijklmnopqrstuvwxyz_1234567890";
-      writeFileSync(tokenPath, `${token}\n`, { mode: 0o600 });
-      expect(readTuiApproverToken(socketPath)).toBe(token);
-      chmodSync(tokenPath, 0o644);
-      expect(() => readTuiApproverToken(socketPath)).toThrow(/owner-only/);
-    } finally {
-      rmSync(directory, { recursive: true, force: true });
-    }
-  });
 
   test("documents and handles 1–5, movement, activation, search, help and escape", () => {
     let state = readyState();
@@ -103,7 +86,7 @@ describe("operational controller and explicit evidence inspector", () => {
     state = reduce(state, { type: "key", key: "Escape" });
     expect(state.helpOpen).toBe(false);
     const help = renderInspectorScreen(state, { width: 80, height: 24 });
-    expect(help).toContain("1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply a Esc ? q");
+    expect(help).toContain("1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply s-status Esc ? q");
     state = { ...state, draft: "memory-only reply" };
     state = reduce(state, { type: "key", key: "q" });
     expect(state.draft).toBe("");
@@ -115,7 +98,7 @@ describe("operational controller and explicit evidence inspector", () => {
     for (const screen of ["inbox", "search", "chat", "approvals", "doctor"] as const) {
       state = reduce(state, { type: "switchScreen", screen });
       const render = renderInspectorScreen(state, { width: 80, height: 24 });
-      expect(render).toContain(`● ${screen.toUpperCase()}`);
+      expect(render).toContain(`● ${screen === "approvals" ? "HISTORY" : screen.toUpperCase()}`);
       expect(render).toContain(">");
     }
     state = reduce(state, { type: "coverage", coverage: { chats: undefined, gaps: undefined, freshness: "unknown" } });
@@ -205,18 +188,7 @@ describe("operational controller and explicit evidence inspector", () => {
     expect(chat).toContain("── coverage gap: 1 · partial ──");
   });
 
-  test("active approval input remains visible in a narrow activated detail", () => {
-    let state = reduce(readyState(), { type: "querySucceeded", generation: 1, screen: "approvals", data: [{ id: "p", state: "Proposed", body: "long message ".repeat(100) }] });
-    state = reduce(state, { type: "switchScreen", screen: "approvals" });
-    for (const key of ["d", "a", "1", "2", "3", "4"]) state = reduce(state, { type: "key", key });
-    for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
-      const text = renderInspectorScreen(state, size);
-      expect(text).toContain("Approval code [memory-only]");
-      expect(text).toContain("••••_");
-      expect(text).toContain("Enter submit · Esc cancel");
-      expect(text).not.toContain("1234");
-    }
-  });
+
 
   test("active compose remains visible with separate submit and cancel controls in detail", () => {
     let state = reduce(readyState(), { type: "switchScreen", screen: "chat" });
@@ -225,7 +197,7 @@ describe("operational controller and explicit evidence inspector", () => {
     for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
       const text = renderInspectorScreen(state, size);
       expect(text).toContain("Compose text:");
-      expect(text).toContain("Enter propose · Esc cancel");
+      expect(text).toContain("Enter send · Esc cancel");
       expect(text).toContain("[memory-only]");
     }
   });
@@ -297,7 +269,7 @@ describe("operational controller and explicit evidence inspector", () => {
       expect(output.split("\n").every((line) => displayWidth(line) === size.width)).toBe(true);
       if (screen === "approvals") {
         expect(output).toContain("UNCERTAIN — do not resend automatically");
-        expect(output).toContain("Approve [disabled: Uncertain]");
+        expect(output).toContain("Historical record [read-only]");
       }
       if (screen === "chat") expect(output).toContain("coverage gap:");
       state = reduce(state, { type: "key", key: "k" });
@@ -306,21 +278,7 @@ describe("operational controller and explicit evidence inspector", () => {
     }
   });
 
-  test("requires code for proposed approvals and disables actions while degraded", () => {
-    let state = readyState();
-    state = reduce(state, { type: "querySucceeded", generation: 1, screen: "approvals", data: [{ ...fixtures.approvals[0]!, id: "proposed", state: "Proposed" }, ...fixtures.approvals] });
-    state = reduce(state, { type: "switchScreen", screen: "approvals" });
-    state = reduce(state, { type: "key", key: "a" });
-    let view = renderInspectorScreen(state, { width: 80, height: 24 });
-    expect(view).toContain("UNCERTAIN — do not resend automatically");
-    expect(view).toContain("Approval code [memory-only]");
-    state = reduce(state, { type: "key", key: "x" });
-    state = reduce(state, { type: "key", key: "Enter" });
-    expect(state.notice).toContain("code");
-    state = reduce(state, { type: "disconnected", generation: 1 });
-    view = renderInspectorScreen(state, { width: 80, height: 24 });
-    expect(view).toContain("Approve [disabled: disconnected]");
-  });
+
 
   test("exposes doctor encryption, auth, daemon and stale/reconnect handling", () => {
     let state = readyState();
@@ -377,7 +335,6 @@ describe("operational controller and explicit evidence inspector", () => {
           if (method === "chat.list") return { chats: [{ ...chat, display_name: "Ops" }] };
           if (method === "message.recent") return { messages: [] };
           if (method === "safety.intent.listPending") return { intents: [{ intent_id: "i1", actor: "me", scope: { platform: "slack", account: "me", chat_id: "ops" }, state: "Proposed", body: "Deploy", expires_at: 10 }] };
-          if (method === "safety.intent.claimApprovalCode") return { code: "654321" };
           if (method === "system.status") return { ready: true, owner: "daemon" };
           if (method === "sync.status") return { state: "idle" };
           if (method === "auth.status") return { authenticated: true };
@@ -387,16 +344,13 @@ describe("operational controller and explicit evidence inspector", () => {
     });
 
     await controller.start();
-    expect(subscribed).toEqual(["message.upserted", "coverage.changed", "safety.intent.changed", "capability.changed"]);
-    expect(calls.map((call) => call.method)).toEqual(["account.list", "capability.list", "chat.list", "message.recent", "safety.intent.listPending", "safety.intent.claimApprovalCode", "system.status", "sync.status", "auth.status"]);
+    expect(subscribed).toEqual(["account.changed", "message.upserted", "coverage.changed", "safety.intent.changed", "capability.changed"]);
+    expect(calls.map((call) => call.method)).toEqual(["account.list", "capability.list", "chat.list", "message.recent", "safety.intent.listPending", "system.status", "sync.status", "auth.status"]);
     expect(controller.state.connection.status).toBe("connected");
     expect(JSON.stringify(controller.state)).not.toContain("654321");
     await controller.dispatchKey("4");
-    expect(controller.currentApprovalCode()).toBe("654321");
-    expect(renderInspectorScreen(controller.state, { width: 80, height: 24 }, { approvalCode: controller.currentApprovalCode() })).toContain("654321");
     expect(JSON.stringify(controller.state)).not.toContain("654321");
     controller.stop();
-    expect(controller.currentApprovalCode()).toBeUndefined();
   });
 
   test("treats nullable message revisions as absent while retaining timestamps and explicit flags", async () => {
@@ -535,11 +489,10 @@ describe("operational controller and explicit evidence inspector", () => {
     expect(controller.state.searchQuery).toBe("");
   });
 
-  test("submits a typed Chat compose draft as an approval-gated proposal", async () => {
+  test("submits a typed Chat compose draft directly with a durable request ID", async () => {
     const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
     const scope = { platform: "slack", account: "me", chat_id: "ops" };
     const controller = createTuiController({
-      actor: "tui:operator",
       client: {
         start: async () => {},
         stop: () => {},
@@ -550,7 +503,7 @@ describe("operational controller and explicit evidence inspector", () => {
           if (method === "safety.intent.listPending") return { intents: [] };
           if (method === "system.status") return { send_capable: true };
           if (method === "sync.status" || method === "auth.status") return {};
-          if (method === "safety.intent.create") return { intent_id: "proposal-1", state: "Proposed" };
+          if (method === "message.send") return { state: "Sent" };
           throw new Error(`unexpected protocol call: ${method}`);
         },
       },
@@ -564,9 +517,9 @@ describe("operational controller and explicit evidence inspector", () => {
     expect(renderInspectorScreen(controller.state, { width: 80, height: 24 })).toContain("Compose text: deploy tonight [memory-only]");
     await controller.dispatchKey("Enter");
 
-    expect(calls.filter((call) => call.method === "safety.intent.create")).toEqual([
-      { method: "safety.intent.create", params: {
-        actor: "tui:operator",
+    expect(calls.filter((call) => call.method === "message.send")).toEqual([
+      { method: "message.send", params: {
+        request_id: expect.any(String),
         envelope: {
           v: 2,
           destination: { v: 1, kind: "chat", ...scope },
@@ -575,7 +528,7 @@ describe("operational controller and explicit evidence inspector", () => {
       } },
     ]);
     expect(controller.state.draft).toBe("");
-    expect(controller.state.notice).toContain("proposal created");
+    expect(controller.state.notice).toContain("보냈습니다.");
   });
 
   test("keeps q and b as input text instead of quitting or backfilling", async () => {
@@ -608,8 +561,6 @@ describe("operational controller and explicit evidence inspector", () => {
     await controller.dispatchKey("Escape");
     await controller.dispatchKey("4");
     await controller.dispatchKey("a");
-    await controller.dispatchKey("b");
-    expect(controller.state.codeBuffer).toBe("b");
     expect(calls).toEqual([]);
   });
 
@@ -643,11 +594,10 @@ describe("operational controller and explicit evidence inspector", () => {
     expect(controller.state.notice).toContain("no action retried");
   });
 
-  test("keeps colon-bearing ChatRef values structural for inbox, search, proposals, and backfill", async () => {
+  test("keeps colon-bearing ChatRef values structural for inbox, search, sends, and backfill", async () => {
     const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
     const chat = { platform: "slack", account: "stable:acct", chat_id: "stable:ops" };
     const controller = createTuiController({
-      actor: "tui:operator",
       client: {
         start: async () => {},
         stop: () => {},
@@ -660,7 +610,7 @@ describe("operational controller and explicit evidence inspector", () => {
           if (method === "safety.intent.listPending") return { intents: [] };
           if (method === "system.status") return { send_capable: true };
           if (method === "sync.status" || method === "auth.status" || method === "sync.backfill") return {};
-          if (method === "safety.intent.create") return { intent_id: "proposal-1", state: "Proposed" };
+          if (method === "message.send") return { state: "Sent" };
           throw new Error(`unexpected protocol call: ${method}`);
         },
       },
@@ -681,13 +631,14 @@ describe("operational controller and explicit evidence inspector", () => {
     expect(calls.filter((call) => call.method === "message.inbox")).toEqual([
       { method: "message.inbox", params: { chat } },
       { method: "message.inbox", params: { chat } },
+      { method: "message.inbox", params: { chat } },
     ]);
     expect(calls.filter((call) => call.method === "message.search")).toEqual([
       { method: "message.search", params: { chat, interval: { from_ts: 10, to_ts: 20 }, query: "needle" } },
     ]);
-    expect(calls.filter((call) => call.method === "safety.intent.create")).toEqual([
-      { method: "safety.intent.create", params: {
-        actor: "tui:operator",
+    expect(calls.filter((call) => call.method === "message.send")).toEqual([
+      { method: "message.send", params: {
+        request_id: expect.any(String),
         envelope: {
           v: 2,
           destination: { v: 1, kind: "chat", ...chat },
@@ -763,7 +714,7 @@ describe("operational controller and explicit evidence inspector", () => {
     const chat = { platform: "slack", account: "me", chat_id: "ops" };
     const controller = createTuiController({ client: {
       start: async () => {}, stop: () => {},
-      request: async (name, params) => name === "safety.intent.claimApprovalCode" ? { code: params.intent_id } : name === method && defer
+      request: async (name, params) => name === method && defer
         ? new Promise((resolve, reject) => pending.push({ resolve, reject })) : name === "chat.list" ? { chats: [chat] } : {},
     } });
     controller.setActiveChat(chat);
@@ -797,7 +748,6 @@ describe("operational controller and explicit evidence inspector", () => {
     pending[0]!.reject(new Error("obsolete failure"));
     await oldest.completion;
     expect(controller.state.views[screen]).toEqual(current);
-    if (screen === "approvals") expect(controller.currentApprovalCode()).toBe("new");
   });
 
   test("does not continue an obsolete refresh after disconnect", async () => {
@@ -860,14 +810,13 @@ describe("operational controller and explicit evidence inspector", () => {
     expect(renderInspectorScreen(state, { width: 80, height: 24 })).toContain("more results [n]");
   });
 
-  test("loads pending approval pages without losing earlier approval bindings or codes", async () => {
+  test("loads historical approval pages without enabling their old codes", async () => {
     const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
     const scope = { platform: "slack", account: "me", chat_id: "ops" };
     const controller = createTuiController({ client: {
       start: async () => {}, stop: () => {},
       request: async (method, params) => {
         calls.push({ method, params });
-        if (method === "safety.intent.claimApprovalCode") return { code: params.intent_id === "second" ? "222222" : "111111" };
         if (method !== "safety.intent.listPending") return {};
         const second = params.cursor === "approval-next";
         return { intents: [{ intent_id: second ? "second" : "first", actor: "operator", scope,
@@ -881,17 +830,13 @@ describe("operational controller and explicit evidence inspector", () => {
     await Promise.all([controller.dispatchKey("n"), controller.dispatchKey("n")]);
     expect(controller.state.views.approvals.data.map((row) => row.id)).toEqual(["first", "second"]);
     expect(controller.state.views.approvals.nextCursor).toBeUndefined();
-    expect(controller.currentApprovalCode()).toBe("111111");
     await controller.dispatchKey("j");
     await controller.dispatchKey("Enter");
-    expect(controller.currentApprovalCode()).toBe("222222");
     expect(JSON.stringify(controller.state)).not.toMatch(/111111|222222/);
     await controller.dispatchKey("a");
     for (const digit of "222222") await controller.dispatchKey(digit);
     await controller.dispatchKey("Enter");
-    expect(calls.filter((call) => call.method === "safety.intent.approve")).toEqual([
-      { method: "safety.intent.approve", params: { intent_id: "second", actor: "operator", scope, code: "222222" } },
-    ]);
+    expect(calls.filter((call) => call.method === "safety.intent.approve")).toEqual([]);
     expect(calls.filter((call) => call.params.cursor !== undefined)).toEqual([
       { method: "safety.intent.listPending", params: { cursor: "approval-next" } },
     ]);

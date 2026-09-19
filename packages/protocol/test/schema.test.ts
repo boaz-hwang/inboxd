@@ -6,13 +6,11 @@ import {
   HOST_OPERATIONS,
   LEGACY_EVENT_METHODS,
   LEGACY_REQUEST_METHODS,
-  normalizeSendEnvelope,
   parseEvent,
   parseRequest,
   parseResponse,
   parseSendEnvelopeV2,
   REQUEST_METHODS,
-  sendApprovalPayload,
   TIME_UNITS_V1,
 } from "../src/index.ts";
 
@@ -30,18 +28,6 @@ function canonicalHash(value: unknown): string {
 }
 
 describe("protocol schemas", () => {
-  test("only the dedicated approver claim response can carry a code", () => {
-    for (const role of [undefined, "reader", "agent", "mcp", "approver"] as const) {
-      for (const method of ["safety.intent.create", "safety.intent.listPending", "system.status"] as const) {
-        expect(() => parseResponse({ type: "response", id: "x", method, ok: true, result: { nested: { code: "123456" } } }, role)).toThrow(/approval code/i);
-      }
-    }
-    for (const role of ["reader", "agent", "mcp"] as const) {
-      expect(() => parseRequest({ type: "request", id: "x", method: "safety.intent.claimApprovalCode", params: { intent_id: "i" } }, role)).toThrow(/approver/i);
-    }
-    expect(parseResponse({ type: "response", id: "x", method: "safety.intent.claimApprovalCode", ok: true, result: { code: "123456" } }).result).toEqual({ code: "123456" });
-    expect(parseResponse({ type: "response", id: "x", method: "safety.intent.claimApprovalCode", ok: true, result: { code: "123456" } }, "approver").result).toEqual({ code: "123456" });
-  });
   test("aggregate reads require explicit bounded scope and reject caller ingestion fields", () => {
     const chat = { platform: "slack", account: "work", chat_id: "ops" };
     const input = { chats: [chat], interval: { from_ts: 0, to_ts: 100 }, sender: "self", limit: 100, cursor: "opaque_-123" };
@@ -72,7 +58,7 @@ describe("protocol schemas", () => {
     const methods = [
       "system.ping", "system.status", "chat.list", "message.inbox", "message.get",
       "message.search", "sync.status", "sync.backfill", "auth.status",
-      "safety.intent.create", "safety.intent.listPending", "safety.intent.approve",
+      "safety.intent.listPending",
       "safety.intent.reject", "send.status", "settings.get", "settings.update", "capability.list",
     ] as const;
 
@@ -83,21 +69,20 @@ describe("protocol schemas", () => {
   });
 
   test("validates response and event method names", () => {
-    expect(parseResponse({ type: "response", id: "1", method: "system.ping", ok: true, result: {} }, "reader").method).toBe("system.ping");
+    expect(parseResponse({ type: "response", id: "1", method: "system.ping", ok: true, result: {} }).method).toBe("system.ping");
     expect(parseEvent({ type: "event", method: "message.upserted", params: {} }).method).toBe("message.upserted");
-    expect(() => parseResponse({ type: "response", id: "1", method: "unknown", ok: true, result: {} }, "reader")).toThrow(/method/i);
+    expect(() => parseResponse({ type: "response", id: "1", method: "unknown", ok: true, result: {} })).toThrow(/method/i);
     expect(() => parseEvent({ type: "event", method: "message.deleted", params: {} })).toThrow(/method/i);
   });
 
-  test("does not permit agent or MCP sessions to request or receive approval codes", () => {
+  test("historical records require owner access and retired execution methods are unknown", () => {
     for (const role of ["agent", "mcp"] as const) {
-      expect(() => parseRequest({ type: "request", id: "pending", method: "safety.intent.listPending", params: {} }, role)).toThrow(/approver/i);
-      expect(() => parseRequest({ type: "request", id: "approve", method: "safety.intent.approve", params: { code: "123456" } }, role)).toThrow(/approver/i);
-      expect(() => parseRequest({ type: "request", id: "reject", method: "safety.intent.reject", params: { intent_id: "i1" } }, role)).toThrow(/approver/i);
-      expect(() => parseResponse({
-        type: "response", id: "pending", method: "safety.intent.listPending", ok: true,
-        result: { intents: [{ intent_id: "i1", approval_code: "123456" }] },
-      }, role)).toThrow(/approval code/i);
+      for (const method of ["safety.intent.listPending", "safety.intent.reject"]) {
+        expect(() => parseRequest({ type: "request", id: "history", method, params: {} }, role)).toThrow(/sender or approver/);
+      }
+    }
+    for (const method of ["safety.intent.create", "safety.intent.claimApprovalCode", "safety.intent.approve", "account.send"]) {
+      expect(() => parseRequest({ type: "request", id: "retired", method, params: {} }, "sender")).toThrow(/unknown request method/);
     }
   });
 
@@ -113,21 +98,6 @@ describe("protocol schemas", () => {
 });
 
 describe("versioned send envelopes", () => {
-  test("normalizes a v1 Slack send while preserving its approval bytes", () => {
-    const normalized = normalizeSendEnvelope(compat.legacy_slack.input);
-    expect(normalized).toEqual(compat.legacy_slack.normalized);
-    const approvalPayload = sendApprovalPayload(compat.legacy_slack.actor, normalized);
-    expect(approvalPayload).toEqual(compat.legacy_slack.approval_payload);
-    expect(JSON.stringify(approvalPayload)).toBe(compat.legacy_slack.approval_payload_json);
-    expect(canonical(approvalPayload)).toBe(compat.legacy_slack.approval_payload_canonical);
-    expect(canonicalHash(approvalPayload)).toBe(compat.legacy_slack.payload_hash);
-
-    const withoutParent = normalizeSendEnvelope({ scope: compat.legacy_slack.input.scope, body: "no reply" });
-    expect(withoutParent.envelope).not.toHaveProperty("reply");
-    expect(withoutParent.approval.payload).not.toHaveProperty("parent_id");
-    expect(() => normalizeSendEnvelope({ ...compat.legacy_slack.input, parent_id: null })).toThrow(/parent_id/i);
-  });
-
   test("binds approved template identifiers, arguments, and previews in v2", () => {
     const envelope = {
       v: 2,
@@ -135,10 +105,7 @@ describe("versioned send envelopes", () => {
       content: { mode: "approved_template", template_id: "notice-7", arguments: { amount: 1000, label: "승인" }, preview: "승인: 1000" },
     };
     const parsed = parseSendEnvelopeV2(envelope);
-    const normalized = normalizeSendEnvelope(envelope);
-    expect(normalized).toEqual({ envelope: parsed, approval: { v: 2, payload: parsed } });
-    expect(canonical(sendApprovalPayload("agent:fixture", normalized))).toContain('"template_id":"notice-7"');
-    expect(canonical(sendApprovalPayload("agent:fixture", normalized))).toContain('"arguments":{"amount":1000,"label":"승인"}');
+    expect(JSON.stringify(parsed)).toBe(JSON.stringify(envelope));
     expect(() => parseSendEnvelopeV2({ ...envelope, content: { ...envelope.content, arguments: { bad: NaN } } })).toThrow(/JSON/i);
     expect(() => parseSendEnvelopeV2({ ...envelope, reply: { parent_id: "not-supported" } })).toThrow(/repl/i);
   });
@@ -163,10 +130,10 @@ describe("versioned send envelopes", () => {
 });
 
 describe("v1 wire golden bytes", () => {
-  test("pins all 21 host operations and time-unit boundaries", () => {
-    expect(HOST_OPERATIONS).toEqual(compat.host_operations);
-    expect(HOST_OPERATIONS).toHaveLength(21);
-    expect(new Set(HOST_OPERATIONS).size).toBe(21);
+  test("pins all 19 current host operations and time-unit boundaries", () => {
+    expect(HOST_OPERATIONS).toEqual(compat.host_operations.filter((operation: string) => !["host.approvalCode", "host.allowSend"].includes(operation)));
+    expect(HOST_OPERATIONS).toHaveLength(19);
+    expect(new Set(HOST_OPERATIONS).size).toBe(19);
     expect(TIME_UNITS_V1).toEqual(compat.time_units);
     expect(TIME_UNITS_V1.safety_deadline).toBe("milliseconds");
     expect(TIME_UNITS_V1.adapter_timestamp).toBe("seconds");
@@ -177,8 +144,8 @@ describe("v1 wire golden bytes", () => {
   test("pins every existing method and event including unsupported settings", () => {
     expect(LEGACY_REQUEST_METHODS).toEqual(compat.request_methods);
     expect(LEGACY_EVENT_METHODS).toEqual(compat.event_methods);
-    expect([...REQUEST_METHODS]).toEqual([...compat.request_methods, "capability.list", "account.list", "account.messages", "account.search", "account.send"]);
-    expect([...EVENT_METHODS]).toEqual([...compat.event_methods, "capability.changed"]);
+    expect([...REQUEST_METHODS]).toEqual([...compat.request_methods.filter((method: string) => !["safety.intent.create", "safety.intent.claimApprovalCode", "safety.intent.approve"].includes(method)), "capability.list", "account.list", "account.messages", "account.search", "message.send"]);
+    expect([...EVENT_METHODS]).toEqual([...compat.event_methods, "capability.changed", "account.changed"]);
     expect(compat.unsupported_methods).toEqual(["settings.get", "settings.update"]);
     for (const method of compat.unsupported_methods) expect(REQUEST_METHODS).toContain(method);
   });
@@ -210,4 +177,27 @@ describe("v1 wire golden bytes", () => {
     expect(JSON.stringify({ body: "x", parent_id: null })).toBe(compat.wire_bytes.null_json);
     expect(Buffer.from(compat.wire_bytes.cursor_json, "utf8").toString("base64url")).toBe(compat.wire_bytes.cursor_base64url);
   });
+});
+
+test("delegated send requires an authenticated sender handshake and stable strict payload", () => {
+  expect(createHandshake("sender", () => false, undefined, "owner-secret")).toEqual({ role: "sender", sender_token: "owner-secret" });
+  expect(() => createHandshake("sender", () => false)).toThrow(/sender token/);
+  expect(() => createHandshake("agent", () => false, undefined, "owner-secret")).toThrow(/sender/);
+  const params = { request_id: "stable-request-0001", chat: { platform: "slack", account: "a", chat_id: "c" }, body: "hello" };
+  const request = { type: "request", id: "wire-1", method: "message.send", params };
+  expect(parseRequest(request, "sender").params).toEqual(params);
+  for (const role of ["reader", "agent", "mcp"] as const) expect(() => parseRequest(request, role)).toThrow(/sender/);
+  for (const bad of [{ ...params, request_id: "" }, { chat: params.chat, body: "hello" }, { ...params, sender_token: "secret" }, { ...params, envelope: {} }, { ...params, body: "x".repeat(65537) }]) {
+    expect(() => parseRequest({ ...request, params: bad }, "sender")).toThrow();
+  }
+  expect(() => parseRequest({ type: "request", id: "h", method: "system.hello", params: { role: "sender" } })).toThrow(/sender token/);
+  expect(() => parseRequest({ type: "request", id: "h", method: "system.hello", params: { role: "agent", sender_token: "secret" } })).toThrow(/sender token/);
+});
+
+test("file sends require an exact bounded descriptor and cannot mix text or reply fields", async () => {
+  const { parseMessageSendParams } = await import("../src/schema.ts");
+  const value = { request_id: "file-request-0001", chat: { platform: "slack", account: "work", chat_id: "1" }, file: { path: "/tmp/test.pdf", name: "test.pdf", size: 3, sha256: "a".repeat(64) } };
+  expect(parseMessageSendParams(value)).toEqual(value);
+  for (const file of [{ ...value.file, name: "../test" }, { ...value.file, path: "relative" }, { ...value.file, size: 104857601 }, { ...value.file, sha256: "wrong" }]) expect(() => parseMessageSendParams({ ...value, file })).toThrow();
+  for (const extra of [{ body: "caption" }, { parent_id: "reply" }, { envelope: {} }]) expect(() => parseMessageSendParams({ ...value, ...extra })).toThrow();
 });

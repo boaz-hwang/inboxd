@@ -87,6 +87,7 @@ struct BindingEntry {
 
 pub(crate) struct CapabilityRegistry {
     entries: RwLock<BTreeMap<String, BindingEntry>>,
+    configured_resources: BTreeSet<String>,
     #[cfg(feature = "test-worker")]
     post_claim_revocation: Mutex<Option<String>>,
 }
@@ -149,6 +150,7 @@ impl CapabilityRegistry {
         }
         Ok(Self {
             entries: RwLock::new(entries),
+            configured_resources: resources,
             #[cfg(feature = "test-worker")]
             post_claim_revocation: Mutex::new(None),
         })
@@ -236,12 +238,8 @@ impl CapabilityRegistry {
     #[cfg(not(feature = "test-worker"))]
     pub(crate) async fn run_post_claim_test_hook(&self) {}
 
-    pub(crate) fn has_workers(&self) -> bool {
-        self.entries
-            .read()
-            .unwrap()
-            .values()
-            .any(|entry| entry.worker.is_some())
+    pub(crate) fn was_configured(&self, resource: &Value) -> bool {
+        resource_key(resource).is_ok_and(|key| self.configured_resources.contains(&key))
     }
 
     pub(crate) fn exact_for_intent(&self, intent: &Value) -> Option<BindingAccess> {
@@ -261,11 +259,6 @@ impl CapabilityRegistry {
             binding,
             _guard: guard,
         })
-    }
-
-    pub(crate) fn allows_send(&self, intent: &Value) -> bool {
-        self.exact_for_intent(intent)
-            .is_some_and(|binding| binding.allows_send(intent))
     }
 
     pub(crate) fn exact(&self, resource: &Value) -> Option<BindingAccess> {

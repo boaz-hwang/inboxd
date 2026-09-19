@@ -135,7 +135,7 @@ test("compose reply and backfill fail closed while capabilities refresh and afte
       if (method === "chat.list") return { chats: [] };
       if (method === "message.inbox") return { messages: [{ msg_id: "parent-1", body: "parent" }] };
       if (method === "safety.intent.listPending") return { intents: [] };
-      if (method === "safety.intent.create" || method === "sync.backfill") {
+      if (method === "message.send" || method === "sync.backfill") {
         mutations.push(method);
         return {};
       }
@@ -221,15 +221,15 @@ test("native Chat resource directory selects a DestinationRef and composes its a
     receipt: { level: "ack_only" },
     auth: { state: "authenticated", reason: null, observed_at: 1_726_650_011 },
   };
-  const proposals: Record<string, unknown>[] = [];
-  const controller = createTuiController({ actor: "tui:native", client: {
+  const sends: Record<string, unknown>[] = [];
+  const controller = createTuiController({ client: {
     start: async () => {},
     stop: () => {},
     request: async (method, params) => {
       if (method === "capability.list") return { v: 1, resources: [capabilities[0]!, capabilities[1]!, local, destination] };
       if (method === "chat.list") return { chats: [] };
       if (method === "safety.intent.listPending") return { intents: [] };
-      if (method === "safety.intent.create") { proposals.push(params); return { intent_id: "template-native" }; }
+      if (method === "message.send") { sends.push(params); return { state: "Sent" }; }
       return {};
     },
   } });
@@ -251,8 +251,8 @@ test("native Chat resource directory selects a DestinationRef and composes its a
     harness.mockInput.pressEnter();
     await harness.mockInput.typeText("approved preview");
     harness.mockInput.pressEnter();
-    for (let turn = 0; turn < 20 && proposals.length === 0; turn++) await Promise.resolve();
-    expect(proposals).toEqual([{ actor: "tui:native", envelope: {
+    for (let turn = 0; turn < 20 && sends.length === 0; turn++) await Promise.resolve();
+    expect(sends).toEqual([{ request_id: expect.any(String), envelope: {
       v: 2,
       destination: destination.resource,
       content: { mode: "approved_template", template_id: "notice-7", arguments: { amount: 1000 }, preview: "approved preview" },
@@ -311,8 +311,8 @@ test("text and reply compose are gated by the selected exact chat capability", a
     auth: { state: "authenticated" as const, reason: null, observed_at: 1_726_650_002 },
   };
   const directory = [capabilities[0]!, readOnlySlack, telegram];
-  const proposals: Record<string, unknown>[] = [];
-  const controller = createTuiController({ actor: "tui:operator", client: {
+  const sends: Record<string, unknown>[] = [];
+  const controller = createTuiController({ client: {
     start: async () => {},
     stop: () => {},
     request: async (method, params) => {
@@ -320,7 +320,7 @@ test("text and reply compose are gated by the selected exact chat capability", a
       if (method === "chat.list") return { chats: [] };
       if (method === "message.inbox") return { messages: [{ msg_id: "parent-1", body: "parent" }] };
       if (method === "safety.intent.listPending") return { intents: [] };
-      if (method === "safety.intent.create") { proposals.push(params); return { intent_id: `p-${proposals.length}` }; }
+      if (method === "message.send") { sends.push(params); return { state: "Sent" }; }
       return {};
     },
   } });
@@ -331,8 +331,8 @@ test("text and reply compose are gated by the selected exact chat capability", a
   await controller.dispatchKey("c");
   for (const key of "hello slack") await controller.dispatchKey(key);
   await controller.dispatchKey("Enter");
-  expect(proposals[0]).toEqual({
-    actor: "tui:operator",
+  expect(sends[0]).toEqual({
+    request_id: expect.any(String),
     envelope: {
       v: 2,
       destination: capabilities[0]!.resource,
@@ -343,8 +343,8 @@ test("text and reply compose are gated by the selected exact chat capability", a
   await controller.dispatchKey("r");
   for (const key of "thread reply") await controller.dispatchKey(key);
   await controller.dispatchKey("Enter");
-  expect(proposals[1]).toEqual({
-    actor: "tui:operator",
+  expect(sends[1]).toEqual({
+    request_id: expect.any(String),
     envelope: {
       v: 2,
       destination: capabilities[0]!.resource,
@@ -359,8 +359,8 @@ test("text and reply compose are gated by the selected exact chat capability", a
   expect(controller.state.composeActive).toBe(true);
   for (const key of "telegram reply") await controller.dispatchKey(key);
   await controller.dispatchKey("Enter");
-  expect(proposals[2]).toEqual({
-    actor: "tui:operator",
+  expect(sends[2]).toEqual({
+    request_id: expect.any(String),
     envelope: {
       v: 2,
       destination: telegram.resource,
@@ -392,23 +392,20 @@ test("Kakao local is read-only while official destinations compose templates wit
     receipt: { level: "ack_only" },
     auth: { state: "authenticated", reason: null, observed_at: 1_726_650_011 },
   };
-  const proposals: Record<string, unknown>[] = [];
-  const approvals: Record<string, unknown>[] = [];
+  const sends: Record<string, unknown>[] = [];
   const envelope = {
     v: 2,
     destination: official.resource,
     content: { mode: "approved_template", template_id: "notice-7", arguments: { amount: 1000 }, preview: "승인: 1000" },
   };
-  const controller = createTuiController({ actor: "tui:operator", client: {
+  const controller = createTuiController({ client: {
     start: async () => {},
     stop: () => {},
     request: async (method, params) => {
       if (method === "capability.list") return { v: 1, resources: [local, official] };
       if (method === "chat.list") return { chats: [] };
       if (method === "safety.intent.listPending") return { intents: [{ intent_id: "template-1", actor: "tui:operator", envelope, state: "Proposed", expires_at: 20 }] };
-      if (method === "safety.intent.claimApprovalCode") return { code: "654321" };
-      if (method === "safety.intent.create") { proposals.push(params); return { intent_id: "template-1" }; }
-      if (method === "safety.intent.approve") { approvals.push(params); return { state: "Verified" }; }
+      if (method === "message.send") { sends.push(params); return { state: "Sent" }; }
       return {};
     },
   } });
@@ -440,55 +437,7 @@ test("Kakao local is read-only while official destinations compose templates wit
   expect(compose).toContain('Arguments JSON: {"amount":1000}');
   expect(compose).toContain("Preview: 승인: 1000_");
   await controller.dispatchKey("Enter");
-  expect(proposals).toEqual([{ actor: "tui:operator", envelope }]);
+  expect(sends).toEqual([{ request_id: expect.any(String), envelope }]);
 
-  await controller.dispatchKey("4");
-  await controller.dispatchKey("a");
-  for (const key of "654321") await controller.dispatchKey(key);
-  await controller.dispatchKey("Enter");
-  expect(approvals).toEqual([{ intent_id: "template-1", code: "654321", actor: "tui:operator", resource: official.resource }]);
-  expect(controller.state.views.approvals.data[0]?.state).toBe("Sent");
-  const outcome = renderInspectorScreen(controller.state, { width: 120, height: 40 });
-  expect(outcome).toContain("acknowledged; not verified");
-  expect(outcome).not.toContain("destination read-back matched");
-});
 
-test("DestinationRef Verified is clamped to Sent after its capability disappears", async () => {
-  const destination: ResourceCapabilityV1 = {
-    v: 1,
-    resource: { v: 1, kind: "destination", platform: "kakao", account: "official-app", destination_id: "friend-uuid" },
-    read: { mode: "none", limits: null },
-    write: { mode: "send", content_mode: "approved_template", reply: false },
-    receipt: { level: "ack_only" },
-    auth: { state: "authenticated", reason: null, observed_at: 1_726_650_011 },
-  };
-  let capabilityCalls = 0;
-  const controller = createTuiController({ client: {
-    start: async () => {},
-    stop: () => {},
-    request: async method => {
-      if (method === "capability.list") return { v: 1, resources: capabilityCalls++ === 0 ? [destination] : [] };
-      if (method === "chat.list") return { chats: [] };
-      if (method === "safety.intent.listPending") return { intents: [{
-        intent_id: "destination-1",
-        actor: "tui:operator",
-        envelope: { v: 2, destination: destination.resource, content: { mode: "approved_template", template_id: "notice", arguments: {}, preview: "notice" } },
-        state: "Proposed",
-        expires_at: 20,
-      }] };
-      if (method === "safety.intent.claimApprovalCode") return { code: "654321" };
-      if (method === "safety.intent.approve") return { state: "Verified" };
-      return {};
-    },
-  } });
-  await controller.start();
-  await controller.receiveEvent("capability.changed");
-  expect(controller.state.capabilities.status).toBe("empty");
-  await controller.dispatchKey("4");
-  await controller.dispatchKey("a");
-  await controller.dispatchKey("654321");
-  await controller.dispatchKey("Enter");
-
-  expect(controller.state.views.approvals.data[0]?.state).toBe("Sent");
-  expect(renderInspectorScreen(controller.state, { width: 80, height: 24 })).toContain("acknowledged; not verified");
 });

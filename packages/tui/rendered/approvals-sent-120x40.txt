@@ -1,11 +1,11 @@
- inboxd  /  전송 확인                                                                                                   
+ inboxd  /  전송 기록                                                                                                   
  ● 전체   ○ KakaoTalk   ○ Slack   ○ Telegram                                                                            
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
                                                                                                                         
  Slack · ops                                                                                                            
  Sent  · 1 / 1                                                                                                          
                                                                                                                         
-  Operator-reviewed proposal                                                                                            
+  Historical send record                                                                                                
                                                                                                                         
  ✓ 전송 접수됨 · 수신 확인 전                                                                                           
                                                                                                                         

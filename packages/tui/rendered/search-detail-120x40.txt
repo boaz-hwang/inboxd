@@ -1,5 +1,5 @@
 INBOXD · connected · account ?                                                                                          
-1 INBOX | ● SEARCH | 3 CHAT | 4 APPROVALS | 5 DOCTOR                                                                    
+1 INBOX | ● SEARCH | 3 CHAT | 4 HISTORY | 5 DOCTOR                                                                      
 Resource: slack › work › chat:ops                                                                                       
 READ bounded_history max_page=100 pages=1 cursor=opaque                                                                 
 WRITE send content=text reply=yes                                                                                       
@@ -37,4 +37,4 @@ Results                                         │Author: 민수
                                                                                                                         
                                                                                                                         
                                                                                                                         
-1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply a Esc ? q                                                           
+1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply s-status Esc ? q                                                    

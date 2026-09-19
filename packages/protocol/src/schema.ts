@@ -22,7 +22,7 @@ export const LEGACY_REQUEST_METHODS = [
   "subscribe",
 ] as const;
 
-export const REQUEST_METHODS = [...LEGACY_REQUEST_METHODS, "capability.list", "account.list", "account.messages", "account.search", "account.send"] as const;
+export const REQUEST_METHODS = [...LEGACY_REQUEST_METHODS.filter(method => method !== "safety.intent.create" && method !== "safety.intent.claimApprovalCode" && method !== "safety.intent.approve"), "capability.list", "account.list", "account.messages", "account.search", "message.send"] as const;
 
 export const LEGACY_EVENT_METHODS = [
   "message.upserted",
@@ -30,14 +30,12 @@ export const LEGACY_EVENT_METHODS = [
   "safety.intent.changed",
 ] as const;
 
-export const EVENT_METHODS = [...LEGACY_EVENT_METHODS, "capability.changed"] as const;
+export const EVENT_METHODS = [...LEGACY_EVENT_METHODS, "capability.changed", "account.changed"] as const;
 
-/** Frozen host boundary implemented by both Bun and Rust compatibility hosts. */
+/** Host callbacks implemented by the bundled Bun and Rust runtimes. */
 export const HOST_OPERATIONS = [
   "host.now",
   "host.id",
-  "host.approvalCode",
-  "host.allowSend",
   "host.canonicalSha256",
   "host.canonicalJson",
   "host.sha256Text",
@@ -68,7 +66,7 @@ export const TIME_UNITS_V1 = {
 
 export type ProtocolMethod = (typeof REQUEST_METHODS)[number];
 export type ProtocolEventMethod = (typeof EVENT_METHODS)[number];
-export type ClientRole = "reader" | "agent" | "mcp" | "approver";
+export type ClientRole = "reader" | "agent" | "mcp" | "approver" | "sender";
 export type JsonObject = Record<string, unknown>;
 
 export interface ChatRefV1 {
@@ -118,12 +116,6 @@ export interface ResourceCapabilitiesV1 {
 
 export type JsonValue = null | boolean | number | string | readonly JsonValue[] | { readonly [key: string]: JsonValue };
 
-export interface LegacySlackSendV1 {
-  readonly scope: { readonly platform: "slack"; readonly account: string; readonly chat_id: string };
-  readonly body: string;
-  readonly parent_id?: string;
-}
-
 export type SendContentV2 =
   | { readonly mode: "text"; readonly body: string }
   | { readonly mode: "approved_template"; readonly template_id: string; readonly arguments: { readonly [key: string]: JsonValue }; readonly preview: string };
@@ -133,15 +125,6 @@ export interface SendEnvelopeV2 {
   readonly destination: ResourceRefV1;
   readonly content: SendContentV2;
   readonly reply?: { readonly parent_id: string };
-}
-
-export type SendApprovalBinding =
-  | { readonly v: 1; readonly payload: LegacySlackSendV1 }
-  | { readonly v: 2; readonly payload: SendEnvelopeV2 };
-
-export interface NormalizedSendEnvelope {
-  readonly envelope: SendEnvelopeV2;
-  readonly approval: SendApprovalBinding;
 }
 
 export const WORKER_OPERATIONS = ["read_page", "send", "read_receipt", "health"] as const;
@@ -280,7 +263,7 @@ export class ProtocolSchemaError extends Error {
 
 const requestMethods = new Set<string>(REQUEST_METHODS);
 const eventMethods = new Set<string>(EVENT_METHODS);
-const roles = new Set<string>(["reader", "agent", "mcp", "approver"]);
+const roles = new Set<string>(["reader", "agent", "mcp", "approver", "sender"]);
 const utf8Encoder = new TextEncoder();
 
 function object(value: unknown, label: string): JsonObject {
@@ -305,24 +288,13 @@ function requestMethod(value: unknown): ProtocolMethod {
   return method as ProtocolMethod;
 }
 
-function containsApprovalCode(value: unknown): boolean {
-  if (Array.isArray(value)) return value.some(containsApprovalCode);
-  if (value === null || typeof value !== "object") return false;
-  return Object.entries(value as JsonObject).some(([key, nested]) =>
-    key === "code" || key === "approval_code" || key === "approvalCode" || containsApprovalCode(nested),
-  );
-}
-
-function assertApprovalAccess(method: ProtocolMethod, role?: ClientRole): void {
-  if (role !== undefined && role !== "approver" && (
-    method === "account.send"
-    || method === "safety.intent.listPending"
-    || method === "safety.intent.claimApprovalCode"
-    || method === "safety.intent.approve"
-    || method === "safety.intent.reject"
-  )) {
-    throw new ProtocolSchemaError(`${method} requires an approver role`);
+function assertOwnerAccess(method: ProtocolMethod, role?: ClientRole): void {
+  if (role === undefined) return;
+  if (["message.send", "safety.intent.listPending", "safety.intent.reject"].includes(method)
+    && role !== "sender" && role !== "approver") {
+    throw new ProtocolSchemaError(`${method} requires an authenticated sender or approver role`);
   }
+
 }
 
 export function parseRole(value: unknown): ClientRole {
@@ -331,7 +303,7 @@ export function parseRole(value: unknown): ClientRole {
   return role as ClientRole;
 }
 
-export function approverTokenFromHandshake(params: JsonObject): string | undefined {
+function approverTokenFromHandshake(params: JsonObject): string | undefined {
   const token = params.approver_token;
   if (token === undefined) return undefined;
   if (typeof token !== "string" || token.length < 1 || token.length > 4_096) {
@@ -344,6 +316,7 @@ export function createHandshake(
   role: ClientRole,
   isTTY: () => boolean = () => Boolean((globalThis as { process?: { stdout?: { isTTY?: boolean } } }).process?.stdout?.isTTY),
   approverToken?: string,
+  senderToken?: string,
 ): JsonObject {
   if (role === "approver" && !isTTY()) {
     throw new ProtocolSchemaError("approver role requires a local TTY");
@@ -352,7 +325,9 @@ export function createHandshake(
     throw new ProtocolSchemaError("approver token may only be supplied by an approver");
   }
   if (approverToken !== undefined) approverTokenFromHandshake({ approver_token: approverToken });
-  return { role, ...(approverToken === undefined ? {} : { approver_token: approverToken }) };
+  if (senderToken !== undefined && role !== "sender") throw new ProtocolSchemaError("sender token may only be supplied by a sender");
+  if (role === "sender" && (typeof senderToken !== "string" || senderToken.length < 1 || senderToken.length > 4096)) throw new ProtocolSchemaError("sender role requires a sender token");
+  return { role, ...(senderToken === undefined ? {} : { sender_token: senderToken }), ...(approverToken === undefined ? {} : { approver_token: approverToken }) };
 }
 
 function exactKeys(value: JsonObject, allowed: readonly string[], label: string): void {
@@ -587,22 +562,6 @@ function parseJsonValue(
   }
 }
 
-function parseLegacySlackSend(value: unknown): LegacySlackSendV1 {
-  const send = object(value, "v1 Slack send");
-  exactKeys(send, ["scope", "body", "parent_id"], "v1 Slack send");
-  const scope = object(send.scope, "v1 Slack scope");
-  exactKeys(scope, ["platform", "account", "chat_id"], "v1 Slack scope");
-  if (scope.platform !== "slack") throw new ProtocolSchemaError("v1 send scope platform must be slack");
-  const parsedScope: LegacySlackSendV1["scope"] = {
-    platform: "slack",
-    account: nonEmptyString(scope.account, "v1 Slack scope account"),
-    chat_id: nonEmptyString(scope.chat_id, "v1 Slack scope chat_id"),
-  };
-  const body = boundedUtf8String(send.body, "v1 Slack send body", PROTOCOL_LIMITS.send_body_bytes);
-  const parentId = send.parent_id === undefined ? undefined : nonEmptyString(send.parent_id, "v1 Slack parent_id");
-  return { scope: parsedScope, body, ...(parentId === undefined ? {} : { parent_id: parentId }) };
-}
-
 export function parseSendEnvelopeV2(value: unknown): SendEnvelopeV2 {
   const envelope = object(value, "send envelope");
   exactKeys(envelope, ["v", "destination", "content", "reply"], "send envelope");
@@ -639,59 +598,6 @@ export function parseSendEnvelopeV2(value: unknown): SendEnvelopeV2 {
     reply = { parent_id: nonEmptyString(value.parent_id, "send reply parent_id") };
   }
   return { v: 2, destination, content: parsedContent, ...(reply === undefined ? {} : { reply }) };
-}
-
-export function normalizeSendEnvelope(value: unknown): NormalizedSendEnvelope {
-  const input = object(value, "send input");
-  if (input.v === 2) {
-    const envelope = parseSendEnvelopeV2(input);
-    return { envelope, approval: { v: 2, payload: envelope } };
-  }
-  const legacy = parseLegacySlackSend(input);
-  const envelope: SendEnvelopeV2 = {
-    v: 2,
-    destination: { v: 1, kind: "chat", platform: "slack", account: legacy.scope.account, chat_id: legacy.scope.chat_id },
-    content: { mode: "text", body: legacy.body },
-    ...(legacy.parent_id === undefined ? {} : { reply: { parent_id: legacy.parent_id } }),
-  };
-  return { envelope, approval: { v: 1, payload: legacy } };
-}
-
-function parseNormalizedSendEnvelope(value: unknown): NormalizedSendEnvelope {
-  const normalized = object(value, "normalized send");
-  exactKeys(normalized, ["envelope", "approval"], "normalized send");
-  const envelope = parseSendEnvelopeV2(normalized.envelope);
-  const approval = object(normalized.approval, "send approval binding");
-  exactKeys(approval, ["v", "payload"], "send approval binding");
-  if (approval.v === 1) {
-    const payload = parseLegacySlackSend(approval.payload);
-    if (JSON.stringify(normalizeSendEnvelope(payload).envelope) !== JSON.stringify(envelope)) {
-      throw new ProtocolSchemaError("v1 approval payload does not match the normalized envelope");
-    }
-    return { envelope, approval: { v: 1, payload } };
-  }
-  if (approval.v === 2) {
-    const payload = parseSendEnvelopeV2(approval.payload);
-    if (JSON.stringify(payload) !== JSON.stringify(envelope)) throw new ProtocolSchemaError("v2 approval payload does not match the normalized envelope");
-    return { envelope, approval: { v: 2, payload } };
-  }
-  throw new ProtocolSchemaError("send approval binding version must be 1 or 2");
-}
-
-/** Returns the immutable approval-hash input. V1 property order and values are intentionally unchanged. */
-export function sendApprovalPayload(actor: unknown, value: unknown): JsonObject {
-  const parsedActor = nonEmptyString(actor, "send actor");
-  const normalized = parseNormalizedSendEnvelope(value);
-  if (normalized.approval.v === 1) {
-    const payload = normalized.approval.payload;
-    return {
-      actor: parsedActor,
-      scope: payload.scope,
-      body: payload.body,
-      ...(payload.parent_id === undefined ? {} : { parent_id: payload.parent_id }),
-    };
-  }
-  return { actor: parsedActor, envelope: normalized.approval.payload };
 }
 
 function parseWorkerOperation(value: unknown): WorkerOperationV1 {
@@ -992,11 +898,14 @@ export function parseRequest(value: unknown, role?: ClientRole): ProtocolRequest
   const frame = object(value, "request");
   if (frame.type !== "request") throw new ProtocolSchemaError("frame must be a request");
   const method = requestMethod(frame.method);
-  assertApprovalAccess(method, role);
+  assertOwnerAccess(method, role);
   const params = object(frame.params, "request params");
+  if (method === "message.send") parseMessageSendParams(params);
   if (method === "message.recent" || method === "message.evidence") parseRecentMessagesParams(params);
   if (method === "system.hello") {
     const declaredRole = parseRole(params.role);
+    if (params.sender_token !== undefined && (declaredRole !== "sender" || typeof params.sender_token !== "string" || params.sender_token.length < 1 || params.sender_token.length > 4096)) throw new ProtocolSchemaError("invalid sender token handshake");
+    if (declaredRole === "sender" && params.sender_token === undefined) throw new ProtocolSchemaError("sender role requires a sender token");
     if (params.approver_token !== undefined) {
       if (declaredRole !== "approver") throw new ProtocolSchemaError("approver token may only be supplied by an approver");
       approverTokenFromHandshake(params);
@@ -1010,19 +919,13 @@ export function parseRequest(value: unknown, role?: ClientRole): ProtocolRequest
   };
 }
 
-export function parseResponse(value: unknown, role?: ClientRole): ProtocolResponse {
+export function parseResponse(value: unknown): ProtocolResponse {
   const frame = object(value, "response");
   if (frame.type !== "response") throw new ProtocolSchemaError("frame must be a response");
   const method = requestMethod(frame.method);
   const ok = frame.ok;
   if (typeof ok !== "boolean") throw new ProtocolSchemaError("response ok must be boolean");
   const result = frame.result === undefined ? undefined : object(frame.result, "response result");
-  if (
-    containsApprovalCode(result)
-    && (method !== "safety.intent.claimApprovalCode" || (role !== undefined && role !== "approver"))
-  ) {
-    throw new ProtocolSchemaError("approval code requires the dedicated approver claim response");
-  }
   const error = frame.error === undefined ? undefined : object(frame.error, "response error");
   if (error !== undefined) {
     nonEmptyString(error.code, "response error code");
@@ -1045,8 +948,51 @@ export function parseMessage(value: unknown, role?: ClientRole): ProtocolMessage
   const frame = object(value, "frame");
   switch (frame.type) {
     case "request": return parseRequest(frame, role);
-    case "response": return parseResponse(frame, role);
+    case "response": return parseResponse(frame);
     case "event": return parseEvent(frame);
     default: throw new ProtocolSchemaError("frame type must be request, response, or event");
   }
+}
+
+export const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024;
+export interface LocalAttachment {
+  readonly path: string;
+  readonly name: string;
+  readonly size: number;
+  readonly sha256: string;
+}
+export function parseLocalAttachment(value: unknown): LocalAttachment {
+  const file = object(value, "attachment");
+  exactKeys(file, ["path", "name", "size", "sha256"], "attachment");
+  const path = boundedUtf8String(file.path, "file path", 4096);
+  const name = boundedUtf8String(file.name, "file name", 255);
+  if (!path.startsWith("/") || /[\x00-\x1f\x7f]/.test(path) || /[/\\\x00-\x1f\x7f]/.test(name) || name === "." || name === "..") throw new ProtocolSchemaError("invalid attachment path/name");
+  if (!Number.isSafeInteger(file.size) || (file.size as number) < 1 || (file.size as number) > MAX_ATTACHMENT_BYTES) throw new ProtocolSchemaError("파일 크기는 1바이트부터 100 MiB까지 지원합니다");
+  if (typeof file.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(file.sha256)) throw new ProtocolSchemaError("invalid attachment digest");
+  return { path, name, size: file.size as number, sha256: file.sha256 };
+}
+
+/** A stable request ID identifies one attempted send, including after a lost response. */
+export type MessageSendParams = { readonly request_id: string } & (
+  | { readonly envelope: SendEnvelopeV2 }
+  | { readonly chat: { readonly platform: string; readonly account: string; readonly chat_id: string }; readonly file: LocalAttachment }
+  | { readonly chat: { readonly platform: string; readonly account: string; readonly chat_id: string }; readonly body: string; readonly parent_id?: string }
+);
+
+export function parseMessageSendParams(value: unknown): MessageSendParams {
+  const input = object(value, "message.send params");
+  const request_id = boundedUtf8String(input.request_id, "request_id", 80);
+  if (utf8Encoder.encode(request_id).byteLength < 16) throw new ProtocolSchemaError("request_id must contain 16 to 80 UTF-8 bytes");
+  if (input.envelope !== undefined) {
+    exactKeys(input, ["request_id", "envelope"], "message.send params");
+    return { request_id, envelope: parseSendEnvelopeV2(input.envelope) };
+  }
+  exactKeys(input, input.file !== undefined ? ["request_id", "chat", "file"] : ["request_id", "chat", "body", "parent_id"], "message.send params");
+  const chat = object(input.chat, "chat");
+  exactKeys(chat, ["platform", "account", "chat_id"], "chat");
+  const ref = parseChatRef({ v: 1, kind: "chat", ...chat });
+  if (input.file !== undefined) return { request_id, chat: { platform: ref.platform, account: ref.account, chat_id: ref.chat_id }, file: parseLocalAttachment(input.file) };
+  const body = boundedUtf8String(input.body, "body", PROTOCOL_LIMITS.send_body_bytes);
+  const parent_id = input.parent_id === undefined ? undefined : boundedString(input.parent_id, "parent_id", 4096);
+  return { request_id, chat: { platform: ref.platform, account: ref.account, chat_id: ref.chat_id }, body, ...(parent_id === undefined ? {} : { parent_id }) };
 }

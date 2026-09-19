@@ -118,6 +118,7 @@ export function unavailablePort(reason: string): TdlibUserClientPort {
     getChat: reject,
     getChatHistory: reject,
     sendTextMessage: reject,
+    sendDocumentMessage: reject,
     getMessage: reject,
     async close() {},
   };
@@ -169,6 +170,8 @@ function errorCode(error: unknown): number | null {
 }
 
 function createAvailablePort(client: TdlClient): TdlibUserClientPort {
+  const accountListeners = new Set<(update: Record<string, unknown>) => void>();
+  let connectionUpdate: Record<string, unknown> | undefined;
   const completionCache = new Map<string, SendCompletion>();
   const pendingSendWaiters = new Map<string, Set<PendingSendWaiter>>();
 
@@ -203,6 +206,9 @@ function createAvailablePort(client: TdlClient): TdlibUserClientPort {
   };
 
   const updateListener = (update: unknown): void => {
+    const object = record(toTdlibJson(update));
+    if (object?.["@type"] === "updateConnectionState") connectionUpdate = object;
+    if (object) for (const listener of accountListeners) listener(object);
     const completion = sendCompletion(update);
     if (completion === null) return;
     const waiters = pendingSendWaiters.get(completion.key);
@@ -270,7 +276,68 @@ function createAvailablePort(client: TdlClient): TdlibUserClientPort {
     }
   }
 
+  async function sendContent(request: Omit<TdlibSendTextRequest, "text">, content: Record<string, unknown>): Promise<TdlibMessage> {
+      if (!Number.isSafeInteger(request.timeout_ms) || request.timeout_ms < 1) {
+        throw new TypeError("Telegram send timeout is invalid");
+      }
+      const expectedChatId = canonicalInt53(request.chat_id, "Telegram chat id");
+      const replyTo = request.reply_to_message_id === null
+        ? null
+        : {
+          _: "inputMessageReplyToMessage",
+          message_id: int53(request.reply_to_message_id, "Telegram reply message id"),
+          quote: null,
+          checklist_task_id: 0,
+        };
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new TdlibCallError(504, "TDLib send confirmation timed out", true));
+        }, request.timeout_ms);
+      });
+      let pending: ReturnType<typeof waitForSendCompletion> | undefined;
+      try {
+        const rawResponse = await Promise.race([invoke({
+          _: "sendMessage",
+          chat_id: Number(expectedChatId),
+          topic_id: null,
+          reply_to: replyTo,
+          options: null,
+          reply_markup: null,
+          input_message_content: content,
+        }, true), timeout]);
+        let response: TdlibMessage;
+        try {
+          response = typedTdlibObject(rawResponse, "message") as unknown as TdlibMessage;
+        } catch {
+          throw new TdlibCallError(500, "TDLib returned a malformed send response", true);
+        }
+        const sendingState = record(response.sending_state);
+        if (sendingState?.["@type"] !== "messageSendingStatePending") return response;
+        if (canonicalInt53(response.chat_id, "TDLib pending send chat id") !== expectedChatId) {
+          throw new TypeError("TDLib pending send chat id is invalid");
+        }
+        const key = completionKey(response.chat_id, response.id);
+        if (key === null || !canObserveUpdates) {
+          throw new TdlibCallError(500, "TDLib send confirmation is unavailable", true);
+        }
+        pending = waitForSendCompletion(key);
+        const completion = await Promise.race([pending.promise, timeout]);
+        if (completion.outcome === "failed") {
+          throw new TdlibCallError(completion.code, "TDLib reported that the send failed", false);
+        }
+        return completion.message;
+      } catch (error) {
+        if (error instanceof TdlibCallError) throw error;
+        throw new TdlibCallError(500, "TDLib returned a malformed send response", true);
+      } finally {
+        pending?.cancel();
+        if (timer !== undefined) clearTimeout(timer);
+      }
+  }
+
   return {
+    onAccountUpdate(listener) { accountListeners.add(listener); if (connectionUpdate) listener(connectionUpdate); return () => { accountListeners.delete(listener); }; },
     availability: { available: true },
     async accountQuery(query) { return typedTdlibObject(await invoke(query)); },
 
@@ -309,72 +376,12 @@ function createAvailablePort(client: TdlClient): TdlibUserClientPort {
     },
 
     async sendTextMessage(request: TdlibSendTextRequest): Promise<TdlibMessage> {
-      if (typeof request.text !== "string" || request.text.length === 0
-        || encoder.encode(request.text).byteLength > 65_536) {
-        throw new TypeError("Telegram text is invalid");
-      }
-      if (!Number.isSafeInteger(request.timeout_ms) || request.timeout_ms < 1) {
-        throw new TypeError("Telegram send timeout is invalid");
-      }
-      const expectedChatId = canonicalInt53(request.chat_id, "Telegram chat id");
-      const replyTo = request.reply_to_message_id === null
-        ? null
-        : {
-          _: "inputMessageReplyToMessage",
-          message_id: int53(request.reply_to_message_id, "Telegram reply message id"),
-          quote: null,
-          checklist_task_id: 0,
-        };
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const timeout = new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => {
-          reject(new TdlibCallError(504, "TDLib send confirmation timed out", true));
-        }, request.timeout_ms);
-      });
-      let pending: ReturnType<typeof waitForSendCompletion> | undefined;
-      try {
-        const rawResponse = await Promise.race([invoke({
-          _: "sendMessage",
-          chat_id: Number(expectedChatId),
-          topic_id: null,
-          reply_to: replyTo,
-          options: null,
-          reply_markup: null,
-          input_message_content: {
-            _: "inputMessageText",
-            text: { _: "formattedText", text: request.text, entities: [] },
-            link_preview_options: null,
-            clear_draft: false,
-          },
-        }, true), timeout]);
-        let response: TdlibMessage;
-        try {
-          response = typedTdlibObject(rawResponse, "message") as unknown as TdlibMessage;
-        } catch {
-          throw new TdlibCallError(500, "TDLib returned a malformed send response", true);
-        }
-        const sendingState = record(response.sending_state);
-        if (sendingState?.["@type"] !== "messageSendingStatePending") return response;
-        if (canonicalInt53(response.chat_id, "TDLib pending send chat id") !== expectedChatId) {
-          throw new TypeError("TDLib pending send chat id is invalid");
-        }
-        const key = completionKey(response.chat_id, response.id);
-        if (key === null || !canObserveUpdates) {
-          throw new TdlibCallError(500, "TDLib send confirmation is unavailable", true);
-        }
-        pending = waitForSendCompletion(key);
-        const completion = await Promise.race([pending.promise, timeout]);
-        if (completion.outcome === "failed") {
-          throw new TdlibCallError(completion.code, "TDLib reported that the send failed", false);
-        }
-        return completion.message;
-      } catch (error) {
-        if (error instanceof TdlibCallError) throw error;
-        throw new TdlibCallError(500, "TDLib returned a malformed send response", true);
-      } finally {
-        pending?.cancel();
-        if (timer !== undefined) clearTimeout(timer);
-      }
+      if (typeof request.text !== "string" || request.text.length === 0 || encoder.encode(request.text).byteLength > 65_536) throw new TypeError("Telegram text is invalid");
+      return sendContent(request, { _: "inputMessageText", text: { _: "formattedText", text: request.text, entities: [] }, link_preview_options: null, clear_draft: false });
+    },
+    async sendDocumentMessage(request): Promise<TdlibMessage> {
+      if (!request.path.startsWith("/") || request.path.includes("\0")) throw new TypeError("Telegram file path is invalid");
+      return sendContent({ ...request, reply_to_message_id: null }, { _: "inputMessageDocument", document: { _: "inputFileLocal", path: request.path }, thumbnail: null, disable_content_type_detection: true, caption: { _: "formattedText", text: "", entities: [] } });
     },
 
     async getMessage(chatId: string, messageId: string): Promise<TdlibMessage> {
@@ -386,6 +393,7 @@ function createAvailablePort(client: TdlClient): TdlibUserClientPort {
     },
 
     async close(): Promise<void> {
+      accountListeners.clear();
       if (canObserveUpdates) {
         if (typeof client.off === "function") client.off("update", updateListener);
         else client.removeListener?.("update", updateListener);

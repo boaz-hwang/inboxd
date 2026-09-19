@@ -15,7 +15,7 @@ describeWithRustDaemon("real CLI Rust daemon process lifecycle", () => {
     ["success", ["daemon", "status"], 0],
     ["remote failure", ["sync", "backfill", JSON.stringify({ platform: "slack", account: "stable:a", chat_id: "stable:c", from_ts: 1, to_ts: 2 })], 1],
   ] as const)("closes its UDS and exits after %s", async (_label, argv, exitCode) => {
-    const harness = new RustDaemonHarness();
+    const harness = new RustDaemonHarness({ installedLayout: true });
     harnesses.push(harness);
     await harness.start();
     const child = Bun.spawn([process.execPath, resolve(import.meta.dir, "../src/bin.ts"), ...argv], {

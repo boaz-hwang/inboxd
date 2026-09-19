@@ -36,3 +36,12 @@ test("pinned SDK never replays send after session loss", async () => {
   await expect(sdk.sendMessage("100", "test")).rejects.toThrow();
   expect(sends).toBe(1); expect(connects).toBe(1);
 });
+test("pinned SDK never reconnects and replays a file upload after session loss", async () => {
+  const { KakaoTalkClient } = await import("agent-messenger/kakaotalk");
+  const sdk = new KakaoTalkClient() as any;
+  sdk.ensureAuth = () => {};
+  let uploads = 0, connects = 0;
+  sdk.ensureSession = async () => { connects++; return { session: { shipMedia: async () => { uploads++; sdk.state = null; throw new Error("closed"); } } }; };
+  await expect(sdk.sendFile("100", Buffer.from("file"), "test.txt")).rejects.toThrow();
+  expect(uploads).toBe(1); expect(connects).toBe(1);
+});

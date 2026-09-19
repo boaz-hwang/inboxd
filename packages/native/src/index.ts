@@ -7,8 +7,6 @@ import { join } from "node:path";
 export interface CoreHooks {
   readonly now?: () => number;
   readonly id?: () => string;
-  readonly approvalCode?: () => string;
-  readonly allowSend?: (input: any) => boolean;
 }
 
 export interface CoreHostError { readonly name: string; readonly message: string; }
@@ -90,8 +88,6 @@ function hostCall(database: Database | undefined, hooks: CoreHooks | undefined, 
   switch (method) {
     case "host.now": return hooks?.now?.() ?? Date.now();
     case "host.id": return hooks?.id?.() ?? crypto.randomUUID();
-    case "host.approvalCode": return hooks?.approvalCode?.() ?? null;
-    case "host.allowSend": return hooks?.allowSend?.(args) ?? false;
     case "host.canonicalSha256": return createHash("sha256").update(canonical(args)).digest("hex");
     case "host.canonicalJson": return canonical(args);
     case "host.sha256Text": {

@@ -1,8 +1,7 @@
 use inboxd_core::{Host, wire_from_utf16_units};
 use inboxd_storage::NativeHost;
-use serde_json::{Value, json};
+use serde_json::json;
 
-// Review regressions: prepared, not executed pending synthetic-test approval.
 #[test]
 fn equivalent_json_number_spellings_keep_integer_validation_compatible() {
     for spelling in ["1", "1.0", "1e0", "1E+0"] {
@@ -50,8 +49,4 @@ fn js_serialization_preserves_wire_surrogates_order_and_numbers() {
         -1
     );
     assert!(host.call("host.jsonParse", json!("{invalid")).is_err());
-    assert_eq!(
-        host.call("host.approvalCode", Value::Null).unwrap(),
-        Value::Null
-    );
 }

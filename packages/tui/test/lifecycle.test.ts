@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { createInitialState } from "../src/index.ts";
 import { createConnectedTuiController } from "../src/main.ts";
 import type { ProtocolMessage, ProtocolTransport } from "../../protocol/src/index.ts";
 
@@ -21,7 +22,7 @@ class Peer implements ProtocolTransport {
     this.methods.push(message.method);
     if (this.heldMethods.has(message.method)) return;
     queueMicrotask(() => this.message?.({ type: "response", id: message.id, method: message.method, ok: true,
-      result: message.method === "capability.list" ? { v: 1, resources: [slackCapability] } : message.method === "safety.intent.claimApprovalCode" ? { code: "123456" } : message.method === "system.status" ? { send_capable: true } : message.method === "safety.intent.listPending" ? { intents: [{ intent_id: "p", actor: "operator", scope: { platform: "slack", account: "work", chat_id: "ops" }, state: "Proposed" }] } : {} }));
+      result: message.method === "capability.list" ? { v: 1, resources: [slackCapability] } : message.method === "system.status" ? { send_capable: true } : message.method === "safety.intent.listPending" ? { intents: [{ intent_id: "p", actor: "operator", scope: { platform: "slack", account: "work", chat_id: "ops" }, state: "Proposed" }] } : {} }));
   }
   onMessage(listener: (message: ProtocolMessage) => void) { this.message = listener; return () => {}; }
   onClose(listener: () => void) { this.closed = listener; return () => {}; }
@@ -52,7 +53,7 @@ test("retries refused reconnects with capped exponential backoff then resubscrib
   const first = new Peer(); const recovered = new Peer(); const clock = new RetryClock();
   let connections = 0; let available = false;
   const controller = createConnectedTuiController({
-    role: "approver", isTTY: () => true, scheduleReconnect: clock.schedule,
+    role: "sender", senderToken: "s".repeat(32), isTTY: () => true, scheduleReconnect: clock.schedule,
     connect: async () => {
       connections++;
       if (connections === 1) return first;
@@ -122,12 +123,12 @@ test("a stopped attempt cannot schedule retries after a new session has connecte
   } finally { controller.stop(); }
 });
 
-test.each(["safety.intent.approve", "safety.intent.create", "sync.backfill"])("automatic retries never replay dispatched %s", async method => {
+test.each(["message.send", "sync.backfill"])("automatic retries never replay dispatched %s", async method => {
   const first = new Peer(); const recovered = new Peer(); const clock = new RetryClock();
   first.heldMethods.add(method);
   let connections = 0;
   const controller = createConnectedTuiController({
-    role: "approver", isTTY: () => true, scheduleReconnect: clock.schedule,
+    role: "sender", senderToken: "s".repeat(32), isTTY: () => true, scheduleReconnect: clock.schedule,
     connect: async () => {
       connections++;
       if (connections === 1) return first;
@@ -138,10 +139,7 @@ test.each(["safety.intent.approve", "safety.intent.create", "sync.backfill"])("a
   try {
     await controller.start();
     controller.setActiveChat({ platform: "slack", account: "work", chat_id: "ops" });
-    if (method === "safety.intent.approve") {
-      await controller.dispatchKey("4"); await controller.dispatchKey("a");
-      for (const key of "123456") await controller.dispatchKey(key);
-    } else if (method === "safety.intent.create") {
+    if (method === "message.send") {
       await controller.dispatchKey("3"); await controller.dispatchKey("c");
       await controller.dispatchKey("x");
     } else if (method === "sync.backfill") {
@@ -153,11 +151,9 @@ test.each(["safety.intent.approve", "safety.intent.create", "sync.backfill"])("a
     clock.fire(); await settle();
     expect(controller.state.connection.status).toBe("connected");
     expect(recovered.methods.slice(0, 4)).toEqual(["system.hello", "subscribe", "capability.list", "chat.list"]);
-    expect(recovered.methods.filter(call => ["safety.intent.approve", "safety.intent.create", "sync.backfill"].includes(call))).toEqual([]);
-    expect(controller.state.approvalPrompt).toBe(false);
+    expect(recovered.methods.filter(call => ["message.send", "sync.backfill"].includes(call))).toEqual([]);
     expect(controller.state.draft).toBe("");
-    expect(controller.state.codeBuffer).toBe("");
-    if (method === "safety.intent.approve") expect(controller.state.views.approvals.data[0]?.state).toBe("Uncertain");
+    if (method === "message.send") expect(controller.state.lastSend?.state).toBe("Uncertain");
   } finally { controller.stop(); }
 });
 
@@ -181,7 +177,7 @@ test("real reconnecting client loss marks retained views stale and resubscribes 
   const first = new Peer(); const second = new Peer();
   const reconnect = Promise.withResolvers<ProtocolTransport>();
   let connections = 0;
-  const controller = createConnectedTuiController({ role: "approver", isTTY: () => true, connect: async () => ++connections === 1 ? first : reconnect.promise });
+  const controller = createConnectedTuiController({ role: "sender", senderToken: "s".repeat(32), isTTY: () => true, connect: async () => ++connections === 1 ? first : reconnect.promise });
   await controller.start();
   expect(controller.state.connection.status).toBe("connected");
   first.close();
@@ -196,4 +192,21 @@ test("real reconnecting client loss marks retained views stale and resubscribes 
   expect(controller.state.views.approvals.status).toBe("ready");
   controller.stop();
   expect(connections).toBe(2);
+});
+
+
+test("connected fixtures can select scope mode while default controllers detect account mode", async () => {
+  for (const explicitScopeMode of [true, false]) {
+    const peer = new Peer();
+    const controller = createConnectedTuiController({
+      role: "reader", connect: async () => peer,
+      ...(explicitScopeMode ? { initialState: { ...createInitialState(), accountMode: false } } : {}),
+    });
+    try {
+      await controller.start();
+      expect(peer.methods.includes("account.list")).toBe(!explicitScopeMode);
+      expect(peer.methods).toContain("capability.list");
+      expect(controller.state.accountMode).toBe(false);
+    } finally { controller.stop(); }
+  }
 });

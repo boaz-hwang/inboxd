@@ -3,7 +3,9 @@ use serde_json::{Map, Value, json};
 use crate::domain;
 use crate::{CoreError, CoreResult, Host, SqlHost};
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
+
+pub const OWNER_SEND_SCHEMA: &str = "CREATE TABLE owner_sends (request_id TEXT NOT NULL PRIMARY KEY, platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, body TEXT NOT NULL, envelope_json TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN ('Pending', 'Sent', 'Verified', 'Failed', 'Uncertain')), outcome_json TEXT NOT NULL) WITHOUT ROWID";
 
 pub const INITIAL_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS chats (
@@ -603,13 +605,31 @@ fn normalized_schema_sql(source: &str) -> String {
     normalized
 }
 
-fn schema_is_valid(sql: &SqlHost<'_>) -> CoreResult<bool> {
+fn schema_is_valid_version(sql: &SqlHost<'_>, version: i64) -> CoreResult<bool> {
     let objects = sql.all(
         "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE type IN ('table', 'index', 'view', 'trigger')",
         &[],
     )?;
-    if objects.len() != CANONICAL_SCHEMA_DEFINITIONS.len() + CANONICAL_SCHEMA_AUTO_INDEXES.len() {
+    if objects.len()
+        != CANONICAL_SCHEMA_DEFINITIONS.len()
+            + CANONICAL_SCHEMA_AUTO_INDEXES.len()
+            + usize::from(version == 4)
+    {
         return Ok(false);
+    }
+    if version == 4 {
+        let Some(owner) = objects.iter().find(|row| {
+            row["name"] == "owner_sends"
+                && row["type"] == "table"
+                && row["tbl_name"] == "owner_sends"
+        }) else {
+            return Ok(false);
+        };
+        if owner["sql"].as_str().map(normalized_schema_sql)
+            != Some(normalized_schema_sql(OWNER_SEND_SCHEMA))
+        {
+            return Ok(false);
+        }
     }
     for (kind, name, expected) in CANONICAL_SCHEMA_DEFINITIONS {
         let expected_table = if *kind == "index" { "messages" } else { *name };
@@ -668,16 +688,20 @@ fn migrate(host: &dyn Host) -> CoreResult<Value> {
         ));
     }
     if version == SCHEMA_VERSION {
-        return if schema_is_valid(&sql)? {
+        return if schema_is_valid_version(&sql, SCHEMA_VERSION)? {
             Ok(json!(SCHEMA_VERSION))
         } else {
             Err(invalid_schema())
         };
     }
     sql.transaction(|sql| {
+        if version == 3 && !schema_is_valid_version(sql, 3)? {
+            return Err(invalid_schema());
+        }
         sql.exec(INITIAL_SCHEMA)?;
+        sql.exec(OWNER_SEND_SCHEMA)?;
         sql.run(&format!("PRAGMA user_version = {SCHEMA_VERSION}"), &[])?;
-        if !schema_is_valid(sql)? {
+        if !schema_is_valid_version(sql, SCHEMA_VERSION)? {
             return Err(invalid_schema());
         }
         Ok(json!(SCHEMA_VERSION))
@@ -697,7 +721,8 @@ fn diagnose(host: &dyn Host) -> CoreResult<Value> {
         .get("user_version")
         .and_then(Value::as_i64)
         .unwrap_or(0);
-    let schema_valid = schema_version == SCHEMA_VERSION && schema_is_valid(&sql)?;
+    let schema_valid =
+        schema_version == SCHEMA_VERSION && schema_is_valid_version(&sql, SCHEMA_VERSION)?;
     Ok(json!({
         "cipher_version": cipher_version,
         "schema_version": schema_version,
@@ -1269,7 +1294,9 @@ fn send_status(host: &dyn Host, input: &Value) -> CoreResult<Value> {
 
 pub fn dispatch(op: &str, input: &Value, host: &dyn Host) -> Option<CoreResult<Value>> {
     Some(match op {
-        "store.schema" => Ok(json!({ "version": SCHEMA_VERSION, "sql": INITIAL_SCHEMA })),
+        "store.schema" => Ok(
+            json!({ "version": SCHEMA_VERSION, "sql": format!("{};{};", INITIAL_SCHEMA, OWNER_SEND_SCHEMA) }),
+        ),
         "store.migrate" => migrate(host),
         "store.diagnose" => diagnose(host),
         "store.applySyncBatch" => apply_sync_batch(host, input),

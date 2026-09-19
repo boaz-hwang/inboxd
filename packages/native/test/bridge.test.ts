@@ -23,17 +23,17 @@ describe("Rust core Bun FFI bridge", () => {
     for (let index = 0; index < 8; index++) {
       expect(coreCall<{ pong: boolean; input: { index: number } }>("ping", { index })).toEqual({ pong: true, input: { index } });
     }
-    const nested = coreCall<boolean>("host.roundtrip", { method: "host.allowSend", args: { safe: true } }, undefined, {
-      allowSend: () => coreCall<{ pong: boolean }>("ping", { nested: "ok" }).pong,
+    const nested = coreCall<number>("host.roundtrip", { method: "host.now", args: null }, undefined, {
+      now: () => Number(coreCall<{ pong: boolean }>("ping", { nested: "ok" }).pong),
     });
-    expect(nested).toBe(true);
+    expect(nested).toBe(1);
   });
 
   test("preserves structured Unicode errors and rejects missing or wrong ABI versions", () => {
     expect(() => coreCall("host.roundtrip", { method: "없는.호스트", args: {} })).toThrow(/없는\.호스트/);
     const message = `x\ud800${String.fromCodePoint(0xf0000)}`;
     let captured: Error | undefined;
-    try { coreCall("host.roundtrip", { method: "host.allowSend", args: null }, undefined, { allowSend: () => { throw new Error(message); } }); }
+    try { coreCall("host.roundtrip", { method: "host.now", args: null }, undefined, { now: () => { throw new Error(message); } }); }
     catch (error) { captured = error as Error; }
     expect(captured?.name).toBe("Error");
     expect(captured?.message).toBe(message);

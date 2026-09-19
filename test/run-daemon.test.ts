@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
 import {
@@ -10,7 +10,8 @@ import {
 } from "../scripts/run-daemon.ts";
 
 const root = resolve(import.meta.dir, "..");
-const temporaryRoot = mkdtempSync(join(tmpdir(), "inboxd-run-daemon-"));
+// A trusted executable cannot live beneath macOS /var's symlink or shared /tmp.
+const temporaryRoot = mkdtempSync(join(realpathSync(homedir()), ".inboxd-run-"));
 const fakeExecutable = join(temporaryRoot, "inboxd-daemon");
 writeFileSync(fakeExecutable, "not invoked by the injected spawn fixture\n", { mode: 0o700 });
 chmodSync(fakeExecutable, 0o700);

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -10,7 +10,6 @@ import {
   type ProtocolTransport,
 } from "../packages/protocol/src/index.ts";
 import {
-  FIXTURE_CHAT,
   RawUdsConnection,
   RustDaemonHarness,
   TEST_DATABASE_KEY_HEX,
@@ -20,6 +19,7 @@ import {
 
 const harnesses: RustDaemonHarness[] = [];
 const describeWithRustDaemon = process.env.INBOXD_DAEMON_BIN ? describe : describe.skip;
+const testWithConfiguredWorkers = process.env.INBOXD_DAEMON_BIN && process.env.INBOXD_FAKE_WORKER_BIN ? test : test.skip;
 
 afterEach(async () => {
   while (harnesses.length > 0) await harnesses.pop()!.dispose();
@@ -137,35 +137,42 @@ describeWithRustDaemon("release Rust daemon crash and restart lifecycle", () => 
     expect(harness.token()).toBe(token);
   });
 
-  test("reconnects with generation fencing, requires re-query, and never replays a committed action", async () => {
-    const harness = await fixture();
+  testWithConfiguredWorkers("reconnects with generation fencing, requires re-query, and never replays a committed send", async () => {
+    const harness = new RustDaemonHarness({
+      providers: [{ kind: "slack", binding_id: "slack-work-C0123", account: "work", chat_id: "C0123", team_id: "T0123", bot_token: "xoxb-synthetic" }],
+      fixedWorkerBinary: process.env.INBOXD_FAKE_WORKER_BIN!,
+    });
+    harnesses.push(harness);
+    await harness.start();
+    const requestId = crypto.randomUUID();
     const restartReady = Promise.withResolvers<void>();
     const listeners: Array<(message: ProtocolMessage) => void> = [];
     let connections = 0;
     let actionSends = 0;
     let crashed = false;
-    let committedIntentId: string | undefined;
+    let committedState: string | undefined;
     let freshRequestId: string | undefined;
     let heldFresh: ProtocolMessage | undefined;
 
     const client = new ReconnectingProtocolClient({
-      role: "agent",
+      role: "sender",
+      senderToken: harness.token(),
       connect: async () => {
         const generation = connections++;
         if (generation > 0) await restartReady.promise;
         const transport = await retryTransport(harness.socketPath);
         return {
           send(message) {
-            if (message.type === "request" && message.method === "safety.intent.create") actionSends++;
+            if (message.type === "request" && message.method === "message.send") actionSends++;
             if (generation === 1 && message.type === "request" && message.method === "system.status") freshRequestId = message.id;
             transport.send(message);
           },
           onMessage(listener) {
             listeners[generation] = listener;
             return transport.onMessage((message) => {
-              if (!crashed && generation === 0 && message.type === "response" && message.method === "safety.intent.create") {
+              if (!crashed && generation === 0 && message.type === "response" && message.method === "message.send") {
                 crashed = true;
-                if (message.ok && message.result && typeof message.result.intent_id === "string") committedIntentId = message.result.intent_id;
+                if (message.ok && message.result && typeof message.result.state === "string") committedState = message.result.state;
                 transport.close();
                 void (async () => {
                   await harness.crash();
@@ -189,13 +196,15 @@ describeWithRustDaemon("release Rust daemon crash and restart lifecycle", () => 
 
     try {
       await client.start([]);
-      const dispatched = client.request("safety.intent.create", { actor: "agent:crash", scope: FIXTURE_CHAT, body: "commit once" });
+      const dispatched = client.request("message.send", { request_id: requestId, chat: { platform: "slack", account: "work", chat_id: "C0123" }, body: "commit once" });
       await expect(dispatched).rejects.toThrow(/connection/i);
       await restartReady.promise;
       await waitFor(() => client.ready && connections === 2);
       expect(client.requeryRequired).toBeTrue();
       expect(actionSends).toBe(1);
-      expect(committedIntentId).toEqual(expect.any(String));
+      expect(["Sent", "Verified"]).toContain(committedState!);
+      expect(await client.request("send.status", { id: requestId })).toMatchObject({ state: committedState });
+      expect(actionSends).toBe(1);
       expect(await client.request("chat.list", {})).toEqual({ chats: [] });
 
       const fresh = client.request("system.status", {});

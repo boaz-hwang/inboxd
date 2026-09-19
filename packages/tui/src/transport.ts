@@ -9,7 +9,7 @@ class JsonLinesTuiTransport implements ProtocolTransport {
   private closed = false;
   private readonly decoder = new JsonLinesDecoder();
 
-  constructor(private readonly socket: Socket, private readonly role: Extract<ClientRole, "reader" | "approver">) {
+  constructor(private readonly socket: Socket, private readonly role: Extract<ClientRole, "reader" | "sender">) {
     socket.on("data", (chunk: Buffer) => this.handleData(chunk));
     socket.on("error", () => this.finish());
     socket.on("close", () => this.finish());
@@ -47,7 +47,7 @@ class JsonLinesTuiTransport implements ProtocolTransport {
   }
 }
 
-export function connectTuiUdsTransport(socketPath: string, role: Extract<ClientRole, "reader" | "approver">): Promise<ProtocolTransport> {
+export function connectTuiUdsTransport(socketPath: string, role: Extract<ClientRole, "reader" | "sender">): Promise<ProtocolTransport> {
   if (socketPath.trim().length === 0) return Promise.reject(new Error("socket endpoint must be a non-empty string"));
   return new Promise((resolve, reject) => {
     const socket = createConnection(socketPath);

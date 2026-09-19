@@ -238,7 +238,7 @@ async fn all_legacy_read_methods_are_storage_backed_and_audited_by_session() {
     );
     assert_eq!(
         client.request("sync.status", json!({})).await,
-        json!({"state":"idle"})
+        json!({"state":"idle", "accounts":[]})
     );
     assert_eq!(
         client.request("auth.status", json!({})).await,
@@ -281,31 +281,34 @@ async fn all_legacy_read_methods_are_storage_backed_and_audited_by_session() {
 }
 
 #[tokio::test]
-async fn approval_methods_require_role_and_owner_token_and_codes_are_one_shot() {
+async fn approval_execution_is_retired_and_history_requires_owner_token() {
     let directory = private_tempdir();
     let daemon = launch(config(directory.path())).await.unwrap();
     let mut agent = Client::connect(daemon.socket_path()).await;
     agent.request("system.hello", json!({"role":"agent"})).await;
-    let scope = json!({"platform":"slack","account":"work","chat_id":"C1"});
-    let created = agent
-        .request(
-            "safety.intent.create",
-            json!({"actor":"agent:test","scope":scope,"body":"exact body"}),
-        )
-        .await;
-    assert!(created.get("code").is_none());
+    assert_eq!(
+        agent.request_frame("safety.intent.create", json!({})).await["ok"],
+        false
+    );
+    let mut owner = trusted_approver(directory.path()).await;
     for method in [
-        "safety.intent.listPending",
+        "safety.intent.create",
         "safety.intent.claimApprovalCode",
         "safety.intent.approve",
-        "safety.intent.reject",
     ] {
-        let denied = agent
-            .request_frame(method, json!({"intent_id":created["intent_id"]}))
-            .await;
-        assert_eq!(denied["error"]["code"], "BAD_REQUEST");
+        let response = owner.request_frame(method, json!({})).await;
+        assert_eq!(response["ok"], false);
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("unknown request method")
+        );
     }
-
+    assert_eq!(
+        owner.request("safety.intent.listPending", json!({})).await["intents"],
+        json!([])
+    );
     let mut untrusted = Client::connect(daemon.socket_path()).await;
     untrusted
         .request(
@@ -313,78 +316,13 @@ async fn approval_methods_require_role_and_owner_token_and_codes_are_one_shot() 
             json!({"role":"approver","approver_token":"wrong"}),
         )
         .await;
-    let denied = untrusted
-        .request_frame("safety.intent.listPending", json!({}))
-        .await;
-    assert_eq!(denied["error"]["code"], "UNSUPPORTED");
-    assert!(
-        denied["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("trusted local approver")
-    );
-
-    let mut approver = trusted_approver(directory.path()).await;
-    let pending = approver
-        .request("safety.intent.listPending", json!({}))
-        .await;
-    assert_eq!(pending["intents"][0]["intent_id"], created["intent_id"]);
-    assert!(!pending.to_string().contains("code"));
-    let claimed = approver
-        .request(
-            "safety.intent.claimApprovalCode",
-            json!({"intent_id":created["intent_id"]}),
-        )
-        .await;
-    let code = claimed["code"].as_str().unwrap();
-    assert_eq!(code.len(), 6);
-    let approved = approver
-        .request(
-            "safety.intent.approve",
-            json!({"intent_id":created["intent_id"],"code":code,"actor":"agent:test","scope":scope}),
-        )
-        .await;
-    assert_eq!(approved["state"], "Approved");
     assert_eq!(
-        approver
-            .request(
-                "safety.intent.claimApprovalCode",
-                json!({"intent_id":created["intent_id"]}),
-            )
-            .await,
-        json!({"unavailable":true})
+        untrusted
+            .request_frame("safety.intent.listPending", json!({}))
+            .await["ok"],
+        false
     );
-
-    let rejected_intent = agent
-        .request(
-            "safety.intent.create",
-            json!({"actor":"agent:test","scope":scope,"body":"reject me"}),
-        )
-        .await;
-    assert_eq!(
-        approver
-            .request(
-                "safety.intent.reject",
-                json!({"intent_id":rejected_intent["intent_id"]}),
-            )
-            .await["state"],
-        "Expired"
-    );
-    let backfill = approver
-        .request_frame(
-            "sync.backfill",
-            json!({"platform":"slack","account":"work","chat_id":"C1","from_ts":0,"to_ts":1}),
-        )
-        .await;
-    assert_eq!(backfill["error"]["code"], "UNSUPPORTED");
-    assert!(
-        backfill["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("unavailable")
-    );
-
-    drop((agent, approver, untrusted));
+    drop((agent, owner, untrusted));
     shutdown(daemon).await;
 }
 
@@ -630,17 +568,35 @@ async fn backfill_uses_a_private_durable_checkpoint_and_enforces_page_budget() {
     let daemon = launch(config(directory.path()).with_bindings(vec![binding]))
         .await
         .unwrap();
-    let mut approver = trusted_approver(directory.path()).await;
+    let token = fs::read_to_string(directory.path().join("approver.token")).unwrap();
+    let mut sender = Client::connect(daemon.socket_path()).await;
+    sender
+        .request(
+            "system.hello",
+            json!({"role":"sender","sender_token":token.trim()}),
+        )
+        .await;
+    let mut untrusted = Client::connect(daemon.socket_path()).await;
+    untrusted
+        .request(
+            "system.hello",
+            json!({"role":"sender","sender_token":"wrong"}),
+        )
+        .await;
     let params = json!({
         "platform":"slack","account":"work","chat_id":"C0123",
         "from_ts":1726650000,"to_ts":1726653600
     });
 
-    let first = approver.request("sync.backfill", params.clone()).await;
+    let denied = untrusted
+        .request_frame("sync.backfill", params.clone())
+        .await;
+    assert_eq!(denied["ok"], false);
+    let first = sender.request("sync.backfill", params.clone()).await;
     assert_eq!(first, json!({"event_count":1,"authoritative":true}));
     assert!(!first.to_string().contains("opaque_1"));
 
-    let exhausted = approver.request_frame("sync.backfill", params).await;
+    let exhausted = sender.request_frame("sync.backfill", params).await;
     assert_eq!(exhausted["ok"], false, "{exhausted}");
     assert_eq!(exhausted["error"]["code"], "UNSUPPORTED");
     assert!(!exhausted.to_string().contains("opaque_1"));
@@ -650,7 +606,7 @@ async fn backfill_uses_a_private_durable_checkpoint_and_enforces_page_budget() {
             .unwrap()
             .contains("max_pages")
     );
-    drop(approver);
+    drop((sender, untrusted));
     shutdown(daemon).await;
     let host = NativeHost::open_development(&directory.path().join("inboxd.db"), &KEY).unwrap();
     let stored = host

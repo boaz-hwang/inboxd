@@ -1,13 +1,11 @@
 import { homedir } from "node:os";
-import { lstatSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
+import { readOwnerToken } from "../../host/src/owner-token.ts";
+import { parseMessageSendParams } from "../../protocol/src/index.ts";
 import type { JsonObject } from "../../protocol/src/index.ts";
 import {
-  createAgentHandlers,
   createCliHandlers,
-  formatCliResult,
-  type AgentHandlers,
   type CliHandlerOptions,
   type CliHandlers,
   type CliRole,
@@ -29,22 +27,11 @@ export interface UdsCliOptions extends Omit<CliHandlerOptions, "connect" | "laun
   readonly launchDaemon?: false | (() => Promise<void>);
 }
 
-export function readCliApproverToken(socketPath: string): string {
-  const path = join(dirname(socketPath), "approver.token");
-  const stat = lstatSync(path);
-  if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600) {
-    throw new Error("local approver token is not an owner-only regular file");
-  }
-  const token = readFileSync(path, "utf8").trim();
-  if (!/^[A-Za-z0-9_-]{32,}$/.test(token)) throw new Error("local approver token is invalid");
-  return token;
-}
-
 /** Creates a CLI client with the daemon UDS as its only data transport. */
 export function createUdsCliHandlers(options: UdsCliOptions = {}): CliHandlers {
   const socketPath = options.socketPath ?? defaultSocketPath;
   const approverToken = options.role === "approver"
-    ? options.approverToken ?? readCliApproverToken(socketPath)
+    ? options.approverToken ?? readOwnerToken(socketPath)
     : undefined;
   const { daemonBinary, configPath, readinessTimeoutMs, launchDaemon: injectedLaunchDaemon, socketPath: _socketPath, ...handlerOptions } = options;
   const launchDaemon = injectedLaunchDaemon === false
@@ -53,15 +40,10 @@ export function createUdsCliHandlers(options: UdsCliOptions = {}): CliHandlers {
   return createCliHandlers({
     ...handlerOptions,
     approverToken,
+    senderToken: options.role === "sender" ? options.senderToken ?? readOwnerToken(socketPath) : undefined,
     connect: () => connectUdsTransport(socketPath),
     ...(launchDaemon === undefined ? {} : { launchDaemon }),
   });
-}
-
-export function createUdsAgentHandlers(options: Omit<UdsCliOptions, "role"> = {}): AgentHandlers {
-  const socketPath = options.socketPath ?? defaultSocketPath;
-  const { daemonBinary: _daemonBinary, configPath: _configPath, readinessTimeoutMs: _readinessTimeoutMs, launchDaemon: _launchDaemon, socketPath: _socketPath, ...handlerOptions } = options;
-  return createAgentHandlers({ ...handlerOptions, connect: () => connectUdsTransport(socketPath) });
 }
 
 function jsonArgument(value: string | undefined, label: string): JsonObject {
@@ -94,6 +76,7 @@ export async function runCli(
     case "message recent": result = await handlers.recent(jsonArgument(payload, "message recent") as unknown as Parameters<CliHandlers["recent"]>[0]); break;
     case "message evidence": result = await handlers.evidence(jsonArgument(payload, "message evidence") as unknown as Parameters<CliHandlers["evidence"]>[0]); break;
     case "message get": result = await handlers.get(jsonArgument(payload, "message get") as unknown as Parameters<CliHandlers["get"]>[0]); break;
+    case "message send": result = await handlers.send(parseMessageSendParams(jsonArgument(payload, "message send"))); break;
     case "message search": result = await handlers.search(jsonArgument(payload, "message search") as unknown as Parameters<CliHandlers["search"]>[0]); break;
     case "sync status": result = await handlers.syncStatus(); break;
     case "sync backfill": result = await handlers.backfill(jsonArgument(payload, "sync backfill") as unknown as Parameters<CliHandlers["backfill"]>[0]); break;
@@ -104,12 +87,12 @@ export async function runCli(
       break;
     }
     case "doctor status": result = await handlers.doctor(); break;
-    case "safety propose": result = await handlers.propose(jsonArgument(payload, "safety propose")); break;
+    case "safety propose":
+    case "safety approve": throw new Error("safety proposals and approvals are retired; use message send with a stable request_id");
     case "safety list": result = await handlers.listPending(); break;
-    case "safety approve": throw new Error("approval codes are accepted only by the owner-local TUI");
     case "safety reject": result = await handlers.reject(jsonArgument(payload, "safety reject") as Parameters<CliHandlers["reject"]>[0]); break;
     default: throw new Error("unknown command");
   }
-  write(formatCliResult(result, handlers.role));
+  write(JSON.stringify(result));
   return result;
 }

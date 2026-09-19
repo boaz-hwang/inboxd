@@ -9,6 +9,7 @@ export interface MountedInteractiveTui {
 }
 
 function actionKey(event: KeyEvent): string {
+  if (event.ctrl && event.name === "o") return "Attach";
   if (event.ctrl && event.name === "k") return "Find";
   if (event.ctrl && event.name === "f") return "MessageSearch";
   if (event.ctrl && event.name === "c") return "Escape";
@@ -51,11 +52,11 @@ export async function mountInteractiveTui(renderer: CliRenderer, controller: Tui
   let height = renderer.height;
   const text = new TextRenderable(renderer, {
     id: "inboxd-interactive-screen",
-    content: styleWorkspace(renderScreen(controller.state, { width, height }, { approvalCode: controller.currentApprovalCode() })),
+    content: styleWorkspace(renderScreen(controller.state, { width, height }), controller.state, { width, height }),
     onMouseDown(event) {
       const state = controller.state;
-      if (state.detailOpen || state.composeActive || state.approvalPrompt || state.searchActive || !["inbox", "chat"].includes(state.screen)) return;
-      const split = !(width < 100 && state.screen === "chat" && state.pane !== "rooms");
+      if (state.detailOpen || state.composeActive || state.searchActive || !["inbox", "chat"].includes(state.screen)) return;
+      const split = width >= 80;
       const bodyHeight = workspaceBodyHeight(state, height);
       if (split && event.x < sidebarWidth(width) && event.y >= 5 && event.y < bodyHeight + 2) {
         const index = sidebarStart(state, bodyHeight) + Math.floor((event.y - 5) / 3);
@@ -66,7 +67,7 @@ export async function mountInteractiveTui(renderer: CliRenderer, controller: Tui
   });
   renderer.root.add(text);
 
-  const update = (state: TuiState): void => { if (renderer.isDestroyed) return; text.content = styleWorkspace(renderScreen(state, { width, height }, { approvalCode: controller.currentApprovalCode() })); };
+  const update = (state: TuiState): void => { if (renderer.isDestroyed) return; text.content = styleWorkspace(renderScreen(state, { width, height }), state, { width, height }); };
   const onKeypress = (event: KeyEvent): void => {
     if (renderer.isDestroyed) return;
     const key = actionKey(event);

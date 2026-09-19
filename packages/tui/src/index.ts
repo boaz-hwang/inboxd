@@ -1,3 +1,5 @@
+import { pickAttachment } from "../../host/src/attachments.ts";
+import type { LocalAttachment } from "../../protocol/src/schema.ts";
 import { displayWidth, truncateCells, wrapCells, fit } from "./text.ts";
 export { displayWidth, truncateCells, wrapCells } from "./text.ts";
 import { renderWorkspace } from "./workspace.ts";
@@ -43,7 +45,6 @@ export interface Row {
   state?: string;
   destination?: string;
   expires?: string;
-  codeRequired?: boolean;
   evidenceOnly?: boolean;
   unread?: string;
   evidenceLines?: string[];
@@ -77,6 +78,9 @@ export interface TuiState {
   pane?: "filters" | "rooms" | "messages";
   accountMode?: boolean;
   sendPending?: boolean;
+  attachment?: LocalAttachment;
+  attachmentPicking?: boolean;
+  lastSend?: { requestId: string; resource: ResourceRefV1; state: string };
   roomFocus?: number;
   directory?: Row[];
   directoryRefreshing?: boolean;
@@ -106,8 +110,6 @@ export interface TuiState {
   templateStep?: "template_id" | "arguments" | "preview";
   templateId: string;
   templateArguments: string;
-  approvalPrompt: boolean;
-  codeBuffer: string;
   /** Compose content never leaves memory and is cleared when the operator exits. */
   draft: string;
   notice?: string;
@@ -138,7 +140,7 @@ const screenLabels: Record<Screen, string> = {
   inbox: "INBOX",
   search: "SEARCH",
   chat: "CHAT",
-  approvals: "APPROVALS",
+  approvals: "HISTORY",
   doctor: "DOCTOR",
 };
 
@@ -172,8 +174,6 @@ export function createInitialState(settings: { platform?: string; period?: strin
     composeActive: false,
     templateId: "",
     templateArguments: "",
-    approvalPrompt: false,
-    codeBuffer: "",
     draft: "",
     platform: settings.platform,
     period: settings.period,
@@ -269,7 +269,6 @@ export function reduce(state: TuiState, action: TuiAction): TuiState {
         : state.capabilities,
       connection: { ...state.connection, status: action.degraded ? "degraded" : "reconnecting", subscribedGeneration: 0, stale: true },
       requeryCapabilities: false,
-      approvalPrompt: false,
       detailOpen: false,
       searchActive: false,
       finderActive: false,
@@ -282,7 +281,6 @@ export function reduce(state: TuiState, action: TuiAction): TuiState {
       templateId: "",
       templateArguments: "",
       draft: "",
-      codeBuffer: "",
       notice: "connection lost — send actions disabled; no action retried",
     };
   }
@@ -347,7 +345,6 @@ export function reduce(state: TuiState, action: TuiAction): TuiState {
 
   if (action.key === "Escape") {
     if (state.finderActive || state.finderQuery) return { ...state, finderActive: false, finderQuery: "", roomFocus: 0, notice: undefined };
-    if (state.approvalPrompt) return { ...state, approvalPrompt: false, codeBuffer: "", notice: "approval code cleared from memory" };
     if (state.searchActive) return { ...state, searchActive: false, searchQuery: "", notice: "search query cleared from memory" };
     if (state.composeActive) return { ...state, composeActive: false, composeMode: undefined, replyTo: undefined, templateStep: undefined, templateId: "", templateArguments: "", draft: "", notice: "compose draft cleared from memory" };
     if (state.helpOpen) return { ...state, helpOpen: false };
@@ -360,17 +357,6 @@ export function reduce(state: TuiState, action: TuiAction): TuiState {
     if (action.key === "Enter") return { ...state, finderActive: false };
     const input = printableInput(action.key);
     if (input !== undefined) return { ...state, finderQuery: (state.finderQuery ?? "") + input, roomFocus: 0 };
-    return state;
-  }
-  if (state.approvalPrompt) {
-    if (action.key === "Enter") {
-      if (state.connection.status !== "connected") return { ...state, notice: "approval disabled while disconnected" };
-      if (state.codeBuffer.length < 4) return { ...state, notice: "approval code required — enter the full code" };
-      return { ...state, approvalPrompt: false, codeBuffer: "", notice: "approval submitted; code cleared from memory" };
-    }
-    if (action.key === "Backspace") return { ...state, codeBuffer: removeLastGrapheme(state.codeBuffer) };
-    const input = printableInput(action.key);
-    if (input !== undefined) return { ...state, codeBuffer: state.codeBuffer + input };
     return state;
   }
   if (state.searchActive) {
@@ -409,7 +395,7 @@ export function reduce(state: TuiState, action: TuiAction): TuiState {
           return { ...state, templateStep: "preview", notice: "enter the exact approved-template preview" };
         }
         if (state.draft.trim().length === 0) return { ...state, notice: "template preview required" };
-        return { ...state, composeActive: false, composeMode: undefined, templateStep: undefined, templateId: "", templateArguments: "", draft: "", notice: "template proposal submitting; inputs cleared from memory" };
+        return { ...state, composeActive: false, composeMode: undefined, templateStep: undefined, templateId: "", templateArguments: "", draft: "", notice: "template send submitting; inputs cleared from memory" };
       }
       if (action.key === "Backspace") {
         if (state.templateStep === "template_id") return { ...state, templateId: removeLastGrapheme(state.templateId) };
@@ -426,7 +412,7 @@ export function reduce(state: TuiState, action: TuiAction): TuiState {
     }
     if (action.key === "Enter") {
       if (state.draft.trim().length === 0) return { ...state, notice: "compose body required" };
-      return { ...state, composeActive: false, composeMode: undefined, replyTo: undefined, draft: "", notice: "proposal submitting; draft cleared from memory" };
+      return { ...state, composeActive: false, composeMode: undefined, replyTo: undefined, draft: "", notice: "send submitting; draft cleared from memory" };
     }
     if (action.key === "Backspace") return { ...state, draft: removeLastGrapheme(state.draft) };
     const input = printableInput(action.key);
@@ -453,7 +439,7 @@ export function reduce(state: TuiState, action: TuiAction): TuiState {
   if (action.key === "?") return { ...state, helpOpen: !state.helpOpen };
   if (action.key === "Find") return { ...state, screen: "inbox", finderActive: true, finderQuery: "", platform: undefined, pane: "rooms", roomFocus: 0, notice: undefined };
   if (action.key === "/" || action.key === "MessageSearch") return { ...state, screen: "search", platform: state.accountMode ? state.platform : undefined, searchActive: true, searchQuery: "", helpOpen: false, notice: "search input is memory-only" };
-  if (action.key === "q") return { ...state, quitRequested: true, detailOpen: false, draft: "", searchQuery: "", composeActive: false, composeMode: undefined, replyTo: undefined, templateStep: undefined, templateId: "", templateArguments: "", codeBuffer: "", approvalPrompt: false, notice: "memory drafts cleared on exit" };
+  if (action.key === "q") return { ...state, quitRequested: true, detailOpen: false, draft: "", searchQuery: "", composeActive: false, composeMode: undefined, replyTo: undefined, templateStep: undefined, templateId: "", templateArguments: "", notice: "memory drafts cleared on exit" };
   if (action.key === "j" || action.key === "ArrowDown") { const focus = Math.min(maxFocus(state), state.focus + 1); return { ...state, focus, detailOffset: 0, selected: state.screen === "approvals" ? { ...state.selected, approvals: focus } : state.selected }; }
   if (action.key === "k" || action.key === "ArrowUp") { const focus = Math.max(0, state.focus - 1); return { ...state, focus, detailOffset: 0, selected: state.screen === "approvals" ? { ...state.selected, approvals: focus } : state.selected }; }
   if (action.key === "d") {
@@ -461,13 +447,6 @@ export function reduce(state: TuiState, action: TuiAction): TuiState {
   }
   if (action.key === "Enter") {
     return { ...state, selected: { ...state.selected, [state.screen]: state.focus }, detailOpen: false, detailOffset: 0, notice: `${screenLabels[state.screen].toLowerCase()} selection activated` };
-  }
-  if (action.key === "a") {
-    if (state.screen !== "approvals") return { ...state, notice: "approval prompt is only available in Approvals" };
-    if (state.connection.status !== "connected") return { ...state, notice: "approval disabled while disconnected" };
-    const row = state.views.approvals.data[state.selected.approvals];
-    if (!canApprove(row?.state)) return { ...state, approvalPrompt: false, codeBuffer: "", notice: `approval disabled — ${row?.state ?? "unknown"}; no action retried` };
-    return { ...state, approvalPrompt: true, codeBuffer: "", notice: undefined };
   }
   if (action.key === "b") {
     if (state.connection.status !== "connected") return { ...state, notice: "backfill disabled while disconnected" };
@@ -486,7 +465,7 @@ export function reduce(state: TuiState, action: TuiAction): TuiState {
   }
   if (action.key === "c") {
     if (state.sendPending) return { ...state, notice: "전송 중입니다." };
-    if (state.screen !== "chat") return { ...state, notice: "compose proposal is only available in Chat" };
+    if (state.screen !== "chat") return { ...state, notice: "compose is only available in Chat" };
     if (state.connection.status !== "connected") return { ...state, notice: "compose disabled while disconnected" };
     if (!capabilityClaimsCurrent(state)) return { ...state, composeActive: false, draft: "", notice: capabilityRefreshNotice("compose", state) };
     const capability = selectedCapability(state);
@@ -655,12 +634,11 @@ function listContentLines(state: TuiState, height: number): string[] {
     return ["Chat", ...compose, gap, ...delivery, ...dataLines(state, screen, "No messages", height - 2 - compose.length - delivery.length)];
   }
   if (screen === "approvals") {
-    const selectedState = state.views.approvals.data[state.selected.approvals]?.state;
-    const disabled = state.connection.status !== "connected" ? "Approve [disabled: disconnected]" : canApprove(selectedState) ? "Approve [a]" : `Approve [disabled: ${selectedState ?? "unknown"}]`;
+    const disabled = "Historical record [read-only]";
     const uncertain = visibleRows(state, screen).some((row) => row.state === "Uncertain") ? ["Queue: UNCERTAIN — do not resend automatically"] : [];
     const prompt: string[] = [];
     const delivery = deliveryLines(state);
-    return ["Approvals", ...delivery, ...dataLines(state, screen, "No pending approvals", height - 2 - delivery.length - uncertain.length - prompt.length), ...uncertain, disabled, ...prompt];
+    return ["History", ...delivery, ...dataLines(state, screen, "No historical records", height - 2 - delivery.length - uncertain.length - prompt.length), ...uncertain, disabled, ...prompt];
   }
   const stale = state.connection.stale ? "stale response retained" : "connected";
   const diagnostics = ["encryption", "authentication", "sync", "isolation"].flatMap((id, index) => {
@@ -671,9 +649,6 @@ function listContentLines(state: TuiState, height: number): string[] {
   return ["Doctor · C connect accounts", ...diagnostics, `  Daemon: ${stale}`, `  Connection: ${state.connection.status}`, `  Generation: ${state.connection.generation} / subscribed ${state.connection.subscribedGeneration}`];
 }
 
-function canApprove(state: string | undefined): boolean {
-  return state === "Proposed" || state === "Approved";
-}
 
 function deliveryMeaning(state: string | undefined): string | undefined {
   if (state === "Sent") return "acknowledged; not verified";
@@ -702,8 +677,7 @@ function detailLines(state: TuiState, width: number, height: number): string[] {
     row.destination === undefined ? undefined : `Destination: ${row.destination}`,
     row.expires === undefined ? undefined : `Expires: ${row.expires}`,
     row.body === undefined ? undefined : `Message: ${row.body}${row.deleted ? " deleted" : row.edited ? " (edited)" : ""}`,
-    row.codeRequired ? "Approval code required" : undefined,
-    screen === "approvals" ? (state.connection.status === "connected" && canApprove(row.state) && row.codeRequired ? "Approve [a]" : "Approve [disabled]") : undefined,
+    screen === "approvals" ? "Historical record [read-only]" : undefined,
   ].filter((line): line is string => line !== undefined);
   const warnings = [
     ...(screen === "chat" ? deliveryLines(state) : []),
@@ -737,7 +711,7 @@ function wideBodyLines(state: TuiState, width: number, height: number): string[]
 }
 
 /** Deterministic fixed-size text renderer used for capture evidence. */
-export function renderInspectorScreen(state: TuiState, size: { width: number; height: number }, ephemeral: { approvalCode?: string } = {}): string {
+export function renderInspectorScreen(state: TuiState, size: { width: number; height: number }): string {
   state = { ...state, coverage: state.views[state.screen].coverage ?? state.coverage };
   if (size.width < 80 || size.height < 24) {
     return Array.from({ length: Math.max(1, size.height) }, (_, index) => fit(index === 0 ? "terminal too small — minimum 80×24" : "", Math.max(1, size.width))).join("\n");
@@ -747,33 +721,30 @@ export function renderInspectorScreen(state: TuiState, size: { width: number; he
   const wide = size.width >= 120;
   const resourceLines = resourceContextLines(state);
   const rowsForBody = size.height - 3 - resourceLines.length;
-  const inputPanel = state.approvalPrompt
-    ? ["┌ Approval code [memory-only]", `│ ${"•".repeat(state.codeBuffer.length)}_`, "└ Enter submit · Esc cancel"]
-    : state.composeActive && state.composeMode === "approved_template"
+  const inputPanel = state.composeActive && state.composeMode === "approved_template"
       ? [
         `Template ID: ${state.templateId}${state.templateStep === "template_id" ? "_" : ""}`,
         `Arguments JSON: ${state.templateArguments}${state.templateStep === "arguments" ? "_" : ""}`,
         `Preview: ${state.draft}${state.templateStep === "preview" ? "_" : ""}`,
-        "[memory-only] · Enter next/propose · Esc cancel",
+        "[memory-only] · Enter next/send · Esc cancel",
       ]
-      : state.composeActive ? [`${state.composeMode === "reply" ? `Reply ${state.replyTo}` : "Compose text"}: ${state.draft || "_"} [memory-only]`, "[memory-only] · Enter propose · Esc cancel"] : [];
-  const contentHeight = rowsForBody - inputPanel.length - (state.notice === undefined ? 0 : 1) - (state.helpOpen ? 2 : 0) - (state.screen === "approvals" && ephemeral.approvalCode !== undefined ? 1 : 0);
+      : state.composeActive ? [`${state.composeMode === "reply" ? `Reply ${state.replyTo}` : "Compose text"}: ${state.draft || "_"} [memory-only]`, "[memory-only] · Enter send · Esc cancel"] : [];
+  const contentHeight = rowsForBody - inputPanel.length - (state.notice === undefined ? 0 : 1) - (state.helpOpen ? 2 : 0);
   const body = wide ? wideBodyLines(state, size.width, contentHeight) : narrowBodyLines(state, contentHeight, size.width);
-  if (state.screen === "approvals" && ephemeral.approvalCode !== undefined) body.push(`Approval code [ephemeral]: ${ephemeral.approvalCode}`);
   if (state.notice) body.push(`! ${state.notice}`);
-  if (state.helpOpen) body.push("Keys: 1–5 screens · j/k/↑↓ move · Enter open · / search · n more · b backfill", "      c compose · a approve · Esc cancel/back · ? help · q quit");
+  if (state.helpOpen) body.push("Keys: 1–5 screens · j/k/↑↓ move · Enter open · / search · n more · b backfill", "      c compose · s send status · Esc cancel/back · ? help · q quit");
   const lines = [status, tabs, ...resourceLines, ...body.slice(0, rowsForBody - inputPanel.length)];
   while (inputPanel.length && lines.length < size.height - 1 - inputPanel.length) lines.push("");
   lines.push(...inputPanel);
   while (lines.length < size.height - 1) lines.push("");
-  lines.push("1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply a Esc ? q");
+  lines.push("1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply s-status Esc ? q");
   return lines.slice(0, size.height).map((line) => fit(line, size.width)).join("\n");
 }
 
 /** The workspace is the default; raw evidence is an explicit detail action. */
-export function renderScreen(state: TuiState, size: { width: number; height: number }, ephemeral: { approvalCode?: string } = {}): string {
-  if (state.detailOpen) return renderInspectorScreen(state, size, ephemeral);
-  return renderWorkspace(state, size, ephemeral);
+export function renderScreen(state: TuiState, size: { width: number; height: number }): string {
+  if (state.detailOpen) return renderInspectorScreen(state, size);
+  return renderWorkspace(state, size);
 }
 
 /** Persist only navigation/filter settings; content and secrets are rejected at every nesting level. */
@@ -843,21 +814,15 @@ export interface TuiSearchInput {
   readonly query: string;
 }
 
-interface PendingApproval {
-  readonly actor: string;
-  readonly resource: ResourceRefV1;
-  readonly field: "scope" | "resource";
-}
 
 export interface TuiControllerOptions {
+  readonly pickAttachment?: () => Promise<LocalAttachment | undefined>;
   readonly client: TuiProtocolClient;
   readonly initialState?: TuiState;
-  /** Non-secret identity bound to every proposal created from this local TUI. */
-  readonly actor?: string;
   readonly onStateChange?: (state: TuiState) => void;
 }
 
-const tuiTopics: readonly ProtocolEventMethod[] = ["message.upserted", "coverage.changed", "safety.intent.changed", "capability.changed"];
+const tuiTopics: readonly ProtocolEventMethod[] = ["account.changed", "message.upserted", "coverage.changed", "safety.intent.changed", "capability.changed"];
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -894,18 +859,13 @@ function resourceRef(value: unknown): ResourceRefV1 | undefined {
   }
 }
 
-function pendingApproval(intent: Record<string, unknown>): PendingApproval | undefined {
-  const actor = stringValue(intent.actor);
-  if (actor === undefined) return undefined;
-  const envelopeResource = resourceRef(record(intent.envelope)?.destination);
-  if (envelopeResource !== undefined) return { actor, resource: envelopeResource, field: "resource" };
-  const directResource = resourceRef(intent.resource);
-  if (directResource !== undefined) return { actor, resource: directResource, field: "resource" };
+function historicalResource(intent: Record<string, unknown>): ResourceRefV1 | undefined {
+  const resource = resourceRef(record(intent.envelope)?.destination) ?? resourceRef(intent.resource);
   const scope = chatRef(intent.scope);
-  return scope === undefined ? undefined : { actor, resource: exactChatResource(scope), field: "scope" };
+  return resource ?? (scope === undefined ? undefined : exactChatResource(scope));
 }
 
-function pendingBody(intent: Record<string, unknown>): string | undefined {
+function historicalBody(intent: Record<string, unknown>): string | undefined {
   const content = record(record(intent.envelope)?.content);
   return stringValue(intent.body) ?? stringValue(content?.body) ?? stringValue(content?.preview);
 }
@@ -1036,11 +996,6 @@ export class TuiController {
   private activeResource: ResourceRefV1 | undefined;
   private inboxQuery: { chats: ChatRef[]; interval: { from_ts: number; to_ts: number } } | undefined;
   private search: TuiSearchInput | undefined;
-  private readonly approvals = new Map<string, PendingApproval>();
-  readonly #approvalCodes = new Map<string, string>();
-  readonly #codeClaims = new Set<string>();
-  private readonly observedOutcomes = new Map<string, Row>();
-  private readonly inFlightApprovals = new Map<string, Row>();
   private readonly inFlightPages = new Set<string>();
   private readonly requests = new Map<Screen, number>();
   private capabilityRequest = 0;
@@ -1048,6 +1003,9 @@ export class TuiController {
   private accountSearchCursors = new Map<string, string | undefined>();
   private accountSearchQuery = "";
   private accountSearchRequest = 0;
+  private liveRefresh?: Promise<void>;
+  private liveDirectoryDirty = false;
+  private liveChatDirty = false;
   private directoryTimer?: ReturnType<typeof setTimeout>;
   private readonly listeners = new Set<(state: TuiState) => void>();
 
@@ -1060,10 +1018,6 @@ export class TuiController {
 
   get state(): TuiState { return this.current; }
 
-  currentApprovalCode(): string | undefined {
-    const row = this.current.views.approvals.data[this.current.selected.approvals];
-    return row === undefined ? undefined : this.#approvalCodes.get(row.id);
-  }
 
   subscribe(listener: (state: TuiState) => void): () => void {
     this.listeners.add(listener);
@@ -1087,6 +1041,7 @@ export class TuiController {
 
   async start(): Promise<void> {
     clearTimeout(this.directoryTimer);
+    this.liveRefresh = undefined; this.liveDirectoryDirty = false; this.liveChatDirty = false;
     const generation = ++this.generation;
     this.update({ type: "connected", generation });
     try {
@@ -1106,28 +1061,42 @@ export class TuiController {
     clearTimeout(this.directoryTimer);
     this.generation++;
     this.options.client.stop();
-    this.approvals.clear();
-    this.#approvalCodes.clear();
-    this.#codeClaims.clear();
-    this.observedOutcomes.clear();
-    this.inFlightApprovals.clear();
     this.inFlightPages.clear();
-    this.replace({ ...this.current, draft: "", searchQuery: "", searchActive: false, finderQuery: "", finderActive: false, composeActive: false, composeMode: undefined, replyTo: undefined, templateStep: undefined, templateId: "", templateArguments: "", codeBuffer: "", approvalPrompt: false });
+    this.replace({ ...this.current, draft: "", searchQuery: "", searchActive: false, finderQuery: "", finderActive: false, composeActive: false, composeMode: undefined, replyTo: undefined, templateStep: undefined, templateId: "", templateArguments: "" });
   }
 
   disconnected(degraded = false): void {
     clearTimeout(this.directoryTimer);
-    for (const row of this.inFlightApprovals.values()) this.observeApproval(row, "Uncertain");
-    this.inFlightApprovals.clear();
-    this.approvals.clear();
-    this.#approvalCodes.clear();
-    this.#codeClaims.clear();
     this.inFlightPages.clear();
+    if (this.current.lastSend?.state === "Sending") this.replace({ ...this.current, lastSend: { ...this.current.lastSend, state: "Uncertain" } });
     this.update({ type: "disconnected", generation: this.generation, degraded });
   }
 
   /** Called by the runtime's ReconnectingProtocolClient event callback. */
-  async receiveEvent(method: ProtocolEventMethod): Promise<void> {
+  async receiveEvent(method: ProtocolEventMethod, params: JsonObject = {}): Promise<void> {
+    if (method === "account.changed") {
+      if (!this.current.accountMode || this.current.connection.status !== "connected" || params.phase === "refreshing") return;
+      this.liveDirectoryDirty = true;
+      this.liveChatDirty ||= !!this.activeChat && (!params.account || (params.account === this.activeChat.account && params.platform === this.activeChat.platform));
+      if (!this.liveRefresh) {
+        const generation = this.generation;
+        const flight = (async () => {
+          while (this.liveDirectoryDirty && generation === this.generation && accepted(this.current, generation)) {
+            this.liveDirectoryDirty = false;
+            const chat = this.activeChat;
+            const reloadChat = this.liveChatDirty;
+            this.liveChatDirty = false;
+            await this.refreshAccountDirectory(generation);
+            if (generation !== this.generation || !accepted(this.current, generation)) return;
+            if (reloadChat && chat === this.activeChat) await this.refreshChat(generation, undefined, false, false, true);
+            if (generation === this.generation && accepted(this.current, generation)) await this.refreshDoctor(generation);
+          }
+        })().finally(() => { if (this.liveRefresh === flight) this.liveRefresh = undefined; });
+        this.liveRefresh = flight;
+      }
+      await this.liveRefresh;
+      return;
+    }
     const generation = this.generation;
     this.update({ type: "event", generation, method });
     if (this.current.accountMode === undefined) return;
@@ -1153,7 +1122,7 @@ export class TuiController {
     this.activeChat = resource?.kind === "chat"
       ? { platform: resource.platform, account: resource.account, chat_id: resource.chat_id }
       : undefined;
-    this.current = { ...this.current, activeChat: this.activeChat, activeResource: resource };
+    this.current = { ...this.current, activeChat: this.activeChat, activeResource: resource, attachment: undefined };
     this.invalidateView("chat");
   }
 
@@ -1163,7 +1132,7 @@ export class TuiController {
   }
 
   async selectConversation(index: number): Promise<void> {
-    if (this.current.composeActive || this.current.approvalPrompt || this.current.searchActive) return;
+    if (this.current.composeActive || this.current.searchActive) return;
     const room = conversationRows(this.current)[index];
     if (!room) return;
     this.setActiveResource(room.resource);
@@ -1175,7 +1144,7 @@ export class TuiController {
   focusMessages(): void { this.replace({ ...this.current, pane: "messages" }); }
 
   async dispatchPaste(text: string): Promise<void> {
-    if (!this.current.composeActive && !this.current.searchActive && !this.current.approvalPrompt && !this.current.finderActive) return;
+    if (!this.current.composeActive && !this.current.searchActive && !this.current.finderActive) return;
     if (this.current.composeActive && this.current.composeMode !== "approved_template") {
       const normalized = text.replace(/\r\n?/g, "\n").replace(/\t/g, "    ");
       if (/[\x00-\x08\x0b-\x1f\x7f-\x9f]/.test(normalized)) return;
@@ -1186,6 +1155,18 @@ export class TuiController {
 
   async dispatchKey(key: string): Promise<void> {
     if (this.current.sendPending && key === "Enter") return;
+    if (this.current.attachmentPicking) return;
+    if (key === "Attach" || (key === "a" && this.current.screen === "chat" && !this.current.composeActive && !this.current.searchActive && !this.current.finderActive)) {
+      await this.selectAttachment(); return;
+    }
+    if (this.current.attachment && key === "Escape") { this.replace({ ...this.current, attachment: undefined }); return; }
+    if (this.current.attachment && key === "Enter") {
+      const file = this.current.attachment, resource = this.activeResource;
+      this.replace({ ...this.current, attachment: undefined });
+      if (resource?.kind === "chat" && this.canAttach()) await this.sendMessage({ chat: { platform: resource.platform, account: resource.account, chat_id: resource.chat_id }, file: { ...file } }, resource, `[파일] ${file.name}`);
+      return;
+    }
+    if (this.current.attachment && key !== "Quit") return;
     if (key === "Quit") { this.update({ type: "key", key: "Escape" }); this.update({ type: "key", key: "q" }); this.stop(); return; }
     if (key === "Enter" && this.current.finderActive) {
       const index = this.current.roomFocus ?? 0;
@@ -1198,7 +1179,7 @@ export class TuiController {
       return;
     }
     const workspace = this.current;
-    const editing = workspace.approvalPrompt || workspace.searchActive || workspace.composeActive || workspace.finderActive;
+    const editing = workspace.searchActive || workspace.composeActive || workspace.finderActive;
     if (!editing && !workspace.detailOpen && !workspace.helpOpen && (workspace.screen === "inbox" || workspace.screen === "chat")) {
       if (key === "d" && workspace.pane === "rooms") {
         const room = conversationRows(workspace)[workspace.roomFocus ?? 0];
@@ -1214,7 +1195,6 @@ export class TuiController {
       if ((key === "c" || key === "r") && workspace.screen === "chat") this.replace({ ...this.current, pane: "messages" });
     }
     const before = this.current;
-    const code = before.codeBuffer;
     const query = before.searchQuery;
     const draft = before.draft;
     const composeMode = before.composeMode;
@@ -1224,7 +1204,7 @@ export class TuiController {
     const templateArguments = before.templateArguments;
     const displayedResource = selectedResource(before);
     const focused = focusedResource(before);
-    const inputActive = before.approvalPrompt || before.searchActive || before.composeActive || before.finderActive;
+    const inputActive = before.searchActive || before.composeActive || before.finderActive;
     const nextCursor = before.views[before.screen].nextCursor;
     this.update({ type: "key", key });
     if (!inputActive && key === "1") this.replace({ ...this.current, platform: undefined, pane: "rooms", roomFocus: 0 });
@@ -1240,14 +1220,13 @@ export class TuiController {
     }
     if (key === "Enter" && before.searchActive && query.trim().length > 0) await this.submitSearch(query);
     if (key === "Enter" && before.composeActive && composeMode !== "approved_template" && draft.trim().length > 0) {
-      if (this.current.accountMode) await this.sendDirect(draft);
-      else await this.proposeText(draft, composeMode === "reply" ? replyTo : undefined);
+      await this.sendText(draft, composeMode === "reply" ? replyTo : undefined);
     }
     if (key === "Enter" && before.composeActive && composeMode === "approved_template" && templateStep === "preview" && draft.trim().length > 0) {
       const args = templateArgumentsObject(templateArguments);
-      if (args !== undefined) await this.proposeTemplate(templateId, args, draft);
+      if (args !== undefined) await this.sendTemplate(templateId, args, draft);
     }
-    if (key === "Enter" && before.approvalPrompt && code.length >= 4) await this.approve(code);
+    if (key === "s" && !inputActive) await this.recoverSendStatus();
     if (key === "b" && before.connection.status === "connected" && !inputActive) {
       if (this.current.accountMode) { await this.refreshAccountDirectory(this.generation, true); if (this.activeChat) await this.refreshChat(this.generation, undefined, false, true); }
       else await this.backfill(displayedResource);
@@ -1345,29 +1324,72 @@ export class TuiController {
     this.update({ type: "querySucceeded", generation, screen: "inbox", data, coverage: { freshness: "partial" } });
   }
 
-  private async sendDirect(body: string): Promise<void> {
+  private canAttach(): boolean {
     const resource = this.activeResource;
-    if (this.current.sendPending || !resource || resource.kind !== "chat" || this.current.connection.status !== "connected") return;
-    const capability = this.current.capabilities.data.find(c => sameResource(c.resource, resource));
-    if (this.current.requeryCapabilities || this.current.capabilities.status !== "ready" || capability?.auth.state !== "authenticated" || capability.write.mode !== "send") { this.replace({ ...this.current, notice: "이 대화에는 전송할 수 없습니다." }); return; }
-    const generation = this.generation;
-    this.replace({ ...this.current, sendPending: true, notice: "전송 중…" });
+    const capability = this.current.capabilities.data.find(item => sameResource(item.resource, resource));
+    return this.current.accountMode === true && this.current.screen === "chat" && resource?.kind === "chat"
+      && capabilityClaimsCurrent(this.current) && capability?.auth.state === "authenticated"
+      && capability.write.mode === "send" && capability.write.content_mode === "text"
+      && this.current.connection.status === "connected" && !this.current.sendPending;
+  }
+
+  private async selectAttachment(): Promise<void> {
+    if (!this.canAttach()) { this.replace({ ...this.current, notice: "첨부 불가 — 대화의 전송 권한을 확인하세요." }); return; }
+    if (this.current.draft || this.current.searchActive || this.current.finderActive) { this.replace({ ...this.current, notice: "작성 중인 내용을 보내거나 취소한 뒤 첨부하세요." }); return; }
+    const resource = this.activeResource, generation = this.generation;
+    this.replace({ ...this.current, attachmentPicking: true, composeActive: false, notice: undefined });
     try {
-      const result = await this.options.client.request("account.send", { platform: resource.platform, account: resource.account, chat_id: resource.chat_id, body, request_id: crypto.randomUUID() });
+      const attachment = await (this.options.pickAttachment ?? pickAttachment)();
+      if (generation === this.generation && sameResource(resource, this.activeResource)) this.replace({ ...this.current, attachment });
+    } catch (error) {
+      this.replace({ ...this.current, notice: error instanceof Error ? error.message : "파일을 선택하지 못했습니다." });
+    } finally { this.replace({ ...this.current, attachmentPicking: false }); }
+  }
+
+  private async sendEnvelope(envelope: JsonObject, resource: ResourceRefV1, preview: string): Promise<void> {
+    await this.sendMessage({ envelope }, resource, preview);
+  }
+
+  private async sendMessage(payload: JsonObject, resource: ResourceRefV1, preview: string): Promise<void> {
+    if (this.current.sendPending) return;
+    const requestId = crypto.randomUUID();
+    const generation = this.generation;
+    this.replace({ ...this.current, sendPending: true, lastSend: { requestId, resource, state: "Sending" }, notice: "전송 중…" });
+    try {
+      const result = await this.options.client.request("message.send", { request_id: requestId, ...payload });
       if (generation !== this.generation) return;
-      this.replace({ ...this.current, notice: result.state === "Sent" ? "보냈습니다." : "전송 결과를 확인할 수 없습니다. 다시 보내기 전에 메신저를 확인하세요." });
-      if (result.state === "Sent") {
-        this.replace({ ...this.current, directory: this.current.directory?.map(row => sameResource(rowResource(row),resource) ? { ...row, ts: String(Date.now()/1000), body } : row) });
-        this.accountInbox(generation);
-        const sent = messageRows(result.messages);
-        if (sent.length) {
-          const rows = new Map(this.current.views.chat.data.map(row => [row.id, row]));
-          for (const row of sent) rows.set(row.id, row);
-          this.update({ type: "querySucceeded", generation, screen: "chat", data: [...rows.values()], coverage: { freshness: "partial" } });
-        } else await this.refreshChat(generation);
+      const state = stringValue(result.state) ?? "Uncertain";
+      this.replace({ ...this.current, lastSend: { requestId, resource, state }, notice: `${state} · ${state === "Sent" || state === "Verified" ? "보냈습니다." : "전송 결과 확인 필요 — 자동 재전송하지 않습니다."} · s 상태 확인` });
+      if (state === "Sent" || state === "Verified") {
+        if (this.current.accountMode) {
+          this.replace({ ...this.current, directory: this.current.directory?.map(row => sameResource(rowResource(row), resource) ? { ...row, ts: String(Date.now()/1000), body: preview } : row) });
+          this.accountInbox(generation);
+        }
+        if (sameResource(this.activeResource, resource)) {
+          await this.refreshChat(generation);
+          if (generation === this.generation && sameResource(this.activeResource, resource) && this.current.views.chat.status === "ready") {
+            const last = Math.max(0, this.current.views.chat.data.length - 1);
+            this.replace({ ...this.current, focus: last, selected: { ...this.current.selected, chat: last } });
+          }
+        }
       }
-    } catch { if (generation === this.generation) this.replace({ ...this.current, notice: "전송 결과 확인 필요 — 자동 재전송하지 않습니다." }); }
-    finally { this.replace({ ...this.current, sendPending: false }); }
+    } catch {
+      if (this.current.lastSend?.requestId === requestId) this.replace({ ...this.current, lastSend: { requestId, resource, state: "Uncertain" }, notice: "Uncertain · 전송 결과 확인 필요 — 자동 재전송하지 않습니다. · s 상태 확인" });
+    } finally { this.replace({ ...this.current, sendPending: false }); }
+  }
+
+  /** Read-only recovery; never calls message.send again. */
+  private async recoverSendStatus(): Promise<void> {
+    const send = this.current.lastSend;
+    if (!send || this.current.sendPending || this.current.connection.status !== "connected") return;
+    try {
+      const result = await this.options.client.request("send.status", { id: send.requestId });
+      if (this.current.lastSend?.requestId !== send.requestId) return;
+      const state = stringValue(result.state) ?? "Uncertain";
+      this.replace({ ...this.current, lastSend: { ...send, state }, notice: `${state} · 요청 ${send.requestId}${state === "Uncertain" ? " · 자동 재전송하지 않습니다." : ""}` });
+    } catch {
+      this.replace({ ...this.current, notice: `상태 확인 실패 · 요청 ${send.requestId} · 자동 재전송하지 않습니다.` });
+    }
   }
 
   private async searchAccounts(query: string, append = false): Promise<void> {
@@ -1586,74 +1608,37 @@ export class TuiController {
     }
   }
 
-  private async proposeText(body: string, parentId?: string): Promise<void> {
+  private async sendText(body: string, parentId?: string): Promise<void> {
     const resource = this.activeResource;
-    const capability = resource === undefined ? undefined : this.current.capabilities.data.find(item => resourceKey(item.resource) === resourceKey(resource));
-    if (resource?.kind !== "chat") {
-      this.replace({ ...this.current, notice: "proposal unavailable — open a chat resource first" });
-      return;
-    }
-    if (!capabilityClaimsCurrent(this.current) || capability?.auth.state !== "authenticated" || capability.write.mode !== "send" || capability.write.content_mode !== "text"
+    const capability = resource === undefined ? undefined : this.current.capabilities.data.find(item => sameResource(item.resource, resource));
+    if (resource?.kind !== "chat" || !capabilityClaimsCurrent(this.current) || capability?.auth.state !== "authenticated"
+      || capability.write.mode !== "send" || capability.write.content_mode !== "text"
       || (parentId !== undefined && !capability.write.reply) || this.current.connection.status !== "connected") {
-      this.replace({ ...this.current, composeActive: false, draft: "", notice: "proposal unavailable — exact resource send capability unavailable" });
+      this.replace({ ...this.current, composeActive: false, draft: "", notice: "전송 불가 — 대화의 전송 권한을 확인하세요." });
       return;
     }
-    try {
-      const created = await this.options.client.request("safety.intent.create", {
-        actor: this.options.actor ?? "tui:local",
-        envelope: {
-          v: 2,
-          destination: resource,
-          content: { mode: "text", body },
-          ...(parentId === undefined ? {} : { reply: { parent_id: parentId } }),
-        },
-      });
-      this.update({ type: "event", generation: this.generation, method: "safety.intent.changed" });
-      await this.refresh();
-      this.openCreatedApproval(stringValue(created.intent_id));
-    } catch (error) {
-      this.replace({ ...this.current, notice: `proposal failed — ${error instanceof Error ? error.message : "check daemon and retry"}` });
-    }
+    await this.sendEnvelope({ v: 2, destination: resource, content: { mode: "text", body }, ...(parentId === undefined ? {} : { reply: { parent_id: parentId } }) }, resource, body);
   }
 
-  private async proposeTemplate(templateId: string, args: JsonObject, preview: string): Promise<void> {
+  private async sendTemplate(templateId: string, args: JsonObject, preview: string): Promise<void> {
     const resource = this.activeResource;
-    const capability = resource === undefined ? undefined : this.current.capabilities.data.find(item => resourceKey(item.resource) === resourceKey(resource));
+    const capability = resource === undefined ? undefined : this.current.capabilities.data.find(item => sameResource(item.resource, resource));
     if (!capabilityClaimsCurrent(this.current) || resource?.kind !== "destination" || capability?.auth.state !== "authenticated"
-      || capability.write.mode !== "send" || capability.write.content_mode !== "approved_template"
-      || this.current.connection.status !== "connected") {
-      this.replace({ ...this.current, composeActive: false, templateId: "", templateArguments: "", draft: "", notice: "template proposal unavailable — exact destination capability unavailable" });
+      || capability.write.mode !== "send" || capability.write.content_mode !== "approved_template" || this.current.connection.status !== "connected") {
+      this.replace({ ...this.current, composeActive: false, templateId: "", templateArguments: "", draft: "", notice: "전송 불가 — 템플릿 목적지 권한을 확인하세요." });
       return;
     }
-    try {
-      const created = await this.options.client.request("safety.intent.create", {
-        actor: this.options.actor ?? "tui:local",
-        envelope: {
-          v: 2,
-          destination: resource,
-          content: { mode: "approved_template", template_id: templateId, arguments: args, preview },
-        },
-      });
-      this.update({ type: "event", generation: this.generation, method: "safety.intent.changed" });
-      await this.refresh();
-      this.openCreatedApproval(stringValue(created.intent_id));
-    } catch (error) {
-      this.replace({ ...this.current, notice: `template proposal failed — ${error instanceof Error ? error.message : "check daemon and retry"}` });
-    }
+    await this.sendEnvelope({ v: 2, destination: resource, content: { mode: "approved_template", template_id: templateId, arguments: args, preview } }, resource, preview);
   }
 
-  private openCreatedApproval(id: string | undefined): void {
-    if (!id) { this.replace({ ...this.current, notice: "proposal created — approve from Approvals with a code" }); return; }
-    const index = this.current.views.approvals.data.findIndex(row => row.id === id);
-    if (index < 0) { this.replace({ ...this.current, notice: "proposal created — approve from Approvals with a code" }); return; }
-    this.update({ type: "switchScreen", screen: "approvals" });
-    this.replace({ ...this.current, focus: index, selected: { ...this.current.selected, approvals: index }, notice: "전송할 대화방과 내용을 확인하세요." });
-  }
-
-  private async refreshChat(generation: number, cursor?: string, append = false, force = false): Promise<void> {
+  private async refreshChat(generation: number, cursor?: string, append = false, force = false, live = false): Promise<void> {
     const chat = this.activeChat;
     if (chat === undefined) return;
-    const response = await this.call("chat", generation, this.current.accountMode ? "account.messages" : "message.inbox", { ...(this.current.accountMode ? { ...chat, ...(force ? { refresh: true } : {}) } : { chat }), ...(cursor === undefined ? {} : { cursor }) });
+    const previous = this.current.views.chat.data;
+    const focusedIndex = this.current.screen === "chat" ? this.current.focus : this.current.selected.chat;
+    const selectedId = previous[focusedIndex]?.id;
+    const followTail = focusedIndex >= previous.length - 1;
+    const response = await this.call("chat", generation, this.current.accountMode ? "account.messages" : "message.inbox", { ...(this.current.accountMode ? { ...chat, ...(force ? { refresh: true } : {}), ...(live && !followTail && selectedId ? { message_id: selectedId } : {}) } : { chat }), ...(cursor === undefined ? {} : { cursor }) });
     if (response === undefined || !response.isCurrent()) return;
     const { result } = response;
     const wasEmpty = this.current.views.chat.data.length === 0;
@@ -1667,6 +1652,10 @@ export class TuiController {
       const focus = Math.max(0,messages.findIndex(row => row.id === priorFocus));
       this.replace({ ...this.current, focus, selected: { ...this.current.selected, chat: focus } });
     }
+    if (live && this.current.screen === "chat" && messages.length) {
+      const focus = followTail ? messages.length - 1 : Math.max(0, messages.findIndex(row => row.id === selectedId));
+      this.replace({ ...this.current, focus, selected: { ...this.current.selected, chat: focus } });
+    }
     if (wasEmpty && !append && this.current.screen === "chat" && messages.length) {
       const last = messages.length - 1;
       this.replace({ ...this.current, focus: last, selected: { ...this.current.selected, chat: last } });
@@ -1677,54 +1666,26 @@ export class TuiController {
     const response = await this.call("approvals", generation, "safety.intent.listPending", cursor === undefined ? {} : { cursor });
     if (response === undefined || !response.isCurrent()) return;
     const { result } = response;
-    if (!append) this.approvals.clear();
     const rows: Row[] = [];
     for (const intent of records(result.intents)) {
       const id = stringValue(intent.intent_id);
-      const pending = pendingApproval(intent);
-      if (id === undefined || pending === undefined) continue;
-      const resource = pending.resource;
+      const resource = historicalResource(intent);
+      if (id === undefined || resource === undefined) continue;
       const chat = resource.kind === "chat"
         ? { platform: resource.platform, account: resource.account, chat_id: resource.chat_id }
         : undefined;
-      const eligible = canApprove(stringValue(intent.state)) && !this.inFlightApprovals.has(id) && !this.observedOutcomes.has(id);
-      if (eligible && !this.#codeClaims.has(id)) {
-        // Claim at most once per connection generation, including failed/lost delivery.
-        this.#codeClaims.add(id);
-        const claimed = await this.options.client.request("safety.intent.claimApprovalCode", { intent_id: id }).catch(() => ({ unavailable: true }));
-        if (generation !== this.generation || !accepted(this.current, generation)) return;
-        const code = stringValue(record(claimed)?.code);
-        if (code !== undefined) {
-          this.#approvalCodes.set(id, code);
-          if (this.current.notice === "approval code unavailable — re-proposal required") {
-            this.replace({ ...this.current, notice: undefined });
-          }
-        }
-        if (!response.isCurrent()) {
-          await this.refreshApprovals(generation);
-          return;
-        }
-      }
-      if (!eligible) this.#approvalCodes.delete(id);
-      const available = eligible && this.#approvalCodes.has(id);
-      if (available) this.approvals.set(id, pending);
-      if (eligible && !available) this.replace({ ...this.current, notice: "approval code unavailable — re-proposal required" });
       rows.push({
         id,
         resource,
         chat,
-        state: eligible && !available ? "Code unavailable" : stringValue(intent.state),
+        state: stringValue(intent.state),
         destination: resourcePath(resource),
         expires: String(intent.expires_at ?? "?"),
-        body: pendingBody(intent),
-        codeRequired: available,
+        body: historicalBody(intent),
       });
     }
     const combined = new Map((append ? this.current.views.approvals.data : []).map(row => [row.id, row]));
     for (const row of rows) combined.set(row.id, row);
-    // A pending-list replay is not proof that a dispatched send can be retried.
-    for (const row of this.inFlightApprovals.values()) combined.set(row.id, { ...row, state: "Sending", codeRequired: false });
-    for (const row of this.observedOutcomes.values()) combined.set(row.id, row);
     this.update({ type: "querySucceeded", generation, screen: "approvals", data: [...combined.values()], nextCursor: stringValue(result.next_cursor) });
   }
 
@@ -1779,71 +1740,14 @@ export class TuiController {
     }
   }
 
-  private observeApproval(row: Row, state: string): void {
-    const capability = row.resource === undefined
-      ? undefined
-      : this.current.capabilities.data.find(item => resourceKey(item.resource) === resourceKey(row.resource!));
-    const boundedState = state === "Verified" && (row.resource?.kind === "destination" || capability?.receipt.level === "ack_only") ? "Sent" : state;
-    const meaning = deliveryMeaning(boundedState);
-    const observed = { ...row, state: boundedState, codeRequired: false, evidenceLines: meaning === undefined ? ["session observation"] : ["session observation", meaning] };
-    this.observedOutcomes.set(row.id, observed);
-    this.approvals.delete(row.id);
-    this.#approvalCodes.delete(row.id);
-    this.replace(withView(this.current, "approvals", { ...this.current.views.approvals,
-      data: this.current.views.approvals.data.map(item => item.id === row.id ? observed : item),
-    }));
-  }
 
-  private async approve(code: string): Promise<void> {
-    const row = this.current.views.approvals.data[this.current.selected.approvals];
-    const pending = row === undefined ? undefined : this.approvals.get(row.id);
-    if (row === undefined || pending === undefined || !canApprove(row.state) || this.current.connection.status !== "connected") {
-      this.replace({ ...this.current, notice: "approval unavailable — refresh pending approvals" });
-      return;
-    }
-    const generation = this.generation;
-    this.inFlightApprovals.set(row.id, row);
-    this.approvals.delete(row.id);
-    this.#approvalCodes.delete(row.id);
-    this.replace(withView(this.current, "approvals", { ...this.current.views.approvals,
-      data: this.current.views.approvals.data.map(item => item.id === row.id ? { ...item, state: "Sending", codeRequired: false } : item),
-    }));
-    try {
-      const binding = pending.field === "scope" && pending.resource.kind === "chat"
-        ? { scope: { platform: pending.resource.platform, account: pending.resource.account, chat_id: pending.resource.chat_id } }
-        : { resource: pending.resource };
-      const outcome = await this.options.client.request("safety.intent.approve", { intent_id: row.id, code, actor: pending.actor, ...binding });
-      if (generation !== this.generation || !accepted(this.current, generation)) return;
-      this.inFlightApprovals.delete(row.id);
-      const state = stringValue(outcome.state);
-      if (state !== undefined) this.observeApproval(row, state);
-      this.replace({ ...this.current, notice: "approval submitted; code cleared from memory" });
-      this.update({ type: "event", generation: this.generation, method: "safety.intent.changed" });
-      await this.refresh();
-    } catch (error) {
-      if (generation !== this.generation || !accepted(this.current, generation)) return;
-      if (this.options.client.ready === false) {
-        this.disconnected();
-        return;
-      }
-      this.inFlightApprovals.delete(row.id);
-      this.replace(withView(this.current, "approvals", { ...this.current.views.approvals,
-        data: this.current.views.approvals.data.map(item => item.id === row.id ? { ...item, state: "Refresh required", codeRequired: false } : item),
-      }));
-      await this.refreshApprovals(generation);
-      if (generation !== this.generation || !accepted(this.current, generation)) return;
-      this.replace({ ...this.current, notice: `approval failed — ${error instanceof Error ? error.message : "refresh pending approvals"}; re-proposal required` });
-    } finally {
-      this.inFlightApprovals.delete(row.id);
-    }
-  }
 }
 
 export function createTuiController(options: TuiControllerOptions): TuiController {
   return new TuiController(options);
 }
 
-export type TuiRole = Extract<ClientRole, "reader" | "approver">;
+export type TuiRole = Extract<ClientRole, "reader" | "sender">;
 
 export * from "./runtime.ts";
 export * from "./transport.ts";

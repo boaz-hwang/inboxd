@@ -1,16 +1,16 @@
 # inboxd
 
-A local-first messaging runtime with encrypted search and approval-gated writes.
+A local-first messaging runtime with encrypted search and authenticated direct writes.
 
 - **Local search:** SQLCipher-encrypted message index with Korean and mixed-language search.
 - **Honest results:** retrieval includes coverage and limits, distinguishing “no matches” from “not collected.”
-- **Human-controlled writes:** agents propose; a trusted local operator approves. Uncertain sends are never automatically retried.
+- **Authenticated writes:** TUI, CLI and delegated MCP clients send directly through one durable path. Uncertain sends are never automatically retried.
 - **Shared runtime:** a Rust core and TypeScript edges expose one daemon through CLI, MCP, and OpenTUI clients over a Unix-domain socket.
 
 ## Status
 
 **Experimental — personal self-chat live-tested.** The packaged TUI has been
-used to connect Telegram, Slack and KakaoTalk personal accounts, read their
+previously used with the former approval flow to connect Telegram, Slack and KakaoTalk personal accounts, read their
 self-chat scopes, and send one approval-gated message per platform with matching
 independent readback. This is bounded live evidence, not a guarantee of complete
 history, all conversation types, or long-running session reliability.
@@ -80,7 +80,9 @@ Slack/Kakao login helper currently requires `agent-messenger` on PATH.
 Connections are saved one at a time in owner-only configuration; a successful
 change restarts the daemon. Cancelling an unchanged connection menu keeps the
 current daemon. The owner TUI sends personal-account messages directly with Enter;
-agent/MCP proposals retain their separate approval workflow.
+delegated MCP/agent clients use the same direct-send path. `inboxd mcp` starts
+the MCP stdio server with local owner authority. See the
+[current send contract](docs/12-account-workspace.md#direct-sends).
 
 The sidebar discovers every chat returned by connected Telegram, Slack and
 KakaoTalk accounts and sorts them by latest message time, using provider titles
@@ -101,7 +103,10 @@ and [daemon startup contract](docs/06-architecture.md).
 
 A transport acknowledgement means **Sent**, not **Verified**. Verification requires independent matching read-back evidence. Interrupted or ambiguous sends remain **Uncertain**, without automatic retries.
 
-Approval codes are ephemeral and unavailable to MCP/agent clients. These controls do not protect against an agent with the same user's unrestricted shell, file, or Keychain access.
+Sending requires an authenticated local owner credential. There is no per-message
+approval. Request IDs and encrypted send records survive daemon restarts;
+`send.status` recovers outcomes without retransmission. These controls do not
+protect against a process with the same user's unrestricted shell, file, or Keychain access.
 
 ## Documentation
 

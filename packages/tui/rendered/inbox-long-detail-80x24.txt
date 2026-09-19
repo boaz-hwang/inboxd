@@ -1,5 +1,5 @@
 INBOXD · connected · account ?                                                  
-● INBOX | 2 SEARCH | 3 CHAT | 4 APPROVALS | 5 DOCTOR                            
+● INBOX | 2 SEARCH | 3 CHAT | 4 HISTORY | 5 DOCTOR                              
 Resource: none                                                                  
 READ unknown                                                                    
 WRITE unknown                                                                   
@@ -21,4 +21,4 @@ sage 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩�
 Back: Esc · PgUp/PgDn scroll · Home top (1–9/49)                                
 ! inbox detail opened                                                           
                                                                                 
-1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply a Esc ? q                   
+1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply s-status Esc ? q            

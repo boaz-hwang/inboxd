@@ -16,12 +16,11 @@ function capability(send: boolean): ResourceCapabilityV1 {
   };
 }
 
-test.each(["Uncertain", "Sent", "Verified", "Sending"])("never approves or retries %s even with a supplied code after reconnect", async state => {
+test.each(["Uncertain", "Sent", "Verified", "Sending"])("historical %s stays read-only after reconnect", async state => {
   const calls: string[] = [];
   const controller = createTuiController({ client: {
     start: async () => {}, stop: () => {},
     request: async method => {
-      if (method === "safety.intent.claimApprovalCode") return { code: "123456" };
       calls.push(method);
       if (method === "safety.intent.listPending") return { intents: [{ intent_id: "terminal", actor: "operator", scope: slack, state }] };
       return {};
@@ -29,11 +28,8 @@ test.each(["Uncertain", "Sent", "Verified", "Sending"])("never approves or retri
   } });
   await controller.start();
   await controller.dispatchKey("4");
-  expect(controller.currentApprovalCode()).toBeUndefined();
-  expect(controller.state.views.approvals.data[0]?.codeRequired).toBe(false);
   await controller.dispatchKey("a");
-  expect(controller.state.approvalPrompt).toBe(false);
-  expect(renderInspectorScreen(controller.state, { width: 80, height: 24 })).toContain(`Approve [disabled: ${state}]`);
+  expect(renderInspectorScreen(controller.state, { width: 80, height: 24 })).toContain("Historical record [read-only]");
   controller.disconnected();
   await controller.start();
   await controller.dispatchKey("a");
@@ -42,164 +38,21 @@ test.each(["Uncertain", "Sent", "Verified", "Sending"])("never approves or retri
   controller.stop();
 });
 
-test.each([
-  ["Sent", "acknowledged; not verified"],
-  ["Verified", "destination read-back matched"],
-  ["Uncertain", "outcome unknown; do not resend"],
-])("preserves observed %s after approval leaves pending list and shows it in Chat", async (state, meaning) => {
-  let completed = false;
-  const controller = createTuiController({ client: {
-    start: async () => {}, stop: () => {},
-    request: async method => {
-      if (method === "safety.intent.claimApprovalCode") return { code: "123456" };
-      if (method === "safety.intent.listPending") return { intents: completed ? [] : [{ intent_id: "proposal", actor: "operator", scope: slack, state: "Proposed", body: "send me" }] };
-      if (method === "safety.intent.approve") { completed = true; return { intent_id: "proposal", state, scope: slack, body: "send me" }; }
-      return {};
-    },
-  } });
-  controller.setActiveChat(slack);
-  await controller.start();
-  await controller.dispatchKey("4");
-  await controller.dispatchKey("a");
-  for (const key of "123456") await controller.dispatchKey(key);
-  await controller.dispatchKey("Enter");
-  expect(controller.state.views.approvals.data).toContainEqual(expect.objectContaining({ id: "proposal", state, codeRequired: false }));
-  expect(controller.currentApprovalCode()).toBeUndefined();
-  for (const screen of ["4", "3"]) {
-    await controller.dispatchKey(screen);
-    for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
-      const output = renderInspectorScreen(controller.state, size);
-      expect(output).toContain(state);
-      expect(output).toContain(meaning);
-      expect(output).toContain("session observation");
-    }
-  }
-  controller.stop();
-});
 
-test.each([
-  { completion: "resolve", reconnectFirst: false },
-  { completion: "reject", reconnectFirst: false },
-  { completion: "resolve", reconnectFirst: true },
-  { completion: "reject", reconnectFirst: true },
-])("disconnect during approval completion stays conservative: %j", async ({ completion, reconnectFirst }) => {
-  const result = Promise.withResolvers<JsonObject>();
-  const calls: string[] = [];
-  let dispatched = false;
-  const controller = createTuiController({ client: {
-    start: async () => {}, stop: () => {},
-    request: async method => {
-      if (method === "safety.intent.claimApprovalCode") return { code: "123456" };
-      calls.push(method);
-      if (method === "safety.intent.listPending") return { intents: dispatched ? [] : [{ intent_id: "in-flight", actor: "operator", scope: slack, state: "Proposed" }] };
-      if (method === "safety.intent.approve") { dispatched = true; return result.promise; }
-      return {};
-    },
-  } });
-  await controller.start();
-  await controller.dispatchKey("4");
-  await controller.dispatchKey("a");
-  for (const key of "123456") await controller.dispatchKey(key);
-  const submitting = controller.dispatchKey("Enter");
-  expect(dispatched).toBe(true);
-  controller.disconnected();
-  expect(controller.state.views.approvals.data[0]).toMatchObject({ state: "Uncertain", codeRequired: false });
-  expect(controller.state.views.approvals.status).toBe("stale");
-  expect(controller.state.approvalPrompt).toBe(false);
-  expect(controller.state.codeBuffer).toBe("");
-  expect(controller.currentApprovalCode()).toBeUndefined();
-  expect(controller.state.notice).toContain("no action retried");
-  if (reconnectFirst) await controller.start();
-  const noticeBeforeCompletion = controller.state.notice;
-  const callsBeforeCompletion = calls.length;
-  if (completion === "resolve") result.resolve({ state: "Sent", receipt: "late-receipt" });
-  else result.reject(new Error("response lost"));
-  await submitting;
-  expect(calls.length).toBe(callsBeforeCompletion);
-  expect(controller.state.notice).toBe(noticeBeforeCompletion);
-  expect(controller.state.views.approvals.data[0]).toMatchObject({ state: "Uncertain", codeRequired: false });
-  if (!reconnectFirst) await controller.start();
-  for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
-    const text = renderInspectorScreen(controller.state, size);
-    expect(text).toContain("outcome unknown; do not resend");
-    expect(text).not.toContain("acknowledged; not verified");
-  }
-  await controller.dispatchKey("a");
-  await controller.dispatchKey("Enter");
-  expect(controller.state.approvalPrompt).toBe(false);
-  expect(calls.filter(method => method === "safety.intent.approve")).toHaveLength(1);
-  expect(JSON.stringify(controller.state)).not.toContain("123456");
-  controller.stop();
-});
 
-test("pending-list replays cannot re-enable an in-flight or disconnected approval", async () => {
-  const result = Promise.withResolvers<JsonObject>();
-  let approvals = 0;
-  const controller = createTuiController({ client: {
-    start: async () => {}, stop: () => {},
-    request: async method => {
-      if (method === "safety.intent.claimApprovalCode") return { code: "123456" };
-      if (method === "safety.intent.listPending") return { intents: [{ intent_id: "replayed", actor: "operator", scope: slack, state: "Proposed" }] };
-      if (method === "safety.intent.approve") { approvals++; return result.promise; }
-      return {};
-    },
-  } });
-  await controller.start();
-  await controller.dispatchKey("4");
-  await controller.dispatchKey("a");
-  for (const key of "123456") await controller.dispatchKey(key);
-  const submitting = controller.dispatchKey("Enter");
-  await controller.receiveEvent("safety.intent.changed");
-  expect(controller.state.views.approvals.data[0]).toMatchObject({ state: "Sending", codeRequired: false });
-  expect(controller.currentApprovalCode()).toBeUndefined();
-  await controller.dispatchKey("a");
-  expect(controller.state.approvalPrompt).toBe(false);
-  controller.disconnected();
-  await controller.start();
-  expect(controller.state.views.approvals.data[0]).toMatchObject({ state: "Uncertain", codeRequired: false });
-  expect(controller.currentApprovalCode()).toBeUndefined();
-  await controller.dispatchKey("a");
-  expect(controller.state.approvalPrompt).toBe(false);
-  result.resolve({ state: "Sent" });
-  await submitting;
-  expect(approvals).toBe(1);
-  expect(controller.state.views.approvals.data[0]?.state).toBe("Uncertain");
-  controller.stop();
-});
 
-test.each([false, true])("rejected approval exits Sending without replay even if refresh fails (%s)", async (refreshFails) => {
-  let approvals = 0;
-  const controller = createTuiController({ client: {
-    ready: true, start: async () => {}, stop: () => {},
-    request: async method => {
-      if (method === "safety.intent.claimApprovalCode") return { code: "123456" };
-      if (method === "safety.intent.listPending") {
-        if (approvals && refreshFails) throw new Error("refresh unavailable");
-        return { intents: [{ intent_id: "rejected", actor: "operator", scope: slack, state: "Proposed" }] };
-      }
-      if (method === "safety.intent.approve") { approvals++; throw new Error("invalid approval code"); }
-      return {};
-    },
-  } });
-  await controller.start();
-  await controller.dispatchKey("4"); await controller.dispatchKey("a");
-  for (const key of "999999") await controller.dispatchKey(key);
-  await controller.dispatchKey("Enter");
-  expect(controller.state.views.approvals.data[0]?.state).toBe(refreshFails ? "Refresh required" : "Code unavailable");
-  expect(controller.state.notice).toContain("invalid approval code");
-  expect(controller.state.codeBuffer).toBe("");
-  expect(approvals).toBe(1);
-  controller.stop();
-});
+
+
+
+
 
 test.each([undefined, false, true])("compose requires an authenticated exact-resource send capability (%s)", async (send) => {
-  let proposals = 0;
+  let sends = 0;
   const controller = createTuiController({ client: {
     start: async () => {}, stop: () => {},
     request: async method => {
-      if (method === "safety.intent.claimApprovalCode") return { code: "123456" };
       if (method === "capability.list") return { v: 1, resources: send === undefined ? [] : [capability(send)] };
-      if (method === "safety.intent.create") { proposals++; throw new Error("server policy denied"); }
+      if (method === "message.send") { sends++; throw new Error("server policy denied"); }
       return {};
     },
   } });
@@ -208,11 +61,11 @@ test.each([undefined, false, true])("compose requires an authenticated exact-res
   expect(controller.state.composeActive).toBe(send === true);
   if (send === true) {
     await controller.dispatchKey("x"); await controller.dispatchKey("Enter");
-    expect(controller.state.notice).toContain("server policy denied");
-    expect(proposals).toBe(1);
+    expect(controller.state.notice).toContain("자동 재전송하지 않습니다");
+    expect(sends).toBe(1);
   } else {
     expect(controller.state.notice).toContain(send === false ? "read-only" : "capability");
-    expect(proposals).toBe(0);
+    expect(sends).toBe(0);
   }
   controller.stop();
 });
@@ -221,7 +74,6 @@ test("failed diagnostic probes remain unknown rather than fabricating negative a
   const controller = createTuiController({ client: {
     start: async () => {}, stop: () => {},
     request: async method => {
-      if (method === "safety.intent.claimApprovalCode") return { code: "123456" };
       if (method === "auth.status" || method === "sync.status") throw new Error("probe unavailable");
       return {};
     },
@@ -239,7 +91,6 @@ test("Doctor renders structured encryption auth sync and isolation without promo
   const controller = createTuiController({ client: {
     start: async () => {}, stop: () => {},
     request: async method => {
-      if (method === "safety.intent.claimApprovalCode") return { code: "123456" };
       if (method === "system.status") return {
         ready: true, encryption: { ready: true, cipher_version: "4.9.0", schema_version: 2 },
         auth: { slack: "unknown" }, sync: { slack: { state: "degraded" } },
@@ -339,7 +190,6 @@ test("Inbox bounds discovery pages even when unique cursors return duplicate cha
   const controller = createTuiController({ client: {
     start: async () => {}, stop: () => {},
     request: async method => {
-      if (method === "safety.intent.claimApprovalCode") return { code: "123456" };
       if (method === "chat.list") {
         pages++;
         return { chats: [slack], ...(pages <= 100 ? { next_cursor: `unique-${pages}` } : {}) };
@@ -373,7 +223,6 @@ test("Inbox retains per-chat coverage and sourced unread evidence including conf
   const controller = createTuiController({ client: {
     start: async () => {}, stop: () => {},
     request: async method => {
-      if (method === "safety.intent.claimApprovalCode") return { code: "123456" };
       if (method === "chat.list") return { chats: [slack, empty] };
       if (method === "message.recent") return packet;
       if (method === "message.inbox") return { messages: [], coverage: packet.coverage[0]! };

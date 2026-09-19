@@ -1,6 +1,9 @@
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
+import { readOwnerToken } from "../../host/src/owner-token.ts";
+import { createAgentProtocolRequester, serveMcpStdio } from "../../mcp/src/index.ts";
+import { connectUdsTransport } from "./transport.ts";
 import { restartPackagedDaemon } from "../../host/src/restart.ts";
 import { runTui } from "../../tui/src/main.ts";
 import { runInboxdApplication } from "./application.ts";
@@ -10,7 +13,7 @@ import { ensureInstalledConfiguration, connectInstalledAccounts } from "./setup-
 
 const argv = process.argv.slice(2);
 if (argv.includes("--help")) {
-  console.log("usage: inboxd\n       inboxd connect [telegram|slack|kakao]\n       inboxd [--approver] <daemon|chat|message|sync|auth|send|doctor|safety> <action> [json]");
+  console.log("usage: inboxd\n       inboxd connect [telegram|slack|kakao]\n       inboxd mcp\n       inboxd [--approver] <daemon|chat|message|sync|auth|send|doctor|safety> <action> [json]");
   process.exit(0);
 }
 const approverIndex = argv.indexOf("--approver");
@@ -38,7 +41,7 @@ try {
     }, productDirectory),
     launchDaemon: () => launchPackagedDaemon({ daemonBinary, configPath: config, socketPath: socket }).then(() => {}),
     runTui: async () => {
-      while (await runTui({ socketPath: socket, role: "approver" }) === "connect") {
+      while (await runTui({ socketPath: socket, role: "sender" }) === "connect") {
         const changed = await connectInstalledAccounts({ root, state, config, database: join(state, "inboxd.db"), socket }, productDirectory);
         if (changed) await restartPackagedDaemon({ daemonBinary, configPath: config, socketPath: socket });
       }
@@ -50,7 +53,17 @@ try {
         if (changed) await restartPackagedDaemon({ daemonBinary, configPath: config, socketPath: socket });
         return;
       }
-      handlers = createUdsCliHandlers({ role, daemonBinary, configPath: config, socketPath: socket });
+      if (command[0] === "mcp") {
+        const requester = createAgentProtocolRequester(() => connectUdsTransport(socket), readOwnerToken(socket));
+        const handle = serveMcpStdio(requester);
+        const close = () => { requester.stop(); void handle.close(); };
+        process.stdin.once("end", close);
+        process.once("SIGTERM", close);
+        process.once("SIGINT", close);
+        return;
+      }
+      const commandRole = command[0] === "message" && command[1] === "send" ? "sender" : role;
+      handlers = createUdsCliHandlers({ role: commandRole, daemonBinary, configPath: config, socketPath: socket });
       await runCli(command, { handlers });
     },
   });

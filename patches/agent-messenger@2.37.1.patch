@@ -1,8 +1,11 @@
 diff --git a/node_modules/agent-messenger/.bun-tag-1e7d028d02f6928b b/.bun-tag-1e7d028d02f6928b
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/agent-messenger/.bun-tag-e5ef5073ebc11a8e b/.bun-tag-e5ef5073ebc11a8e
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/dist/src/platforms/kakaotalk/client.js b/dist/src/platforms/kakaotalk/client.js
-index 71c1a5442bc303f6886056565697bff9cdd35218..008e82c78dd6d8491a386ac2e5f4e1a31633e36c 100644
+index 71c1a5442bc303f6886056565697bff9cdd35218..10d1a2539b5a1d6f8f1ea5252ebfde423ae90bbf 100644
 --- a/dist/src/platforms/kakaotalk/client.js
 +++ b/dist/src/platforms/kakaotalk/client.js
 @@ -751,7 +751,7 @@ export class KakaoTalkClient {
@@ -24,7 +27,7 @@ index 71c1a5442bc303f6886056565697bff9cdd35218..008e82c78dd6d8491a386ac2e5f4e1a3
                  const allChats = [];
                  const seenChatIds = new Set();
 -                collectChats((loginResult.chatDatas ?? []), allChats, seenChatIds);
-+                if (!needsChatListBootstrap) {
++                if (!needsChatListBootstrap && !options?.all) {
 +                    collectChats((loginResult.chatDatas ?? []), allChats, seenChatIds);
 +                }
                  // Paginate via LCHATLIST when explicitly requested (--all / --search) OR when
@@ -35,7 +38,7 @@ index 71c1a5442bc303f6886056565697bff9cdd35218..008e82c78dd6d8491a386ac2e5f4e1a3
 -                if (options?.all || options?.search || snapshotEmpty) {
 -                    let cursor = loginResult;
 +                if (options?.all || options?.search || snapshotEmpty || needsChatListBootstrap) {
-+                    let cursor = needsChatListBootstrap
++                    let cursor = (needsChatListBootstrap || options?.all)
 +                        ? { lastTokenId: Long.ZERO, lastChatId: Long.ZERO, eof: false }
 +                        : loginResult;
                      let pages = 0;
@@ -60,8 +63,28 @@ index 71c1a5442bc303f6886056565697bff9cdd35218..008e82c78dd6d8491a386ac2e5f4e1a3
      }
      async sendTyping(chatId, opts) {
          const parsedChatId = parseChatId(chatId);
+@@ -1385,7 +1390,9 @@ export class KakaoTalkClient {
+     }
+     async sendMediaViaLoco(opts) {
+         const parsedChatId = parseChatId(opts.chatId);
+-        return this.executeWithReconnect(async ({ session }) => {
++        const { session } = await this.ensureSession();
++    // A lost upload acknowledgement must never replay the file send.
++    return (async () => {
+             try {
+                 const shipResp = await session.shipMedia(parsedChatId, opts.msgType, opts.data.byteLength, opts.checksum, opts.extension);
+                 if (shipResp.statusCode !== 0) {
+@@ -1425,7 +1432,7 @@ export class KakaoTalkClient {
+             catch (error) {
+                 throw wrapError(error, opts.errorCode);
+             }
+-        });
++        })();
+     }
+     /**
+      * Advance the read watermark for `chatId` up to and including `logId`.
 diff --git a/src/platforms/kakaotalk/client.ts b/src/platforms/kakaotalk/client.ts
-index 76a4ccb403ca6ba92891cf16ffd210a76e3b8cc0..98cb8c274754ee8d23bd4d309b7917ff556ded71 100644
+index 76a4ccb403ca6ba92891cf16ffd210a76e3b8cc0..f61d842a20b3dad9b07ad21d68110d86df44baa5 100644
 --- a/src/platforms/kakaotalk/client.ts
 +++ b/src/platforms/kakaotalk/client.ts
 @@ -101,6 +101,7 @@ type ChatData = Record<string, unknown>
@@ -92,7 +115,7 @@ index 76a4ccb403ca6ba92891cf16ffd210a76e3b8cc0..98cb8c274754ee8d23bd4d309b7917ff
          const seenChatIds = new Set<string>()
  
 -        collectChats((loginResult.chatDatas ?? []) as ChatData[], allChats, seenChatIds)
-+        if (!needsChatListBootstrap) {
++        if (!needsChatListBootstrap && !options?.all) {
 +          collectChats((loginResult.chatDatas ?? []) as ChatData[], allChats, seenChatIds)
 +        }
  
@@ -104,7 +127,7 @@ index 76a4ccb403ca6ba92891cf16ffd210a76e3b8cc0..98cb8c274754ee8d23bd4d309b7917ff
 -        if (options?.all || options?.search || snapshotEmpty) {
 -          let cursor: ChatListResponse = loginResult
 +        if (options?.all || options?.search || snapshotEmpty || needsChatListBootstrap) {
-+          let cursor: ChatListResponse = needsChatListBootstrap
++          let cursor: ChatListResponse = (needsChatListBootstrap || options?.all)
 +            ? {
 +                chatDatas: [],
 +                lastTokenId: toLongLike(0),
@@ -134,3 +157,23 @@ index 76a4ccb403ca6ba92891cf16ffd210a76e3b8cc0..98cb8c274754ee8d23bd4d309b7917ff
    }
  
    async sendTyping(chatId: string, opts?: { linkId?: string }): Promise<KakaoTypingResult> {
+@@ -1712,7 +1723,9 @@ export class KakaoTalkClient {
+     errorCode: string
+   }): Promise<KakaoSendResult> {
+     const parsedChatId = parseChatId(opts.chatId)
+-    return this.executeWithReconnect(async ({ session }) => {
++    const { session } = await this.ensureSession();
++    // A lost upload acknowledgement must never replay the file send.
++    return (async () => {
+       try {
+         const shipResp = await session.shipMedia(
+           parsedChatId,
+@@ -1766,7 +1779,7 @@ export class KakaoTalkClient {
+       } catch (error) {
+         throw wrapError(error, opts.errorCode)
+       }
+-    })
++    })()
+   }
+ 
+   /**

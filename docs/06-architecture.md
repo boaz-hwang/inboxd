@@ -1,6 +1,11 @@
 # 06 — Architecture: Rust core / TypeScript edge (2026-09-17)
 
-This is the current implementation contract. It separates observed offline behavior from unobserved live account behavior; it is not a claim that Slack/Kakao production access was exercised.
+This preserves the 2026-09-17 architecture checkpoint; its Bun-host topology,
+schema version and validation counts are historical. For the current Rust daemon
+and account workspace, see [account architecture](12-account-workspace.md) and
+[Rust account backends](16-rust-account-backends.md). In particular, the encrypted
+store is now schema v4 with a durable owner-send ledger. Offline evidence below
+does not claim that live provider access was exercised by the current refactor.
 
 ## 1. Process, startup, and ownership
 

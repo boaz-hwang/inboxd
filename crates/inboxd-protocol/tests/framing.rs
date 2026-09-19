@@ -7,19 +7,19 @@ use serde_json::json;
 #[test]
 fn frozen_method_surface_and_additive_capability_event_are_exact() {
     assert_eq!(LEGACY_REQUEST_METHODS.len(), 21);
-    assert_eq!(REQUEST_METHODS.len(), 26);
+    assert_eq!(REQUEST_METHODS.len(), 23);
     assert_eq!(
         LEGACY_REQUEST_METHODS[18..],
         ["settings.get", "settings.update", "subscribe"]
     );
     assert_eq!(
-        &REQUEST_METHODS[21..],
+        &REQUEST_METHODS[18..],
         &[
             "capability.list",
             "account.list",
             "account.messages",
             "account.search",
-            "account.send"
+            "message.send"
         ]
     );
     assert_eq!(
@@ -27,6 +27,7 @@ fn frozen_method_surface_and_additive_capability_event_are_exact() {
         [
             "message.upserted",
             "coverage.changed",
+            "account.changed",
             "safety.intent.changed",
             "capability.changed",
         ]
@@ -88,11 +89,12 @@ fn encoded_json_line_limit_includes_newline_escapes_and_multibyte_utf8() {
 }
 
 #[test]
-fn direct_account_send_is_reserved_for_owner_approver() {
+fn direct_send_requires_sender_or_owner_role() {
     use inboxd_protocol::{ClientRole, parse_request};
-    let request = json!({"type":"request","id":"send","method":"account.send","params":{}});
+    let request = json!({"type":"request","id":"send","method":"message.send","params":{}});
     for role in [ClientRole::Reader, ClientRole::Agent, ClientRole::Mcp] {
         assert!(parse_request(&request, Some(role)).is_err());
     }
     assert!(parse_request(&request, Some(ClientRole::Approver)).is_ok());
+    assert!(parse_request(&request, Some(ClientRole::Sender)).is_ok());
 }

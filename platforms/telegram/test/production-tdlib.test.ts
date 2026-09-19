@@ -479,3 +479,68 @@ describe("Telegram production TDLib adapter", () => {
     }
   });
 });
+
+  test("document upload waits for the remote receipt, not the local pending message", async () => {
+    const rawChatId = -1001234567890;
+    const temporaryMessageId = -600;
+    const finalMessage = {
+      _: "message",
+      id: 600,
+      chat_id: rawChatId,
+      sender_id: { _: "messageSenderUser", user_id: 777000 },
+      date: 90,
+      is_outgoing: true,
+      content: { _: "messageText", text: { _: "formattedText", text: "exact", entities: [] } },
+    };
+    class PendingClient extends EventEmitter {
+      async invoke(query: Record<string, unknown>): Promise<unknown> {
+        if (query._ !== "sendMessage") throw new Error("unexpected query");
+        expect(query.input_message_content).toMatchObject({ _: "inputMessageDocument", document: { _: "inputFileLocal", path: "/tmp/report.pdf" } });
+        queueMicrotask(() => {
+          this.emit("update", {
+            _: "updateMessageSendSucceeded",
+            old_message_id: temporaryMessageId,
+            message: { ...finalMessage, chat_id: -1009876543210 },
+          });
+          this.emit("update", {
+            _: "updateMessageSendSucceeded",
+            old_message_id: temporaryMessageId - 1,
+            message: finalMessage,
+          });
+          this.emit("update", {
+            _: "updateMessageSendSucceeded",
+            old_message_id: temporaryMessageId,
+            message: finalMessage,
+          });
+        });
+        return {
+          ...finalMessage,
+          id: temporaryMessageId,
+          sending_state: { _: "messageSendingStatePending", sending_id: 91 },
+        };
+      }
+    }
+    const client = new PendingClient();
+    const modules: Record<string, unknown> = {
+      tdl: { configure() {}, createClient: () => client },
+      "prebuilt-tdlib": { getTdjson: () => "/runtime/libtdjson.dylib" },
+    };
+    const port = await createProductionTdlibPort({
+      ...options,
+      loadModule: async (specifier) => modules[specifier],
+    });
+
+    const result = await port.sendDocumentMessage!({
+      chat_id: String(rawChatId),
+      path: "/tmp/report.pdf",
+      timeout_ms: 100,
+    });
+    expect(result).toMatchObject({
+      "@type": "message",
+      id: 600,
+      chat_id: rawChatId,
+    });
+    expect(result.sending_state).toBeUndefined();
+    await port.close?.();
+    expect(client.listenerCount("update")).toBe(0);
+  });

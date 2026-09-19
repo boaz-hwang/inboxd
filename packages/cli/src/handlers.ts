@@ -1,6 +1,7 @@
 import {
   ReconnectingProtocolClient,
   type ClientRole,
+  type MessageSendParams,
   type JsonObject,
   type RecentMessagesParams,
   type ProtocolMethod,
@@ -52,6 +53,7 @@ export interface CliHandlerOptions {
   readonly role?: CliRole;
   readonly isTTY?: () => boolean;
   readonly approverToken?: string;
+  readonly senderToken?: string;
   /** Process lifecycle is injected so protocol handlers never own a daemon implementation. */
   readonly launchDaemon?: () => Promise<void>;
 }
@@ -72,49 +74,21 @@ export interface CliHandlers {
   syncStatus(): Promise<JsonObject>;
   backfill(input: ChatKey & { readonly from_ts: number; readonly to_ts: number }): Promise<JsonObject>;
   authStatus(): Promise<JsonObject>;
+  send(input: MessageSendParams): Promise<JsonObject>;
   sendStatus(id: string): Promise<JsonObject>;
   doctor(): Promise<JsonObject>;
-  propose(intent: JsonObject): Promise<JsonObject>;
   listPending(): Promise<JsonObject>;
-  approve(input: {
-    readonly intent_id: string;
-    readonly code: string;
-    readonly actor: string;
-    readonly scope: ChatKey;
-  }): Promise<JsonObject>;
   reject(input: { readonly intent_id: string; readonly reason: string }): Promise<JsonObject>;
-}
-
-export interface AgentHandlers {
-  connect(): Promise<void>;
-  stop(): void;
-  propose(intent: JsonObject): Promise<JsonObject>;
 }
 
 function defaultStdinTTY(): boolean {
   return Boolean((globalThis as { process?: { stdin?: { isTTY?: boolean } } }).process?.stdin?.isTTY);
 }
 
-function approvalCodePresent(value: unknown): boolean {
-  if (Array.isArray(value)) return value.some(approvalCodePresent);
-  if (value === null || typeof value !== "object") return false;
-  return Object.entries(value as JsonObject).some(([key, nested]) =>
-    key === "code" || key === "approval_code" || key === "approvalCode" || approvalCodePresent(nested),
-  );
-}
-
-/** JSON output that preserves every protocol result field, including empty coverage evidence. */
-export function formatCliResult(result: JsonObject, _role: CliRole = "reader"): string {
-  if (approvalCodePresent(result)) {
-    throw new Error("approval code cannot be printed as CLI JSON");
-  }
-  return JSON.stringify(result);
-}
-
 export function createCliHandlers(options: CliHandlerOptions): CliHandlers {
   const role = options.role ?? "reader";
   const isTTY = options.isTTY ?? defaultStdinTTY;
-  const client = new ReconnectingProtocolClient({ connect: options.connect, role, isTTY, approverToken: options.approverToken });
+  const client = new ReconnectingProtocolClient({ connect: options.connect, role, isTTY, approverToken: options.approverToken, senderToken: options.senderToken });
   const connect = (): Promise<void> => client.ready ? Promise.resolve() : client.start([]);
 
   const call = async (method: ProtocolMethod, params: JsonObject): Promise<JsonObject> => {
@@ -127,10 +101,10 @@ export function createCliHandlers(options: CliHandlerOptions): CliHandlers {
   };
 
   const requireApproverTTY = (): void => {
-    if (role !== "approver" || !isTTY()) throw new ApproverTTYRequiredError();
+    if (role !== "sender" && (role !== "approver" || !isTTY())) throw new ApproverTTYRequiredError();
   };
 
-  const approverCall = (method: "safety.intent.listPending" | "safety.intent.approve" | "safety.intent.reject", params: JsonObject): Promise<JsonObject> => {
+  const approverCall = (method: "safety.intent.listPending" | "safety.intent.reject", params: JsonObject): Promise<JsonObject> => {
     try {
       requireApproverTTY();
     } catch (error) {
@@ -158,17 +132,10 @@ export function createCliHandlers(options: CliHandlerOptions): CliHandlers {
     syncStatus: () => call("sync.status", {}),
     backfill: (input) => call("sync.backfill", { ...input }),
     authStatus: () => call("auth.status", {}),
+    send: (input) => call("message.send", { ...input }),
     sendStatus: (id) => call("send.status", { id }),
     doctor: () => call("system.status", {}),
-    propose: (intent) => call("safety.intent.create", intent),
     listPending: () => approverCall("safety.intent.listPending", {}),
-    approve: (input) => approverCall("safety.intent.approve", input),
     reject: (input) => approverCall("safety.intent.reject", input),
   };
-}
-
-/** Agent clients intentionally expose propose only, never approval enumeration or codes. */
-export function createAgentHandlers(options: Omit<CliHandlerOptions, "role">): AgentHandlers {
-  const handlers = createCliHandlers({ ...options, role: "agent" });
-  return { connect: handlers.connect, stop: handlers.stop, propose: handlers.propose };
 }

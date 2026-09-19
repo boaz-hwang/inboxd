@@ -1,4 +1,7 @@
 //! Account-wide directory and direct owner-TUI operations. Credentials never cross RPC.
+use crate::accounts_backend::{AccountBackend, ProviderIo, pagination::MessagePages};
+#[cfg(test)]
+use inboxd_storage::StorageActor;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, process::Stdio, sync::Arc, time::Duration};
 use tokio::{
@@ -7,6 +10,12 @@ use tokio::{
     sync::Mutex,
 };
 use zeroize::Zeroizing;
+
+#[path = "accounts_live.rs"]
+mod live;
+#[path = "accounts_schedule.rs"]
+mod schedule;
+use schedule::Schedule;
 
 #[derive(Clone)]
 pub struct AccountConfig {
@@ -19,8 +28,26 @@ struct Slot {
     chats: Vec<Value>,
     loaded: bool,
     failed: bool,
-    worker: Option<WorkerProcess>,
-    sends: BTreeMap<String, (String, Value)>,
+    backend: Option<AccountBackend>,
+    backend_seed: AccountBackend,
+    generation: u64,
+    sending: std::sync::Weak<()>,
+    message_pages: MessagePages,
+}
+impl Slot {
+    fn take_backend(&mut self) -> AccountBackend {
+        let backend = self
+            .backend
+            .take()
+            .unwrap_or_else(|| self.backend_seed.fork());
+        self.backend_seed = backend.fork();
+        backend
+    }
+    fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.backend = None;
+        self.message_pages.clear();
+    }
 }
 type WorkerCall = for<'a> fn(
     &'a AccountConfig,
@@ -37,12 +64,16 @@ struct Snapshot {
     updated: Option<std::time::Instant>,
 }
 struct Entry {
+    refresh_task: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
     config: AccountConfig,
     slot: Arc<Mutex<Slot>>,
+    schedule: Arc<Schedule>,
     snapshot: Arc<std::sync::Mutex<Snapshot>>,
 }
 pub(crate) struct AccountService {
     run_worker: Option<WorkerCall>,
+    #[cfg(test)]
+    storage: Option<Arc<StorageActor>>,
     slots: Vec<Entry>,
     pages: std::sync::Mutex<BTreeMap<u64, (std::time::Instant, Value)>>,
     sequence: std::sync::atomic::AtomicU64,
@@ -51,26 +82,45 @@ impl AccountService {
     pub(crate) fn new(configs: Vec<AccountConfig>) -> Self {
         Self {
             run_worker: None,
+            #[cfg(test)]
+            storage: None,
             pages: Default::default(),
             sequence: std::sync::atomic::AtomicU64::new(0),
             slots: configs
                 .into_iter()
                 .map(|config| Entry {
+                    refresh_task: Default::default(),
                     config: config.clone(),
                     snapshot: Default::default(),
+                    schedule: Default::default(),
                     slot: Arc::new(Mutex::new(Slot {
+                        backend: Some(AccountBackend::new(&config.platform)),
+                        backend_seed: AccountBackend::new(&config.platform),
+                        generation: 0,
+                        sending: Default::default(),
+                        message_pages: MessagePages::default(),
                         config,
                         chats: vec![],
                         loaded: false,
                         failed: false,
-                        worker: None,
-                        sends: BTreeMap::new(),
                     })),
                 })
                 .collect(),
         }
     }
+    #[cfg(test)]
+    pub(crate) fn with_storage(mut self, storage: Arc<StorageActor>) -> Self {
+        self.storage = Some(storage);
+        self
+    }
     pub(crate) async fn list(&self, params: &Value) -> Result<Value, String> {
+        self.list_filtered(params, None).await
+    }
+    async fn list_filtered(
+        &self,
+        params: &Value,
+        target: Option<(&str, &str)>,
+    ) -> Result<Value, String> {
         if let Some(cursor) = params["cursor"].as_str() {
             let (id, offset) = cursor.split_once(':').ok_or("목록을 다시 불러오세요")?;
             let id = id.parse::<u64>().map_err(|_| "잘못된 목록 커서")?;
@@ -84,6 +134,11 @@ impl AccountService {
         }
         let background = params["background"] == true;
         for entry in &self.slots {
+            if target.is_some_and(|(platform, account)| {
+                entry.config.platform != platform || entry.config.account != account
+            }) {
+                continue;
+            }
             let mut snapshot = entry.snapshot.lock().unwrap();
             let expired = background
                 && snapshot
@@ -95,14 +150,42 @@ impl AccountService {
             snapshot.refreshing = true;
             let shared = Arc::clone(&entry.slot);
             let published = Arc::clone(&entry.snapshot);
+            let schedule = Arc::clone(&entry.schedule);
             let runner = self.run_worker;
             let refresh = params["refresh"] == true;
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
+                let Ok(_admission) = schedule.admit(false) else {
+                    // Congestion is not an account/provider failure. Keep the last
+                    // healthy directory and reserved send capacity usable.
+                    published.lock().unwrap().refreshing = false;
+                    return;
+                };
                 let mut slot = shared.lock().await;
-                let result =
-                    call_worker(&mut slot, &json!({"op":"chats", "refresh":refresh}), runner)
-                        .await
-                        .and_then(|value| validate_chats(&slot.config, &value));
+                let config = slot.config.clone();
+                let overlapped_send = slot.sending.upgrade().is_some();
+                slot.invalidate();
+                let generation = slot.generation;
+                let mut backend = slot.take_backend();
+                drop(slot);
+                let result = call_account(
+                    &config,
+                    &mut backend,
+                    &schedule,
+                    &json!({"op":"chats", "refresh":refresh}),
+                    runner,
+                )
+                .await
+                .and_then(|value| validate_chats(&config, &value));
+                let mut slot = shared.lock().await;
+                if overlapped_send
+                    || slot.sending.upgrade().is_some()
+                    || generation != slot.generation
+                {
+                    // A concurrent send/refresh superseded this directory snapshot.
+                    published.lock().unwrap().refreshing = false;
+                    return;
+                }
+                slot.backend = Some(backend);
                 match result {
                     Ok(chats) => {
                         slot.chats = chats;
@@ -126,13 +209,14 @@ impl AccountService {
                     updated: Some(std::time::Instant::now()),
                 };
             });
+            *entry.refresh_task.lock().unwrap() = Some(task.abort_handle());
         }
         if !background {
-            while self
-                .slots
-                .iter()
-                .any(|e| e.snapshot.lock().unwrap().refreshing)
-            {
+            while self.slots.iter().any(|e| {
+                target.is_none_or(|(platform, account)| {
+                    e.config.platform == platform && e.config.account == account
+                }) && e.snapshot.lock().unwrap().refreshing
+            }) {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         }
@@ -170,12 +254,128 @@ impl AccountService {
         Ok(result)
     }
     pub(crate) async fn query(&self, op: &str, params: &Value) -> Result<Value, String> {
+        #[cfg(test)]
+        if op == "send" {
+            let storage = self.storage.as_ref().ok_or("전송 기록 저장소 없음")?;
+            let mut request = json!({"request_id":params["request_id"],"chat":{"platform":params["platform"],"account":params["account"],"chat_id":params["chat_id"]},"body":params["body"]});
+            if let Some(parent) = params.get("parent_id") {
+                request["parent_id"] = parent.clone();
+            }
+            return crate::direct_send::execute(
+                storage,
+                &crate::CapabilityRegistry::new(vec![]).unwrap(),
+                self,
+                &request,
+                json!({"role":"sender"}),
+            )
+            .await;
+        }
+        self.dispatch_query(op, params).await
+    }
+    /// Fixed binding workers and account reads use different provider sessions,
+    /// but must share the same cache invalidation boundary. Keep the marker alive
+    /// across dispatch so overlapping reads cannot republish pre-send data.
+    pub(crate) async fn with_external_send<F>(
+        &self,
+        destination: &Value,
+        dispatch: F,
+    ) -> Result<Value, String>
+    where
+        F: std::future::Future<Output = Result<Value, String>>,
+    {
+        let Some(entry) = self.slots.iter().find(|entry| {
+            destination["platform"] == entry.config.platform
+                && destination["account"] == entry.config.account
+        }) else {
+            return dispatch.await;
+        };
+        let _serial = entry.schedule.sends.lock().await;
+        let scope = Arc::new(());
+        {
+            let mut slot = entry.slot.lock().await;
+            slot.invalidate();
+            slot.sending = Arc::downgrade(&scope);
+        }
+        let result = dispatch.await;
+        entry.slot.lock().await.invalidate();
+        drop(scope);
+        result
+    }
+
+    pub(crate) async fn prepare_send(&self, params: &Value) -> Result<(), String> {
+        let platform = params["platform"].as_str().ok_or("메신저 없음")?;
+        let account = params["account"].as_str().ok_or("계정 없음")?;
+        let entry = self
+            .slots
+            .iter()
+            .find(|e| e.config.platform == platform && e.config.account == account)
+            .ok_or("연결된 계정 없음")?;
+        let needs_refresh = {
+            let slot = entry.slot.lock().await;
+            !slot.loaded || slot.failed
+        };
+        if needs_refresh {
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                self.list_filtered(&json!({"refresh":true}), Some((platform, account))),
+            )
+            .await
+            .map_err(|_| "계정 채팅 목록 조회 시간 초과")??;
+        }
+        Ok(())
+    }
+    pub(crate) async fn validate_send(&self, params: &Value) -> Result<(), String> {
+        params["body"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty() && s.len() <= 16000)
+            .ok_or("메시지 크기 제한")?;
+        let entry = self
+            .slots
+            .iter()
+            .find(|e| {
+                e.config.platform == params["platform"] && e.config.account == params["account"]
+            })
+            .ok_or("연결된 계정 없음")?;
+        let slot = entry.slot.lock().await;
+        if !slot.loaded || slot.failed {
+            return Err("채팅 목록을 먼저 불러오세요".into());
+        }
+        if !slot
+            .chats
+            .iter()
+            .any(|chat| chat["chat_id"] == params["chat_id"] && chat["can_send"] == true)
+        {
+            return Err("연결된 쓰기 가능한 채팅방이 아닙니다".into());
+        }
+        Ok(())
+    }
+    pub(crate) async fn dispatch_query(&self, op: &str, params: &Value) -> Result<Value, String> {
         let platform = params["platform"].as_str().ok_or("메신저 없음")?;
         let account = params["account"].as_str().ok_or("계정 없음")?;
         for entry in &self.slots {
             if entry.config.platform != platform || entry.config.account != account {
                 continue;
             }
+            if op == "send" {
+                params["body"]
+                    .as_str()
+                    .filter(|s| !s.trim().is_empty() && s.len() <= 16000)
+                    .ok_or("메시지 크기 제한")?;
+                params["request_id"]
+                    .as_str()
+                    .filter(|s| s.len() >= 16 && s.len() <= 80)
+                    .ok_or("전송 식별자 없음")?;
+                params["chat_id"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .ok_or("채팅방 없음")?;
+            }
+            let _admission = entry.schedule.admit(op == "send")?;
+            let _send_guard = if op == "send" {
+                Some(entry.schedule.sends.lock().await)
+            } else {
+                None
+            };
             let mut slot = entry.slot.lock().await;
             if !slot.loaded || slot.failed {
                 return Err("채팅 목록을 먼저 불러오세요".into());
@@ -203,27 +403,21 @@ impl AccountService {
                     .as_str()
                     .filter(|s| !s.trim().is_empty() && s.len() <= 16000)
                     .ok_or("메시지 크기 제한")?;
-                let id = params["request_id"]
-                    .as_str()
-                    .filter(|s| s.len() >= 16 && s.len() <= 80)
-                    .ok_or("전송 식별자 없음")?
-                    .to_owned();
-                let fingerprint = format!("{}:{}", chat.unwrap(), body);
-                if let Some((previous, result)) = slot.sends.get(&id) {
-                    return if previous == &fingerprint {
-                        Ok(result.clone())
-                    } else {
-                        Err("전송 식별자 재사용 거부".into())
-                    };
-                }
-                if slot.sends.len() >= 10000 {
-                    return Err("전송 세션 제한".into());
-                }
-                slot.sends.insert(
-                    id.clone(),
-                    (fingerprint.clone(), json!({"state":"Uncertain"})),
-                );
-                let mut outcome = match call_worker(&mut slot, &request, self.run_worker).await {
+                let mut backend = slot.take_backend();
+                let send_scope = Arc::new(());
+                slot.sending = Arc::downgrade(&send_scope);
+                slot.invalidate();
+                let generation = slot.generation;
+                drop(slot);
+                let mut outcome = match call_account(
+                    &entry.config,
+                    &mut backend,
+                    &entry.schedule,
+                    &request,
+                    self.run_worker,
+                )
+                .await
+                {
                     Ok(value) => value,
                     Err(_) => json!({"state":"Uncertain"}),
                 };
@@ -233,6 +427,13 @@ impl AccountService {
                         message["platform"] = json!(platform);
                         message["account"] = json!(account);
                     }
+                }
+                let mut slot = entry.slot.lock().await;
+                let cache_valid = slot.generation == generation;
+                slot.invalidate();
+                drop(send_scope);
+                if cache_valid {
+                    slot.backend = Some(backend);
                 }
                 if outcome["state"] == "Sent" {
                     if let Some(room) = slot
@@ -249,7 +450,13 @@ impl AccountService {
                     }
                 }
                 entry.snapshot.lock().unwrap().chats = slot.chats.clone();
-                slot.sends.insert(id, (fingerprint, outcome.clone()));
+                drop(slot);
+                if !matches!(
+                    outcome["state"].as_str(),
+                    Some("Sent" | "Failed" | "Uncertain")
+                ) {
+                    outcome = json!({"state":"Uncertain"});
+                }
                 return Ok(outcome);
             }
             if op == "search"
@@ -259,22 +466,58 @@ impl AccountService {
             {
                 return Err("검색어를 입력하세요".into());
             }
-            let mut result = call_worker(&mut slot, &request, self.run_worker).await?;
+            if request["refresh"] == true {
+                slot.invalidate();
+            }
+            let (buffered, seen) = slot.message_pages.begin(&mut request)?;
+            let generation = slot.generation;
+            let overlapped_send = slot.sending.upgrade().is_some();
+            let mut backend = slot.take_backend();
+            drop(slot);
+            let mut result = match buffered {
+                Some(buffered) => buffered,
+                None => {
+                    call_account(
+                        &entry.config,
+                        &mut backend,
+                        &entry.schedule,
+                        &request,
+                        self.run_worker,
+                    )
+                    .await?
+                }
+            };
+            let mut slot = entry.slot.lock().await;
+            let superseded = overlapped_send
+                || slot.sending.upgrade().is_some()
+                || slot.generation != generation;
+            if !superseded {
+                slot.backend = Some(backend);
+            }
             if let Some(messages) = result["messages"].as_array_mut() {
-                messages.retain(|m| slot.chats.iter().any(|c| c["chat_id"] == m["chat_id"]));
+                messages.retain(|m| {
+                    slot.chats.iter().any(|c| c["chat_id"] == m["chat_id"])
+                        && chat.is_none_or(|id| m["chat_id"] == id)
+                });
                 for m in messages {
                     m["platform"] = json!(platform);
                     m["account"] = json!(account);
                 }
             }
-            if serde_json::to_vec(&result)
-                .map_err(|_| "응답 인코딩 실패")?
-                .len()
-                > 60000
-            {
-                return Err("메시지 페이지가 너무 큽니다".into());
+            if superseded {
+                // A complete, already bounded read may still be returned as its
+                // own snapshot. Never repopulate invalidated cursor registries.
+                if result["next_cursor"]
+                    .as_str()
+                    .is_some_and(|s| !s.is_empty())
+                    || result["messages"].as_array().is_none_or(|m| m.len() > 30)
+                    || serde_json::to_vec(&result).map_or(true, |bytes| bytes.len() > 58_000)
+                {
+                    return Err("조회 중 계정 상태가 변경되었습니다. 다시 조회하세요".into());
+                }
+                return Ok(result);
             }
-            return Ok(result);
+            return slot.message_pages.finish(result, &request, seen);
         }
         Err("등록된 계정이 아닙니다".into())
     }
@@ -327,9 +570,10 @@ struct WorkerProcess {
     _child: tokio::process::Child,
     input: tokio::process::ChildStdin,
     output: BufReader<tokio::process::ChildStdout>,
+    _events: Option<live::EventReader>,
 }
 impl WorkerProcess {
-    fn start(config: &AccountConfig) -> Result<Self, String> {
+    fn start(config: &AccountConfig, schedule: &Schedule) -> Result<Self, String> {
         let executable = std::env::current_exe()
             .map_err(|_| "실행 경로 오류")?
             .with_file_name("inboxd-account-worker");
@@ -343,15 +587,21 @@ impl WorkerProcess {
             .env("PATH", "/usr/bin:/bin")
             .env("INBOXD_ACCOUNT_CONFIG", config.config.as_str())
             .env("INBOXD_ACCOUNT_STREAM", "1")
+            .env("INBOXD_ACCOUNT_LIVE", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .map_err(|_| "계정 워커 실행 실패")?;
         let input = child.stdin.take().ok_or("워커 입력 오류")?;
         let output = BufReader::new(child.stdout.take().ok_or("워커 출력 오류")?);
+        let events = live::read_events(
+            child.stderr.take().ok_or("수신 채널 오류")?,
+            schedule.live.clone(),
+        );
         Ok(Self {
+            _events: Some(events),
             _child: child,
             input,
             output,
@@ -383,27 +633,57 @@ impl WorkerProcess {
         Ok(value["result"].clone())
     }
 }
-async fn call_worker(
-    slot: &mut Slot,
+async fn call_account(
+    config: &AccountConfig,
+    backend: &mut AccountBackend,
+    schedule: &Schedule,
     request: &Value,
     runner: Option<WorkerCall>,
 ) -> Result<Value, String> {
     if let Some(run) = runner {
-        return run(&slot.config, request).await;
+        return run(config, request).await;
     }
-    let mut process = match slot.worker.take() {
-        Some(process) => process,
-        None => WorkerProcess::start(&slot.config)?,
-    };
-    let result = tokio::time::timeout(Duration::from_secs(90), process.request(request))
+    let mut io = WorkerTransport { config, schedule };
+    tokio::time::timeout(Duration::from_secs(90), backend.run(request, &mut io))
         .await
-        .unwrap_or_else(|_| Err("메신저 응답 시간 초과".into()));
-    // Discard broken sessions without replaying the operation, especially sends.
-    if result.is_ok() {
-        slot.worker = Some(process);
-    }
-    result
+        .unwrap_or_else(|_| Err("메신저 응답 시간 초과".into()))
 }
+
+struct WorkerTransport<'a> {
+    config: &'a AccountConfig,
+    schedule: &'a Schedule,
+}
+impl ProviderIo for WorkerTransport<'_> {
+    async fn call(&mut self, request: Value) -> Result<Value, String> {
+        let typed =
+            crate::accounts_backend::contract::validate_request(request, &self.config.platform)?;
+        let request = serde_json::to_value(&typed).map_err(|_| "요청 오류")?;
+        // Only this primitive/batch holds the FIFO worker lock. A long traversal
+        // rejoins behind waiting interactive jobs at its next provider call.
+        let mut worker = self.schedule.worker.lock().await;
+        let mut process = match worker.take() {
+            Some(process) => process,
+            None => WorkerProcess::start(self.config, self.schedule)?,
+        };
+        let result = tokio::time::timeout(Duration::from_secs(90), process.request(&request))
+            .await
+            .unwrap_or_else(|_| Err("메신저 응답 시간 초과".into()));
+        let result = result.and_then(|value| {
+            crate::accounts_backend::contract::validate_result(&typed, &value)?;
+            Ok(value)
+        });
+        // Cancellation during our I/O drops our taken process; cancellation while
+        // queued cannot touch the active job's process. Never replay a request.
+        if result.is_ok() {
+            *worker = Some(process);
+        }
+        result
+    }
+}
+
+#[cfg(test)]
+#[path = "accounts_process_tests.rs"]
+mod process_tests;
 
 #[cfg(test)]
 mod tests {
@@ -429,6 +709,76 @@ mod tests {
                 ),
             }
         })
+    }
+    #[tokio::test]
+    async fn direct_send_warms_only_target_account_and_revoked_binding_never_falls_back() {
+        fn isolated<'a>(
+            config: &'a AccountConfig,
+            request: &'a Value,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                assert_eq!(
+                    config.account, "target",
+                    "unrelated account must never load"
+                );
+                match request["op"].as_str() {
+                    Some("chats") => Ok(
+                        json!({"chats":[{"chat_id":"room","title":"room","latest_ts":0,"can_send":true}]}),
+                    ),
+                    Some("send") => Ok(json!({"state":"Sent","receipt":"only-target"})),
+                    _ => panic!("unexpected operation"),
+                }
+            })
+        }
+        let directory = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory.path().canonicalize().unwrap().join("direct.db");
+        let storage = Arc::new(
+            StorageActor::start(inboxd_storage::StorageActorConfig::new(&path, [0x76; 32]))
+                .unwrap(),
+        );
+        let mut accounts = AccountService::new(
+            ["target", "other"]
+                .iter()
+                .map(|account| AccountConfig {
+                    platform: "slack".into(),
+                    account: (*account).into(),
+                    config: Zeroizing::new("{}".into()),
+                })
+                .collect(),
+        )
+        .with_storage(storage.clone());
+        accounts.run_worker = Some(isolated);
+        let registry = crate::CapabilityRegistry::new(vec![]).unwrap();
+        let params = json!({"request_id":"cold-target-123456789","chat":{"platform":"slack","account":"target","chat_id":"room"},"body":"hello"});
+        let outcome = crate::direct_send::execute(
+            &storage,
+            &registry,
+            &accounts,
+            &params,
+            json!({"role":"sender"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome["state"], "Sent");
+        assert!(!accounts.slots[1].slot.lock().await.loaded);
+        let denied = crate::TrustedBinding::new_static("fixed", json!({"v":1,"resource":{"v":1,"kind":"chat","platform":"slack","account":"target","chat_id":"room"},"read":{"mode":"none","limits":null},"write":{"mode":"none","content_mode":"none","reply":false},"receipt":{"level":"none"}})).unwrap();
+        let registry = crate::CapabilityRegistry::new(vec![denied]).unwrap();
+        assert!(registry.revoke("fixed").await);
+        let mut new = params;
+        new["request_id"] = json!("revoked-target-123456789");
+        let error = crate::direct_send::execute(
+            &storage,
+            &registry,
+            &accounts,
+            &new,
+            json!({"role":"sender"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("revoked"), "{error}");
     }
     static RELEASE: tokio::sync::Notify = tokio::sync::Notify::const_new();
     static LOADS: AtomicUsize = AtomicUsize::new(0);
@@ -516,11 +866,27 @@ mod tests {
     }
     #[tokio::test]
     async fn exact_account_scope_and_pending_send_deduplication() {
+        let directory = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("owner-send.db");
+        let actor = Arc::new(
+            StorageActor::start(inboxd_storage::StorageActorConfig::new(
+                &path,
+                vec![0x73; 32],
+            ))
+            .unwrap(),
+        );
         let mut service = AccountService::new(vec![AccountConfig {
             platform: "telegram".into(),
             account: "personal".into(),
             config: Zeroizing::new("{}".into()),
         }]);
+        service.storage = Some(Arc::clone(&actor));
         service.run_worker = Some(fake);
         let directory = service.list(&json!({})).await.unwrap();
         assert_eq!(directory["chats"][0]["display_name"], "원래 이름");
@@ -529,7 +895,13 @@ mod tests {
             service.query("send", &params),
             service.query("send", &params)
         );
-        assert_eq!(one.unwrap(), two.unwrap());
+        let outcomes = [one.unwrap(), two.unwrap()];
+        assert!(outcomes.iter().any(|o| o["state"] == "Sent"));
+        assert!(
+            outcomes
+                .iter()
+                .all(|o| o["state"] == "Sent" || o["state"] == "Uncertain")
+        );
         assert_eq!(SENDS.load(Ordering::SeqCst), 1);
         let mut changed = params.clone();
         changed["body"] = json!("different");
@@ -543,7 +915,184 @@ mod tests {
         let messages = service.query("messages", &params).await.unwrap();
         assert_eq!(messages["messages"].as_array().unwrap().len(), 1);
         assert_eq!(messages["messages"][0]["account"], "personal");
+        drop(service);
+        let mut actor = Arc::try_unwrap(actor).unwrap();
+        actor.shutdown().unwrap();
+        drop(actor);
+        let actor = Arc::new(
+            StorageActor::start(inboxd_storage::StorageActorConfig::new(
+                &path,
+                vec![0x73; 32],
+            ))
+            .unwrap(),
+        );
+        let mut restarted = AccountService::new(vec![AccountConfig {
+            platform: "telegram".into(),
+            account: "personal".into(),
+            config: Zeroizing::new("{}".into()),
+        }])
+        .with_storage(actor);
+        restarted.run_worker = Some(fake);
+        // Known outcomes need neither a provider call nor a fresh directory.
+        assert_eq!(
+            restarted.query("send", &params).await.unwrap()["state"],
+            "Sent"
+        );
+        assert_eq!(SENDS.load(Ordering::SeqCst), 1);
+        let mut fresh = params.clone();
+        fresh["request_id"] = json!("new-request-123456789");
+        assert_eq!(
+            restarted.query("send", &fresh).await.unwrap()["state"],
+            "Sent"
+        );
+        assert_eq!(SENDS.load(Ordering::SeqCst), 2);
     }
+    static OVERLAP_SEND_ENTERED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+    static OVERLAP_SEND_RELEASE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+    static OVERLAP_READ_ENTERED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+    static OVERLAP_READ_RELEASE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+    static OVERLAP_DIR_ENTERED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+    static OVERLAP_DIR_RELEASE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+    static OVERLAP_GATE_DIR: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    static OVERLAP_SENDS: AtomicUsize = AtomicUsize::new(0);
+    fn overlap<'a>(
+        config: &'a AccountConfig,
+        request: &'a Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            match request["op"].as_str() {
+                Some("send") => {
+                    OVERLAP_SENDS.fetch_add(1, Ordering::SeqCst);
+                    OVERLAP_SEND_ENTERED.notify_one();
+                    OVERLAP_SEND_RELEASE.notified().await;
+                    Ok(json!({"state":"Sent","receipt":"accepted"}))
+                }
+                Some("messages") => {
+                    OVERLAP_READ_ENTERED.notify_one();
+                    OVERLAP_READ_RELEASE.notified().await;
+                    Ok(json!({"messages":[],"next_cursor":"pre-send-cursor","complete":false}))
+                }
+                Some("chats") if OVERLAP_GATE_DIR.load(Ordering::SeqCst) => {
+                    OVERLAP_DIR_ENTERED.notify_one();
+                    OVERLAP_DIR_RELEASE.notified().await;
+                    fake(config, request).await
+                }
+                _ => fake(config, request).await,
+            }
+        })
+    }
+    #[tokio::test]
+    async fn send_overlap_fences_read_and_directory_publication_even_after_cancellation_and_restart()
+     {
+        for cancel in [true, false] {
+            OVERLAP_GATE_DIR.store(false, Ordering::SeqCst);
+            let directory = tempfile::tempdir().unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            let path = directory.path().canonicalize().unwrap().join("overlap.db");
+            let actor = Arc::new(
+                StorageActor::start(inboxd_storage::StorageActorConfig::new(&path, [0x75; 32]))
+                    .unwrap(),
+            );
+            let configs = vec![AccountConfig {
+                platform: "kakao".into(),
+                account: "a".into(),
+                config: Zeroizing::new("{}".into()),
+            }];
+            let mut service = AccountService::new(configs.clone()).with_storage(Arc::clone(&actor));
+            service.run_worker = Some(overlap);
+            service.list(&json!({})).await.unwrap();
+            let service = Arc::new(service);
+            let params = json!({"platform":"kakao","account":"a","chat_id":"room","body":"new preview","request_id":"overlap-send-123456"});
+            let sender = Arc::clone(&service);
+            let sent_params = params.clone();
+            let send = tokio::spawn(async move { sender.query("send", &sent_params).await });
+            OVERLAP_SEND_ENTERED.notified().await;
+            let reader = Arc::clone(&service);
+            let read = tokio::spawn(async move {
+                reader
+                    .query(
+                        "messages",
+                        &json!({"platform":"kakao","account":"a","chat_id":"room"}),
+                    )
+                    .await
+            });
+            OVERLAP_READ_ENTERED.notified().await;
+            OVERLAP_GATE_DIR.store(true, Ordering::SeqCst);
+            service
+                .list(&json!({"background":true,"refresh":true}))
+                .await
+                .unwrap();
+            OVERLAP_DIR_ENTERED.notified().await;
+            if cancel {
+                send.abort();
+                assert!(send.await.unwrap_err().is_cancelled());
+            } else {
+                OVERLAP_SEND_RELEASE.notify_one();
+                assert_eq!(send.await.unwrap().unwrap()["state"], "Sent");
+            }
+            OVERLAP_READ_RELEASE.notify_one();
+            assert!(
+                read.await.unwrap().is_err(),
+                "overlapping cursor must not survive send cancellation/completion"
+            );
+            OVERLAP_DIR_RELEASE.notify_one();
+            service.list(&json!({})).await.unwrap();
+            {
+                let slot = service.slots[0].slot.lock().await;
+                assert!(
+                    slot.backend.is_none(),
+                    "overlapping jobs must not restore stale backend cache"
+                );
+                assert_eq!(
+                    slot.chats[0]["preview"],
+                    if cancel { "hi" } else { "new preview" }
+                );
+            }
+            drop(service);
+            let mut actor = Arc::try_unwrap(actor).unwrap();
+            actor.shutdown().unwrap();
+            drop(actor);
+            let actor =
+                StorageActor::start(inboxd_storage::StorageActorConfig::new(&path, [0x75; 32]))
+                    .unwrap();
+            let mut restarted = AccountService::new(configs).with_storage(Arc::new(actor));
+            restarted.run_worker = Some(overlap);
+            let count = OVERLAP_SENDS.load(Ordering::SeqCst);
+            assert_eq!(
+                restarted.query("send", &params).await.unwrap()["state"],
+                if cancel { "Uncertain" } else { "Sent" }
+            );
+            assert_eq!(
+                OVERLAP_SENDS.load(Ordering::SeqCst),
+                count,
+                "restart must not invoke provider again"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn directory_admission_overload_preserves_healthy_snapshot_and_send_capacity() {
+        let mut service = AccountService::new(vec![AccountConfig {
+            platform: "kakao".into(),
+            account: "a".into(),
+            config: Zeroizing::new("{}".into()),
+        }]);
+        service.run_worker = Some(fake);
+        service.list(&json!({})).await.unwrap();
+        let reads: Vec<_> = (0..3)
+            .map(|_| service.slots[0].schedule.admit(false).unwrap())
+            .collect();
+        let result = service.list(&json!({"refresh":true})).await.unwrap();
+        assert_eq!(result["errors"], json!([]));
+        assert!(!service.slots[0].slot.lock().await.failed);
+        assert!(service.slots[0].schedule.admit(true).is_ok());
+        drop(reads);
+    }
+
     #[test]
     fn directory_rejects_bad_ids_and_keeps_authority_out_of_provider_payload() {
         let config = AccountConfig {

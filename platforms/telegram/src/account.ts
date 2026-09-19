@@ -1,10 +1,11 @@
+import { readSelectedAttachment } from "../../../packages/host/src/attachments.ts";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { packagedTdlibRuntime } from "./worker-entrypoint.ts";
 import { createProductionTdlibPort } from "./production-tdlib.ts";
-import {
-  mapBounded,
-  type AccountAdapter,
-  type AccountMessage,
-} from "../../../packages/accounts/src/contracts.ts";
+import type { AccountAdapter } from "../../../packages/accounts/src/contracts.ts";
+import type { TdlibUserClientPort } from "./tdlib-port.ts";
 export async function createTelegramAccount(config: {
   api_id: number;
   api_hash: string;
@@ -19,10 +20,6 @@ export async function createTelegramAccount(config: {
     filesDirectory: config.files_directory,
     tdjsonPath: packagedTdlibRuntime()?.tdjsonPath ?? config.tdjson_path,
   });
-  const query = async (q: Record<string, unknown>) => {
-    if (!port.accountQuery) throw new Error("Telegram 세션 확인 필요");
-    return port.accountQuery(q);
-  };
   const deadline = Date.now() + 15000;
   while (true) {
     const state = await port.getAuthorizationState();
@@ -39,133 +36,110 @@ export async function createTelegramAccount(config: {
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  const names = new Map<string, string>();
-  async function message(m: any): Promise<AccountMessage> {
-    const id = String(m.sender_id?.user_id ?? m.sender_id?.chat_id ?? "");
-    let name = names.get(id);
-    if (!name) {
-      const sender = m.sender_id?.user_id
-        ? await query({ _: "getUser", user_id: Number(id) })
-        : await query({ _: "getChat", chat_id: Number(id) });
-      name =
-        sender.title ??
-        [sender.first_name, sender.last_name].filter(Boolean).join(" ");
-      names.set(id, name || "이름 없음");
-    }
-    return {
-      id: String(m.id),
-      chat_id: String(m.chat_id),
-      author_id: id,
-      author_name: name || "이름 없음",
-      ts: m.date,
-      body:
-        m.content?.text?.text ??
-        m.content?.caption?.text ??
-        `[${String(m.content?.["@type"] ?? "미디어").replace(/^message/, "")}]`,
-    };
-  }
-  return {
-    close: () => port.close?.(),
-    async run(req) {
-      if (req.op === "chats") {
-        const ids = new Set<number>();
-        for (const type of ["chatListMain", "chatListArchive"]) {
-          for (let i = 0; i < 100; i++) {
-            try {
-              await query({
-                _: "loadChats",
-                chat_list: { _: type },
-                limit: 200,
-              });
-            } catch (error) {
-              if ((error as { code?: number }).code === 404) break;
-              throw error;
-            }
-            if (i === 99) throw new Error("Telegram 목록 로드 제한");
-          }
-          const page = await query({
-            _: "getChats",
-            chat_list: { _: type },
-            limit: 20000,
-          });
-          for (const id of page.chat_ids ?? []) ids.add(id);
+  return createTelegramAdapter(port);
+}
+
+/** Provider operations only; traversal, caching and result paging belong to Rust. */
+export function createTelegramAdapter(port: TdlibUserClientPort): AccountAdapter {
+  const query = async (q: Record<string, unknown>) => {
+    if (!port.accountQuery) throw new Error("Telegram 세션 확인 필요");
+    return port.accountQuery(q);
+  };
+  const message = (m: any) => ({
+    id: String(m.id), chat_id: String(m.chat_id),
+    author_id: String(m.sender_id?.user_id ?? m.sender_id?.chat_id ?? ""),
+    author_kind: m.sender_id?.user_id != null ? "user" : "chat",
+    author_name: "",
+    ts: m.date,
+    body: m.content?.text?.text ?? (m.content?.caption?.text || (m.content?.document?.file_name ? `[파일] ${m.content.document.file_name}` : undefined)) ??
+      `[${String(m.content?.["@type"] ?? "미디어").replace(/^message/, "")}]`,
+  });
+  const run: AccountAdapter["run"] = async (req) => {
+    const list = { _: "params" in req && "list" in req.params && req.params.list === "archive" ? "chatListArchive" : "chatListMain" };
+    switch (req.op) {
+      case "telegram_load_directory":
+        try {
+          await query({ _: "loadChats", chat_list: list, limit: req.limit });
+          return { complete: false };
+        } catch (error) {
+          if ((error as { code?: number }).code === 404) return { complete: true };
+          throw error;
         }
-        const chats = await mapBounded([...ids], 8, async (id) => {
-          const c = await query({ _: "getChat", chat_id: id });
-          return {
-            chat_id: String(c.id),
-            title: c.title,
-            latest_ts: c.last_message?.date ?? 0,
-            preview:
-              c.last_message?.content?.text?.text ??
-              c.last_message?.content?.caption?.text ??
-              "",
-            can_send:
-              c.permissions?.can_send_basic_messages ??
-              c.permissions?.can_send_messages ??
-              true,
-            unread: c.unread_count,
-          };
-        });
-        return { chats, complete: true };
+      case "telegram_list_directory": {
+        const result = await query({ _: "getChats", chat_list: list, limit: req.limit });
+        if (!Array.isArray(result.chat_ids)) throw new Error("Malformed Telegram directory");
+        return { ids: result.chat_ids.map(String) };
       }
-      if (req.op === "send") {
-        const result = await port.sendTextMessage({
-          chat_id: req.chat_id!,
-          text: req.body!,
-          reply_to_message_id: null,
-          timeout_ms: 20000,
-        });
-        return { state: "Sent", receipt: String(result.id), messages: [await message(result)] };
+      case "telegram_chat": {
+        const c = await query({ _: "getChat", chat_id: Number(req.chat_id) });
+        return { chats: [{ chat_id: String(c.id), title: c.title,
+          latest_ts: c.last_message?.date ?? 0,
+          preview: c.last_message?.content?.text?.text ?? c.last_message?.content?.caption?.text ?? "",
+          can_send: c.permissions?.can_send_basic_messages ?? c.permissions?.can_send_messages ?? true,
+          unread: c.unread_count }] };
       }
-      if (req.op === "search") {
+      case "telegram_sender": {
+        const sender = await query(req.params?.kind === "user"
+          ? { _: "getUser", user_id: Number(req.params?.id) }
+          : { _: "getChat", chat_id: Number(req.params?.id) });
+        return { name: sender.title ?? [sender.first_name, sender.last_name].filter(Boolean).join(" ") };
+      }
+      case "telegram_history": {
+        const items = await port.getChatHistory({ chat_id: req.chat_id!,
+          from_message_id: req.message_id ?? "0", offset: 0,
+          limit: req.limit!, only_local: false });
+        return { messages: items.map(message) };
+      }
+      case "telegram_search": {
         const result = req.chat_id
-          ? await query({
-              _: "searchChatMessages",
-              chat_id: Number(req.chat_id),
-              query: req.query,
-              sender_id: null,
-              from_message_id: Number(req.cursor ?? 0),
-              offset: 0,
-              limit: 100,
-              filter: null,
-              message_thread_id: 0,
-              saved_messages_topic_id: 0,
-            })
-          : await query({
-              _: "searchMessages",
-              chat_list: null,
-              query: req.query,
-              offset: req.cursor ?? "",
-              limit: 100,
-              filter: null,
-              chat_type_filter: null,
-              min_date: 0,
-              max_date: 0,
-            });
-        const items = result.messages ?? [];
-        return {
-          messages: await mapBounded(items, 4, message),
-          next_cursor: req.chat_id
-            ? items.length
-              ? String(items.at(-1).id)
-              : undefined
-            : result.next_offset || undefined,
-          complete: items.length === 0,
-        };
+          ? await query({ _: "searchChatMessages", chat_id: Number(req.chat_id),
+              query: req.query, sender_id: null, from_message_id: Number(req.cursor ?? 0),
+              offset: 0, limit: req.limit, filter: null, message_thread_id: 0, saved_messages_topic_id: 0 })
+          : await query({ _: "searchMessages", chat_list: null, query: req.query,
+              offset: req.cursor ?? "", limit: req.limit, filter: null,
+              chat_type_filter: null, min_date: 0, max_date: 0 });
+        if (!Array.isArray(result.messages)) throw new Error("Malformed Telegram search results");
+        return { messages: result.messages.map(message), next_offset: result.next_offset };
       }
-      const items = await port.getChatHistory({
-        chat_id: req.chat_id!,
-        from_message_id: req.message_id ?? req.cursor ?? "0",
-        offset: 0,
-        limit: 30,
-        only_local: false,
+      case "telegram_send_file": {
+        if (!port.sendDocumentMessage) return { state: "Failed", reason: "파일 전송을 지원하지 않는 세션입니다" };
+        let bytes: Buffer;
+        try { bytes = await readSelectedAttachment(req.file); }
+        catch { return { state: "Failed", reason: "파일을 읽을 수 없거나 선택 이후 변경되었습니다" }; }
+        const directory = await mkdtemp(join(tmpdir(), "inboxd-upload-"));
+        try {
+          const path = join(directory, req.file.name);
+          await writeFile(path, bytes, { mode: 0o600, flag: "wx" });
+          const result = await port.sendDocumentMessage({ chat_id: req.chat_id, path, timeout_ms: 80_000 });
+          return { state: "Sent", receipt: String(result.id) };
+        } finally { void rm(directory, { recursive: true, force: true }).catch(() => {}); }
+      }
+      case "telegram_send": {
+        const result = await port.sendTextMessage({ chat_id: req.chat_id!, text: req.body!,
+          reply_to_message_id: null, timeout_ms: 20000 });
+        return { state: "Sent", receipt: String(result.id), messages: [message(result)] };
+      }
+      default: throw new Error(`Unsupported Telegram provider operation: ${req.op}`);
+    }
+  };
+  return {
+    run, close: () => port.close?.(),
+    async listen(emit) {
+      if (!port.onAccountUpdate) { emit({ event: "state", state: "unsupported" }); return () => {}; }
+      emit({ event: "state", state: "disconnected" });
+      const unsubscribe = port.onAccountUpdate(update => {
+        const type = update["@type"];
+        if (type === "updateConnectionState") {
+          const state = update.state as Record<string, unknown> | undefined;
+          emit({ event: "state", state: state?.["@type"] === "connectionStateReady" ? "connected" : "disconnected" });
+        } else if (type === "updateAuthorizationState") {
+          const auth = update.authorization_state as Record<string, unknown> | undefined;
+          if (auth?.["@type"] !== "authorizationStateReady") emit({ event: "state", state: "disconnected" });
+        } else if (["updateNewMessage", "updateMessageContent", "updateDeleteMessages", "updateChatLastMessage", "updateChatTitle", "updateChatReadInbox", "updateChatPosition"].includes(String(type))) {
+          emit({ event: "changed" });
+        }
       });
-      return {
-        messages: (await mapBounded(items, 4, message)).reverse(),
-        next_cursor: items.length ? String(items.at(-1)!.id) : undefined,
-        complete: items.length === 0,
-      };
+      return unsubscribe;
     },
   };
 }

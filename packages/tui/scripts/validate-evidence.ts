@@ -50,6 +50,10 @@ for (const name of names) {
 }
 
 const sourcePaths = {
+  workspace: join(import.meta.dir, "..", "src", "workspace.ts"),
+  model: join(import.meta.dir, "..", "src", "workspace-model.ts"),
+  theme: join(import.meta.dir, "..", "src", "theme.ts"),
+  text: join(import.meta.dir, "..", "src", "text.ts"),
   renderer: join(import.meta.dir, "..", "src", "index.ts"),
   runtime: join(import.meta.dir, "..", "src", "runtime.ts"),
   generator: join(import.meta.dir, "render-evidence.ts"),

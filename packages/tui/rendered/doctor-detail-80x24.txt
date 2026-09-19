@@ -1,5 +1,5 @@
 INBOXD · connected · account ?                                                  
-1 INBOX | 2 SEARCH | 3 CHAT | 4 APPROVALS | ● DOCTOR                            
+1 INBOX | 2 SEARCH | 3 CHAT | 4 HISTORY | ● DOCTOR                              
 Resource: none                                                                  
 READ unknown                                                                    
 WRITE unknown                                                                   
@@ -21,4 +21,4 @@ Back: Esc · PgUp/PgDn scroll · Home top (1–4/4)
                                                                                 
                                                                                 
                                                                                 
-1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply a Esc ? q                   
+1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply s-status Esc ? q            

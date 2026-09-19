@@ -38,6 +38,12 @@ export interface TdlibSendTextRequest {
   readonly timeout_ms: number;
 }
 
+export interface TdlibSendDocumentRequest {
+  readonly chat_id: string;
+  readonly path: string;
+  readonly timeout_ms: number;
+}
+
 export type TdlibRuntimeAvailability =
   | { readonly available: true }
   | { readonly available: false; readonly reason: string };
@@ -53,9 +59,11 @@ export interface TdlibUserClientPort {
   getChat(chatId: string): Promise<TdlibChat>;
   getChatHistory(request: TdlibHistoryRequest): Promise<readonly TdlibMessage[]>;
   sendTextMessage(request: TdlibSendTextRequest): Promise<TdlibMessage>;
+  sendDocumentMessage?(request: TdlibSendDocumentRequest): Promise<TdlibMessage>;
   getMessage(chatId: string, messageId: string): Promise<TdlibMessage>;
   /** Internal account-directory adapter seam; never exposed as a client RPC. */
   accountQuery?(query: Record<string, unknown>): Promise<Record<string, any>>;
+  onAccountUpdate?(listener: (update: Record<string, unknown>) => void): () => void;
   close?(): Promise<void>;
 }
 

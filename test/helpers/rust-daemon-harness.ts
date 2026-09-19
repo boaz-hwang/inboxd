@@ -76,6 +76,8 @@ type DaemonProcess = ReturnType<typeof Bun.spawn>;
 export type FixedWorkerKind = "slack" | "telegram" | "kakao-local" | "kakao-official";
 
 export interface RustDaemonHarnessOptions {
+  /** Match the installed CLI's HOME/.inboxd/{config.json,state/sock} layout. */
+  readonly installedLayout?: boolean;
   readonly providers?: readonly Record<string, unknown>[];
   /** Release fake worker copied under each production-fixed sibling name. */
   readonly fixedWorkerBinary?: string;
@@ -97,10 +99,11 @@ function assertPrivateDirectory(path: string, label: string): void {
   if (typeof process.getuid === "function" && stat.uid !== process.getuid()) throw new Error(`${label} must be owned by the fixture user`);
 }
 
-function createPrivateFixtureRoot(): string {
+function createPrivateFixtureRoot(installedLayout = false): string {
   mkdirSync(FIXTURE_PARENT, { recursive: true, mode: 0o700 });
   assertPrivateDirectory(FIXTURE_PARENT, "Rust daemon fixture parent");
-  const root = mkdtempSync(join(FIXTURE_PARENT, "inboxd-rd-"));
+  // Installed layout adds /state; keep its Unix socket below macOS SUN_LEN.
+  const root = mkdtempSync(join(FIXTURE_PARENT, installedLayout ? "i-" : "inboxd-rd-"));
   assertPrivateDirectory(root, "Rust daemon fixture root");
   return root;
 }
@@ -138,13 +141,15 @@ export class RustDaemonHarness {
   private process: CapturedProcess | undefined;
 
   constructor(options: RustDaemonHarnessOptions = {}) {
-    this.root = createPrivateFixtureRoot();
-    this.stateDir = join(this.root, ".inboxd");
+    this.root = createPrivateFixtureRoot(options.installedLayout);
+    const productRoot = join(this.root, ".inboxd");
+    this.stateDir = options.installedLayout ? join(productRoot, "state") : productRoot;
     this.databasePath = join(this.stateDir, "inboxd.db");
     this.socketPath = join(this.stateDir, "sock");
-    this.configPath = join(this.root, "config.json");
+    this.configPath = join(options.installedLayout ? productRoot : this.root, "config.json");
     this.providers = options.providers ?? [];
-    mkdirSync(this.stateDir, { mode: 0o700 });
+    mkdirSync(productRoot, { mode: 0o700 });
+    if (options.installedLayout) mkdirSync(this.stateDir, { mode: 0o700 });
     if (options.fixedWorkerBinary !== undefined) {
       if (!existsSync(options.fixedWorkerBinary)) throw new Error("fixedWorkerBinary must name the built release fake worker executable");
       const binDir = join(this.root, "bin");

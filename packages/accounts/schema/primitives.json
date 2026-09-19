@@ -1,0 +1,832 @@
+{
+  "types": {
+    "Profile": {
+      "fields": {
+        "display_name": {
+          "optional": "string"
+        }
+      }
+    },
+    "SlackUser": {
+      "fields": {
+        "id": {
+          "optional": "string"
+        },
+        "profile": {
+          "optional": "Profile"
+        },
+        "real_name": {
+          "optional": "string"
+        },
+        "name": {
+          "optional": "string"
+        }
+      }
+    },
+    "SlackChannelId": {
+      "fields": {
+        "id": "nonempty"
+      }
+    },
+    "SlackBotProfile": {
+      "fields": {
+        "name": {
+          "optional": "string"
+        }
+      }
+    },
+    "SlackMessage": {
+      "fields": {
+        "ts": "nonempty",
+        "user": {
+          "optional": "string"
+        },
+        "text": {
+          "optional": "string"
+        },
+        "channel": {
+          "optional": "SlackChannelId"
+        },
+        "bot_profile": {
+          "optional": "SlackBotProfile"
+        },
+        "username": {
+          "optional": "string"
+        }
+      }
+    },
+    "SlackRoom": {
+      "fields": {
+        "id": "nonempty",
+        "is_member": {
+          "optional": "boolean"
+        },
+        "is_im": {
+          "optional": "boolean"
+        },
+        "is_mpim": {
+          "optional": "boolean"
+        },
+        "user": {
+          "optional": "string"
+        },
+        "name": {
+          "optional": "string"
+        },
+        "is_archived": {
+          "optional": "boolean"
+        },
+        "unread_count": {
+          "optional": "number"
+        },
+        "latest": {
+          "optional": "SlackMessage"
+        }
+      }
+    },
+    "SlackMarker": {
+      "fields": {
+        "id": "string",
+        "latest": {
+          "optional": "string"
+        },
+        "updated": {
+          "optional": {
+            "union": [
+              "string",
+              "number"
+            ]
+          }
+        },
+        "history_invalid": {
+          "optional": {
+            "union": [
+              "string",
+              "number",
+              "boolean"
+            ]
+          }
+        }
+      }
+    },
+    "SlackMetadata": {
+      "fields": {
+        "next_cursor": {
+          "optional": "string"
+        }
+      }
+    },
+    "SlackPagination": {
+      "fields": {
+        "page_count": "integer"
+      }
+    },
+    "SlackMatches": {
+      "fields": {
+        "matches": {
+          "array": "SlackMessage"
+        },
+        "pagination": {
+          "optional": "SlackPagination"
+        }
+      }
+    },
+    "KakaoLatest": {
+      "fields": {
+        "sent_at": {
+          "optional": "number"
+        },
+        "message": {
+          "optional": "string"
+        }
+      }
+    },
+    "KakaoRoom": {
+      "fields": {
+        "chat_id": "nonempty",
+        "type": {
+          "optional": "string"
+        },
+        "title": {
+          "optional": "string"
+        },
+        "display_name": {
+          "optional": "string"
+        },
+        "last_message": {
+          "optional": "KakaoLatest"
+        },
+        "unread_count": {
+          "optional": "number"
+        }
+      }
+    },
+    "KakaoMember": {
+      "fields": {
+        "user_id": "nonempty",
+        "nickname": {
+          "optional": "string"
+        }
+      }
+    },
+    "AccountMessage": {
+      "fields": {
+        "id": "nonempty",
+        "chat_id": "nonempty",
+        "author_id": "string",
+        "author_name": "string",
+        "ts": "number",
+        "body": "string",
+        "author_kind": {
+          "optional": {
+            "enum": [
+              "user",
+              "chat"
+            ]
+          }
+        }
+      }
+    },
+    "AccountChat": {
+      "fields": {
+        "chat_id": "nonempty",
+        "title": "string",
+        "latest_ts": "number",
+        "preview": "string",
+        "can_send": "boolean",
+        "unread": {
+          "optional": "number"
+        }
+      }
+    },
+    "SlackPostedMessage": {
+      "fields": {
+        "ts": {
+          "optional": "string"
+        },
+        "user": {
+          "optional": "string"
+        },
+        "text": {
+          "optional": "string"
+        },
+        "channel": {
+          "optional": "SlackChannelId"
+        },
+        "bot_profile": {
+          "optional": "SlackBotProfile"
+        },
+        "username": {
+          "optional": "string"
+        }
+      }
+    },
+    "SlackListedUser": {
+      "fields": {
+        "id": "nonempty",
+        "profile": {
+          "optional": "Profile"
+        },
+        "real_name": {
+          "optional": "string"
+        },
+        "name": {
+          "optional": "string"
+        }
+      }
+    },
+    "LocalAttachment": {
+      "fields": {
+        "path": "nonempty",
+        "name": "nonempty",
+        "size": "file_size",
+        "sha256": "nonempty"
+      }
+    }
+  },
+  "operations": {
+    "slack.users.list": {
+      "request": {
+        "fields": {
+          "params": {
+            "fields": {
+              "limit": "integer",
+              "cursor": "string"
+            }
+          }
+        }
+      },
+      "result": {
+        "fields": {
+          "data": {
+            "fields": {
+              "members": {
+                "array": "SlackListedUser"
+              },
+              "response_metadata": {
+                "optional": "SlackMetadata"
+              }
+            }
+          }
+        }
+      }
+    },
+    "slack.users.info": {
+      "request": {
+        "fields": {
+          "params": {
+            "fields": {
+              "user": "string"
+            }
+          }
+        }
+      },
+      "result": {
+        "fields": {
+          "data": {
+            "fields": {
+              "user": "SlackUser"
+            }
+          }
+        }
+      }
+    },
+    "slack.client.counts": {
+      "request": {
+        "fields": {
+          "params": {
+            "fields": {}
+          }
+        }
+      },
+      "result": {
+        "fields": {
+          "data": {
+            "fields": {
+              "channels": {
+                "optional": {
+                  "array": "SlackMarker"
+                }
+              },
+              "ims": {
+                "optional": {
+                  "array": "SlackMarker"
+                }
+              },
+              "mpims": {
+                "optional": {
+                  "array": "SlackMarker"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "slack.conversations.list": {
+      "request": {
+        "fields": {
+          "params": {
+            "fields": {
+              "types": "string",
+              "exclude_archived": "boolean",
+              "limit": "integer",
+              "cursor": "string"
+            }
+          }
+        }
+      },
+      "result": {
+        "fields": {
+          "data": {
+            "fields": {
+              "channels": {
+                "array": "SlackRoom"
+              },
+              "response_metadata": {
+                "optional": "SlackMetadata"
+              }
+            }
+          }
+        }
+      }
+    },
+    "slack.conversations.members": {
+      "request": {
+        "fields": {
+          "params": {
+            "fields": {
+              "channel": "string",
+              "limit": "integer",
+              "cursor": "string"
+            }
+          }
+        }
+      },
+      "result": {
+        "fields": {
+          "data": {
+            "fields": {
+              "members": {
+                "array": "string"
+              },
+              "response_metadata": {
+                "optional": "SlackMetadata"
+              }
+            }
+          }
+        }
+      }
+    },
+    "slack.conversations.history": {
+      "request": {
+        "fields": {
+          "params": {
+            "fields": {
+              "channel": "string",
+              "limit": "integer",
+              "cursor": {
+                "optional": "string"
+              },
+              "latest": {
+                "optional": "string"
+              },
+              "inclusive": {
+                "optional": "boolean"
+              }
+            }
+          }
+        }
+      },
+      "result": {
+        "fields": {
+          "data": {
+            "fields": {
+              "messages": {
+                "array": "SlackMessage"
+              },
+              "has_more": {
+                "optional": "boolean"
+              },
+              "response_metadata": {
+                "optional": "SlackMetadata"
+              }
+            }
+          }
+        }
+      }
+    },
+    "slack.search.messages": {
+      "request": {
+        "fields": {
+          "params": {
+            "fields": {
+              "query": "string",
+              "count": "integer",
+              "page": "integer",
+              "sort": {
+                "enum": [
+                  "timestamp"
+                ]
+              },
+              "sort_dir": {
+                "enum": [
+                  "desc"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "result": {
+        "fields": {
+          "data": {
+            "fields": {
+              "messages": "SlackMatches"
+            }
+          }
+        }
+      }
+    },
+    "slack.chat.postMessage": {
+      "request": {
+        "fields": {
+          "params": {
+            "fields": {
+              "channel": "string",
+              "text": "string",
+              "client_msg_id": "string"
+            }
+          }
+        }
+      },
+      "result": {
+        "fields": {
+          "data": {
+            "fields": {
+              "ts": "nonempty",
+              "message": {
+                "optional": "SlackPostedMessage"
+              }
+            }
+          }
+        }
+      }
+    },
+    "kakao_metadata": {
+      "request": {
+        "fields": {}
+      },
+      "result": {
+        "fields": {
+          "own_id": "string",
+          "has_details": "boolean"
+        }
+      }
+    },
+    "kakao_rooms": {
+      "request": {
+        "fields": {
+          "params": {
+            "fields": {
+              "resolve_titles": "boolean"
+            }
+          }
+        }
+      },
+      "result": {
+        "fields": {
+          "data": {
+            "array": "KakaoRoom"
+          }
+        }
+      }
+    },
+    "kakao_detail": {
+      "request": {
+        "fields": {
+          "chat_id": "nonempty"
+        }
+      },
+      "result": {
+        "fields": {
+          "data": "KakaoRoom"
+        }
+      }
+    },
+    "kakao_page": {
+      "request": {
+        "fields": {
+          "chat_id": "nonempty",
+          "cursor": {
+            "optional": "string"
+          },
+          "limit": {
+            "optional": "integer"
+          }
+        }
+      },
+      "result": {
+        "fields": {
+          "messages": {
+            "array": "AccountMessage"
+          },
+          "complete": "boolean",
+          "next_cursor": {
+            "optional": "string"
+          }
+        }
+      }
+    },
+    "kakao_members": {
+      "request": {
+        "fields": {
+          "chat_id": "nonempty",
+          "ids": {
+            "array": "string"
+          }
+        }
+      },
+      "result": {
+        "fields": {
+          "data": {
+            "array": "KakaoMember"
+          }
+        }
+      }
+    },
+    "kakao_self_members": {
+      "request": {
+        "fields": {
+          "chat_id": "nonempty"
+        }
+      },
+      "result": {
+        "fields": {
+          "data": {
+            "array": "KakaoMember"
+          }
+        }
+      }
+    },
+    "kakao_send": {
+      "request": {
+        "fields": {
+          "chat_id": "nonempty",
+          "body": "nonempty"
+        }
+      },
+      "result": {
+        "fields": {
+          "state": {
+            "enum": [
+              "Sent"
+            ]
+          },
+          "receipt": "nonempty"
+        }
+      }
+    },
+    "telegram_load_directory": {
+      "request": {
+        "fields": {
+          "params": {
+            "fields": {
+              "list": {
+                "enum": [
+                  "main",
+                  "archive"
+                ]
+              }
+            }
+          },
+          "limit": "integer"
+        }
+      },
+      "result": {
+        "fields": {
+          "complete": "boolean"
+        }
+      }
+    },
+    "telegram_list_directory": {
+      "request": {
+        "fields": {
+          "params": {
+            "fields": {
+              "list": {
+                "enum": [
+                  "main",
+                  "archive"
+                ]
+              }
+            }
+          },
+          "limit": "integer"
+        }
+      },
+      "result": {
+        "fields": {
+          "ids": {
+            "array": "string"
+          }
+        }
+      }
+    },
+    "telegram_chat": {
+      "request": {
+        "fields": {
+          "chat_id": "nonempty"
+        }
+      },
+      "result": {
+        "fields": {
+          "chats": {
+            "array": "AccountChat"
+          }
+        }
+      }
+    },
+    "telegram_sender": {
+      "request": {
+        "fields": {
+          "params": {
+            "fields": {
+              "kind": {
+                "enum": [
+                  "user",
+                  "chat"
+                ]
+              },
+              "id": "string"
+            }
+          }
+        }
+      },
+      "result": {
+        "fields": {
+          "name": "string"
+        }
+      }
+    },
+    "telegram_history": {
+      "request": {
+        "fields": {
+          "chat_id": "nonempty",
+          "message_id": {
+            "optional": "string"
+          },
+          "limit": "integer"
+        }
+      },
+      "result": {
+        "fields": {
+          "messages": {
+            "array": "AccountMessage"
+          }
+        }
+      }
+    },
+    "telegram_search": {
+      "request": {
+        "fields": {
+          "chat_id": {
+            "optional": "string"
+          },
+          "query": "nonempty",
+          "cursor": {
+            "optional": "string"
+          },
+          "limit": "integer"
+        }
+      },
+      "result": {
+        "fields": {
+          "messages": {
+            "array": "AccountMessage"
+          },
+          "next_offset": {
+            "optional": "string"
+          }
+        }
+      }
+    },
+    "telegram_send": {
+      "request": {
+        "fields": {
+          "chat_id": "nonempty",
+          "body": "nonempty"
+        }
+      },
+      "result": {
+        "fields": {
+          "state": {
+            "enum": [
+              "Sent"
+            ]
+          },
+          "receipt": "nonempty",
+          "messages": {
+            "array": "AccountMessage"
+          }
+        }
+      }
+    },
+    "slack_send_file": {
+      "request": {
+        "fields": {
+          "chat_id": "nonempty",
+          "file": "LocalAttachment"
+        }
+      },
+      "result": {
+        "union": [
+          {
+            "fields": {
+              "state": {
+                "enum": [
+                  "Sent"
+                ]
+              },
+              "receipt": "nonempty"
+            }
+          },
+          {
+            "fields": {
+              "state": {
+                "enum": [
+                  "Failed"
+                ]
+              },
+              "reason": "nonempty"
+            }
+          }
+        ]
+      }
+    },
+    "kakao_send_file": {
+      "request": {
+        "fields": {
+          "chat_id": "nonempty",
+          "file": "LocalAttachment"
+        }
+      },
+      "result": {
+        "union": [
+          {
+            "fields": {
+              "state": {
+                "enum": [
+                  "Sent"
+                ]
+              },
+              "receipt": "nonempty"
+            }
+          },
+          {
+            "fields": {
+              "state": {
+                "enum": [
+                  "Failed"
+                ]
+              },
+              "reason": "nonempty"
+            }
+          }
+        ]
+      }
+    },
+    "telegram_send_file": {
+      "request": {
+        "fields": {
+          "chat_id": "nonempty",
+          "file": "LocalAttachment"
+        }
+      },
+      "result": {
+        "union": [
+          {
+            "fields": {
+              "state": {
+                "enum": [
+                  "Sent"
+                ]
+              },
+              "receipt": "nonempty"
+            }
+          },
+          {
+            "fields": {
+              "state": {
+                "enum": [
+                  "Failed"
+                ]
+              },
+              "reason": "nonempty"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

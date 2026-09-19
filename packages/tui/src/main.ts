@@ -1,9 +1,9 @@
+import { readOwnerToken } from "../../host/src/owner-token.ts";
 import { homedir } from "node:os";
-import { lstatSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 import { ReconnectingProtocolClient, type ReconnectingProtocolClientOptions, type ClientRole } from "../../protocol/src/index.ts";
-import { createTuiController, type TuiController } from "./index.ts";
+import { createTuiController, type TuiController, type TuiState } from "./index.ts";
 import { mountInteractiveTui } from "./runtime.ts";
 import { connectTuiUdsTransport } from "./transport.ts";
 
@@ -11,7 +11,7 @@ export const defaultTuiSocketPath = join(homedir(), ".inboxd", "state", "sock");
 
 export interface RunTuiOptions {
   readonly socketPath?: string;
-  readonly role?: Extract<ClientRole, "reader" | "approver">;
+  readonly role?: Extract<ClientRole, "reader" | "sender">;
 }
 
 export interface RunTuiEntrypointOptions {
@@ -20,23 +20,14 @@ export interface RunTuiEntrypointOptions {
   readonly report: (message: string) => unknown;
 }
 
-/** Reads the daemon's owner-only local approver token without importing daemon internals. */
-export function readTuiApproverToken(socketPath: string): string {
-  const path = join(dirname(socketPath), "approver.token");
-  const stat = lstatSync(path);
-  if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600) {
-    throw new Error("local approver token is not an owner-only regular file");
-  }
-  const token = readFileSync(path, "utf8").trim();
-  if (!/^[A-Za-z0-9_-]{32,}$/.test(token)) throw new Error("local approver token is invalid");
-  return token;
-}
 
 function isTTY(): boolean {
   return Boolean(process.stdin.isTTY && process.stdout.isTTY);
 }
 
 export interface ConnectedTuiControllerOptions extends ReconnectingProtocolClientOptions {
+  /** Optional initial workspace state; omitted modes retain automatic detection. */
+  readonly initialState?: TuiState;
   /** Injectable timer for deterministic reconnect tests; returns its cancellation. */
   readonly scheduleReconnect?: (retry: () => void, delayMs: number) => () => void;
 }
@@ -68,9 +59,9 @@ export function createConnectedTuiController(options: ConnectedTuiControllerOpti
         }),
       };
     },
-    onEvent: event => { void controller.receiveEvent(event.method); },
+    onEvent: event => { void controller.receiveEvent(event.method, event.params); },
   });
-  controller = createTuiController({ client: {
+  controller = createTuiController({ initialState: options.initialState, client: {
     get ready() { return client.ready; },
     start: async topics => {
       const currentAttempt = ++attempt;
@@ -108,20 +99,20 @@ export function createConnectedTuiController(options: ConnectedTuiControllerOpti
 /** Starts the real OpenTUI terminal client against the daemon UDS protocol. */
 export async function runTui(options: RunTuiOptions = {}): Promise<"connect" | undefined> {
   if (!isTTY()) throw new Error("inboxd-tui requires stdin and stdout to be TTYs");
-  const role = options.role ?? "approver";
+  const role = options.role ?? "sender";
   const socketPath = options.socketPath ?? defaultTuiSocketPath;
   const controller = createConnectedTuiController({
     connect: () => connectTuiUdsTransport(socketPath, role),
     role,
     isTTY,
-    ...(role === "approver" ? { approverToken: readTuiApproverToken(socketPath) } : {}),
+    ...(role === "sender" ? { senderToken: readOwnerToken(socketPath) } : {}),
   });
 
   const { createCliRenderer } = await import("@opentui/core");
   const renderer = await createCliRenderer({ exitOnCtrlC: false, exitSignals: ["SIGINT", "SIGTERM"] });
   let connectRequested = false;
   const onConnectionKey = (event: { sequence: string; preventDefault(): void }) => {
-    if (event.sequence === "C" && controller.state.screen === "doctor" && !controller.state.approvalPrompt && !controller.state.composeActive) {
+    if (event.sequence === "C" && controller.state.screen === "doctor" && !controller.state.composeActive) {
       event.preventDefault(); connectRequested = true; renderer.destroy();
     }
   };

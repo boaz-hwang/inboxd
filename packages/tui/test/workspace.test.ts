@@ -16,17 +16,14 @@ function fixture(): TuiState {
 }
 function mockController() {
   const calls: { method: string; params: JsonObject }[] = [];
-  let proposal: JsonObject | undefined;
   const controller = createTuiController({ client: { start: async () => {}, stop: () => {}, request: async (method, params) => {
     calls.push({ method, params });
     if (method === "capability.list") return { v: 1, resources: capabilities } as unknown as JsonObject;
     if (method === "chat.list") return { chats: resources.map((r, i) => ({ platform: r.platform, account: r.account, chat_id: r.chat_id, display_name: ["디자인팀", "가족", "친구들"][i] })) };
     if (method === "message.recent") return { messages: messages.map(m => ({ ...m.chat, msg_id: m.id, body: m.body, author: m.author, ts: m.ts })) };
     if (method === "message.inbox") return { messages: [{ msg_id: "parent", author: "민수", body: "한글 메시지 👩‍💻" }] };
-    if (method === "safety.intent.create") { proposal = { intent_id: "new-proposal", actor: "tui:local", state: "Proposed", envelope: params.envelope }; return { intent_id: "new-proposal" }; }
-    if (method === "safety.intent.listPending") return { intents: proposal ? [proposal] : [] };
-    if (method === "safety.intent.claimApprovalCode") return { code: "123456" };
-    if (method === "safety.intent.approve") return { state: "Verified" };
+    if (method === "message.send") return { state: "Verified" };
+    if (method === "safety.intent.listPending") return { intents: [] };
     return {};
   } } });
   return { controller, calls };
@@ -54,7 +51,7 @@ test("filter affects both rooms and messages; exact resources remain unmodified"
   expect(frame).not.toContain("내일 오후에");
 });
 
-test("chat selection -> text input -> review -> explicit approval preserves destination", async () => {
+test("chat selection -> text input -> direct send preserves destination", async () => {
   const { controller, calls } = mockController();
   await controller.start();
   await controller.dispatchKey("ArrowDown");
@@ -65,19 +62,13 @@ test("chat selection -> text input -> review -> explicit approval preserves dest
   expect(controller.state.composeActive).toBe(true);
   await controller.dispatchPaste("좋아요\n내일 봐요 👩‍💻");
   await controller.dispatchKey("Enter");
-  expect(controller.state.screen).toBe("approvals");
+  expect(controller.state.screen).toBe("chat");
   expect(controller.state.draft).toBe("");
-  const create = calls.find(c => c.method === "safety.intent.create")!;
+  const create = calls.find(c => c.method === "message.send")!;
   expect(create.params.envelope).toEqual({ v: 2, destination: resources[1], content: { mode: "text", body: "좋아요\n내일 봐요 👩‍💻" } });
   expect(calls.some(c => c.method === "safety.intent.approve")).toBe(false);
-  const review = renderScreen(controller.state, { width: 80, height: 24 }, { approvalCode: controller.currentApprovalCode() });
-  expect(review).toContain("Telegram · 가족");
-  expect(review).toContain("123456");
-  await controller.dispatchKey("a");
-  await controller.dispatchPaste("123456");
-  await controller.dispatchKey("Enter");
-  expect(calls.filter(c => c.method === "safety.intent.approve")).toHaveLength(1);
-  expect(renderScreen(controller.state, { width: 80, height: 24 })).toContain("수신 확인됨");
+  expect(controller.state.lastSend?.state).toBe("Verified");
+  expect(calls.filter(c => c.method === "safety.intent.approve")).toHaveLength(0);
   controller.stop();
 });
 
@@ -95,7 +86,7 @@ test("editor preserves graphemes, inserts at cursor and never interprets pasted 
   await controller.dispatchKey("ShiftEnter");
   await controller.dispatchPaste("q4ac");
   expect(controller.state.draft).toBe("가\nq4ac나");
-  expect(calls.some(c => c.method === "safety.intent.create")).toBe(false);
+  expect(calls.some(c => c.method === "message.send")).toBe(false);
   await controller.dispatchKey("Escape");
   expect(controller.state.draft).toBe("");
   controller.stop();

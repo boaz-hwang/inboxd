@@ -26,6 +26,7 @@ export interface ReconnectingProtocolClientOptions {
   isTTY?: () => boolean;
   /** Optional local secret for an approver-only system.hello handshake. */
   approverToken?: string;
+  senderToken?: string;
   maxQueuedEvents?: number;
   onEvent?: (event: ProtocolEvent) => void;
 }
@@ -42,6 +43,7 @@ export class ReconnectingProtocolClient {
   private readonly connectTransport: () => Promise<ProtocolTransport>;
   private readonly role: ClientRole;
   private readonly isTTY: () => boolean;
+  private readonly senderToken: string | undefined;
   private readonly approverToken: string | undefined;
   private readonly maxQueuedEvents: number | undefined;
   private readonly onEvent: (event: ProtocolEvent) => void;
@@ -63,6 +65,7 @@ export class ReconnectingProtocolClient {
     this.role = options.role;
     this.isTTY = options.isTTY ?? defaultTTYProbe;
     this.approverToken = options.approverToken;
+    this.senderToken = options.senderToken;
     this.maxQueuedEvents = options.maxQueuedEvents;
     this.onEvent = options.onEvent ?? (() => {});
   }
@@ -106,7 +109,7 @@ export class ReconnectingProtocolClient {
     transport.onMessage((message) => this.handleMessage(message, generation));
     transport.onClose(() => this.handleClose(generation));
 
-    await this.sendRequest("system.hello", createHandshake(this.role, this.isTTY, this.approverToken), generation);
+    await this.sendRequest("system.hello", createHandshake(this.role, this.isTTY, this.approverToken, this.senderToken), generation);
     if (generation !== this.activeGeneration || this.stopped) return;
     await this.sendRequest("subscribe", subscriptionParams(this.topics), generation);
     if (generation !== this.activeGeneration || this.stopped) return;
@@ -159,7 +162,7 @@ export class ReconnectingProtocolClient {
       return;
     }
     if (message.type !== "response") return;
-    const response = parseResponse(message, this.role);
+    const response = parseResponse(message);
     const pending = this.pending.get(response.id);
     if (pending === undefined || pending.generation !== generation) return;
     this.pending.delete(response.id);
@@ -168,7 +171,7 @@ export class ReconnectingProtocolClient {
     } else if (response.ok) {
       pending.resolve(response.result!);
     } else {
-      pending.reject(new Error(response.error!.message));
+      pending.reject(Object.assign(new Error(response.error!.message), { code: response.error!.code }));
     }
   }
 

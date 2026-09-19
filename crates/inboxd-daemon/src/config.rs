@@ -761,6 +761,16 @@ mod tests {
     };
     use zeroize::{Zeroize, ZeroizeOnDrop};
 
+    fn trusted_tempdir() -> tempfile::TempDir {
+        // Trusted configuration fixtures require canonical, non-writable ancestors.
+        let home = fs::canonicalize(std::env::var_os("HOME").expect("HOME for config fixture"))
+            .expect("canonical home for config fixture");
+        tempfile::Builder::new()
+            .prefix(".inboxd-cfg-")
+            .tempdir_in(home)
+            .expect("private config fixture directory")
+    }
+
     fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
     fn assert_value_zeroizes_on_drop<T: ZeroizeOnDrop>(_: &T) {}
 
@@ -776,7 +786,7 @@ mod tests {
 
     #[test]
     fn raw_provider_config_buffer_has_an_enforced_zeroize_on_drop_contract() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = trusted_tempdir();
         let path = write_config(directory.path(), &provider_config(directory.path()));
 
         let descriptor =
@@ -789,7 +799,7 @@ mod tests {
 
     #[test]
     fn config_contents_are_read_from_the_validated_final_descriptor() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = trusted_tempdir();
         let path = write_config(directory.path(), &provider_config(directory.path()));
         let descriptor = WorkerSupervisor::open_trusted_owner_file(&path, MAX_CONFIG_BYTES)
             .expect("owner-only config should open through the shared trusted-path gate");
@@ -806,7 +816,7 @@ mod tests {
 
     #[test]
     fn config_descriptor_read_stays_bounded_if_the_open_file_grows() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = trusted_tempdir();
         let path = write_config(directory.path(), &provider_config(directory.path()));
         let descriptor = WorkerSupervisor::open_trusted_owner_file(&path, MAX_CONFIG_BYTES)
             .expect("initial config is within the byte bound");
@@ -821,7 +831,7 @@ mod tests {
 
     #[test]
     fn config_descriptor_rejects_invalid_utf8() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = trusted_tempdir();
         let path = directory.path().join("config.json");
         fs::write(&path, [0xff]).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
@@ -836,7 +846,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn config_rejects_cross_uid_acl_mutation_on_mode_0700_ancestor() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = trusted_tempdir();
         let trusted = directory.path().join("trusted");
         fs::create_dir(&trusted).unwrap();
         fs::set_permissions(&trusted, fs::Permissions::from_mode(0o700)).unwrap();
@@ -866,7 +876,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn config_rejects_cross_uid_acl_mutation_on_final_file() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = trusted_tempdir();
         let path = write_config(directory.path(), &provider_config(directory.path()));
 
         let status = Command::new("chmod")
@@ -885,7 +895,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn config_rejects_cross_uid_acl_read_on_final_file() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = trusted_tempdir();
         let path = write_config(directory.path(), &provider_config(directory.path()));
 
         let status = Command::new("chmod")
@@ -986,7 +996,7 @@ mod tests {
 
     #[tokio::test]
     async fn owner_only_config_registers_exact_claims_for_the_four_typed_provider_kinds() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = trusted_tempdir();
         let config = provider_config(directory.path());
         let path = write_config(directory.path(), &config);
 
@@ -1048,7 +1058,7 @@ mod tests {
     #[test]
     fn telegram_binding_creates_only_the_lowercase_sha256_owner_only_state_tree() {
         const HASH: &str = "5c92011f80e9af65ad7bfd672846d3179737f09269c8904a6996186ff7c9c4e3";
-        let directory = tempfile::tempdir().unwrap();
+        let directory = trusted_tempdir();
         let state = directory.path().join("daemon-state");
         let mut config = provider_config(&state);
         config["providers"] = json!([config["providers"][1].clone()]);
@@ -1082,7 +1092,7 @@ mod tests {
 
     #[test]
     fn provider_config_rejects_unknown_fields_and_executable_paths() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = trusted_tempdir();
         let mut config = provider_config(directory.path());
         config["providers"][0]["executable"] = json!("/tmp/untrusted-worker");
         let path = write_config(directory.path(), &config);
@@ -1092,7 +1102,7 @@ mod tests {
 
     #[test]
     fn provider_config_rejects_values_that_are_bounded_only_by_the_outer_file() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = trusted_tempdir();
         let mut config = provider_config(directory.path());
         config["providers"][0]["bot_token"] = json!("x".repeat(9_000));
         let path = write_config(directory.path(), &config);
@@ -1103,7 +1113,7 @@ mod tests {
 
     #[test]
     fn telegram_provider_rejects_uppercase_api_hash_before_worker_launch() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = trusted_tempdir();
         let mut config = provider_config(directory.path());
         config["providers"] = json!([config["providers"][1].clone()]);
         config["providers"][0]["api_hash"] = json!("0123456789ABCDEF0123456789ABCDEF");
@@ -1117,7 +1127,7 @@ mod tests {
     }
 
     fn assert_provider_binding_invalid(mutator: impl FnOnce(&mut Value)) {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = trusted_tempdir();
         let mut config = provider_config(directory.path());
         mutator(&mut config);
         let path = write_config(directory.path(), &config);
@@ -1131,7 +1141,7 @@ mod tests {
 
     #[test]
     fn provider_config_rejects_unknown_provider_kinds() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = trusted_tempdir();
         let mut config = provider_config(directory.path());
         config["providers"][0]["kind"] = json!("caller_selected");
         let path = write_config(directory.path(), &config);
@@ -1187,7 +1197,7 @@ mod tests {
 
     #[test]
     fn config_rejects_textually_noncanonical_absolute_state_paths() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = trusted_tempdir();
         let repeated = format!("{}//state", directory.path().display());
         let mut config = provider_config(Path::new(&repeated));
         config["state_dir"] = json!(repeated);
@@ -1201,7 +1211,7 @@ mod tests {
 
     #[test]
     fn provider_config_rejects_more_than_the_bounded_number_of_bindings() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = trusted_tempdir();
         let mut config = provider_config(directory.path());
         let provider = config["providers"][0].clone();
         config["providers"] = Value::Array(vec![provider; 129]);

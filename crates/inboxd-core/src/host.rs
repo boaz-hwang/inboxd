@@ -66,37 +66,6 @@ pub fn wire_code_unit_len(value: &str) -> CoreResult<usize> {
 /// A synchronous, JSON-only capability boundary supplied by the Bun host.
 pub trait Host {
     fn call(&self, method: &str, args: Value) -> CoreResult<Value>;
-
-    /// Whether this host's trust contract requires send policy evaluation.
-    /// Callback and test hosts keep the frozen opt-in behavior by default;
-    /// production native hosts override this so caller input cannot opt out.
-    fn requires_send_policy(&self) -> bool {
-        false
-    }
-
-    /// Hashes an approval code with the frozen canonical-JSON string semantics.
-    /// Native hosts override this so caller-supplied codes are borrowed rather
-    /// than copied into a raw-code JSON value.
-    fn approval_code_digest(&self, code: &str) -> CoreResult<String> {
-        self.call("host.canonicalSha256", Value::String(code.to_owned()))?
-            .as_str()
-            .map(str::to_owned)
-            .ok_or_else(|| CoreError::new("HostError", "host.canonicalSha256 must return a string"))
-    }
-
-    /// Generates an approval secret and returns only its digest to core. The
-    /// default preserves the frozen callback-host operations; native production
-    /// hosts override it to retain and zeroize the raw secret outside core.
-    fn generate_approval_code_digest(&self) -> CoreResult<String> {
-        let value = self.call("host.approvalCode", Value::Null)?;
-        let code = value
-            .as_str()
-            .filter(|code| !code.is_empty())
-            .ok_or_else(|| {
-                CoreError::new("TypeError", "approval code must be a non-empty string")
-            })?;
-        self.approval_code_digest(code)
-    }
 }
 
 /// C ABI callback supplied by Bun's `JSCallback`. The returned pointer must

@@ -19,7 +19,13 @@ const KEY: [u8; 32] = [0x79; 32];
 const BINDING_ID: &str = "slack-work";
 
 fn private_tempdir() -> TempDir {
-    let directory = tempfile::tempdir().unwrap();
+    // Fixed workers must have trusted ancestors even with macOS's default TMPDIR.
+    let home =
+        fs::canonicalize(std::env::var_os("HOME").expect("HOME for worker fixture")).unwrap();
+    let directory = tempfile::Builder::new()
+        .prefix(".inboxd-pa-")
+        .tempdir_in(home)
+        .unwrap();
     fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
     directory
 }
@@ -135,30 +141,10 @@ async fn clients(directory: &Path, daemon: &Daemon) -> (Client, Client, Client) 
     (reader, agent, approver)
 }
 
-async fn approved_send(agent: &mut Client, approver: &mut Client) -> (Value, Value) {
-    let scope = json!({"platform":"slack","account":"work","chat_id":"C0123"});
-    let created = agent
-        .request(
-            "safety.intent.create",
-            json!({"actor":"agent:provider-acceptance","scope":scope,"body":"ship it"}),
-        )
-        .await;
-    let claimed = approver
-        .request(
-            "safety.intent.claimApprovalCode",
-            json!({"intent_id":created["intent_id"]}),
-        )
-        .await;
-    let approval = json!({
-        "intent_id":created["intent_id"],
-        "code":claimed["code"],
-        "actor":"agent:provider-acceptance",
-        "scope":scope,
-    });
-    let outcome = approver
-        .request("safety.intent.approve", approval.clone())
-        .await;
-    (approval, outcome)
+async fn direct_send(_agent: &mut Client, sender: &mut Client) -> (Value, Value) {
+    let params = json!({"request_id":"provider-acceptance-123456","chat":{"platform":"slack","account":"work","chat_id":"C0123"},"body":"ship it"});
+    let result = sender.request("message.send", params.clone()).await;
+    (params, result)
 }
 
 fn journal(worker_directory: &Path) -> Vec<String> {
@@ -220,7 +206,7 @@ async fn fixed_production_worker_runs_real_uds_refresh_bounded_read_and_one_atte
         "hello"
     );
 
-    let (approval, outcome) = approved_send(&mut agent, &mut approver).await;
+    let (approval, outcome) = direct_send(&mut agent, &mut approver).await;
     assert_eq!(outcome["state"], "Verified", "{outcome}");
     assert_eq!(outcome["receipt"], "receipt-1");
     assert_eq!(
@@ -229,10 +215,8 @@ async fn fixed_production_worker_runs_real_uds_refresh_bounded_read_and_one_atte
     );
 
     assert_eq!(
-        approver
-            .request_frame("safety.intent.approve", approval)
-            .await["ok"],
-        false
+        approver.request_frame("message.send", approval).await["ok"],
+        true
     );
     assert_eq!(
         journal(&worker_directory),
@@ -263,7 +247,7 @@ async fn missing_fixed_runtime_refreshes_unknown_and_fails_send_before_dispatch(
         "worker_unavailable"
     );
 
-    let (_, outcome) = approved_send(&mut agent, &mut approver).await;
+    let (_, outcome) = direct_send(&mut agent, &mut approver).await;
     assert_eq!(outcome["state"], "Failed", "{outcome}");
     assert_eq!(outcome["reason"], "worker_unavailable");
     assert!(journal(&worker_directory).is_empty());

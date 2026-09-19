@@ -14,6 +14,7 @@ import {
   createToolHandlers,
   serveMcpStdio,
   type ProtocolRequester,
+  type DaemonMethod,
 } from "../src/index.ts";
 
 const chat = { platform: "slack", account: "a", chat_id: "c" };
@@ -24,7 +25,7 @@ class FakeRequester implements ProtocolRequester {
   result: Record<string, unknown> = {};
   failure: unknown;
 
-  async request(method: "message.inbox" | "message.search" | "safety.intent.create", params: Record<string, unknown>): Promise<Record<string, unknown>> {
+  async request(method: DaemonMethod, params: Record<string, unknown>): Promise<Record<string, unknown>> {
     this.calls.push({ method, params });
     if (this.failure !== undefined) throw this.failure;
     return this.result;
@@ -55,8 +56,8 @@ async function nextRequest(transport: FakeProtocolTransport, index: number): Pro
 }
 
 describe("inboxd MCP agent server", () => {
-  test("exposes only read tools and approval-gated proposal", () => {
-    expect(MCP_TOOL_NAMES).toEqual(["inbox_search", "inbox_list", "inbox_recent", "inbox_evidence", "send_propose"]);
+  test("exposes read tools and delegated direct sends", () => {
+    expect(MCP_TOOL_NAMES).toEqual(["inbox_search", "inbox_list", "inbox_recent", "inbox_evidence", "message_send", "send_status"]);
     const requester = new FakeRequester();
     const handlers = createToolHandlers(requester);
     const server = createMcpServer(requester) as unknown as { _registeredTools: Record<string, unknown> };
@@ -88,7 +89,7 @@ describe("inboxd MCP agent server", () => {
     const requester = new FakeRequester();
     const handlers = createToolHandlers(requester);
     await expect(handlers.inbox_search({ chat, interval, query: "" })).rejects.toBeInstanceOf(McpInputError);
-    await expect(handlers.send_propose({ actor: "agent", scope: chat, body: "draft", code: "123456" })).rejects.toBeInstanceOf(McpInputError);
+    await expect(handlers.message_send({ request_id: "stable-send-request-0001", chat, body: "draft", code: "123456" })).rejects.toBeInstanceOf(McpInputError);
     expect(requester.calls).toEqual([]);
   });
 
@@ -129,33 +130,28 @@ describe("inboxd MCP agent server", () => {
     requester.stop();
   });
 
-  test("propose returns a non-secret receipt and never echoes a body", async () => {
+  test("direct sends preserve the caller's request ID and uncertain outcomes", async () => {
     const requester = new FakeRequester();
-    requester.result = {
-      intent_id: "intent-1",
-      expires_at: 123,
-      body: "draft that must not leave the daemon boundary",
-      actor: "agent",
-      scope: chat,
-    };
+    requester.result = { request_id: "stable-send-request-0001", state: "uncertain" };
     const handlers = createToolHandlers(requester);
-
-    await expect(handlers.send_propose({ actor: "agent", scope: chat, body: "draft that must not leave the daemon boundary" }))
-      .resolves.toEqual({ intent_id: "intent-1", expires_at: 123 });
-    expect(requester.calls).toEqual([{
-      method: "safety.intent.create",
-      params: { actor: "agent", scope: chat, body: "draft that must not leave the daemon boundary" },
-    }]);
+    const input = { request_id: "stable-send-request-0001", chat, body: "draft" };
+    await expect(handlers.message_send(input)).resolves.toEqual(requester.result);
+    await expect(handlers.message_send(input)).resolves.toEqual(requester.result);
+    expect(requester.calls).toEqual([{ method: "message.send", params: input }, { method: "message.send", params: input }]);
+    await expect(handlers.message_send({ chat, body: "draft" })).rejects.toBeInstanceOf(McpInputError);
+    await expect(handlers.message_send({ ...input, sender_token: "secret" })).rejects.toBeInstanceOf(McpInputError);
+    await handlers.send_status({ id: "stable-send-request-0001" });
+    expect(requester.calls.at(-1)).toEqual({ method: "send.status", params: { id: "stable-send-request-0001" } });
   });
 
-  test("deeply rejects approval codes or secrets from every daemon result", async () => {
+  test("deeply rejects credentials from every daemon result", async () => {
     const requester = new FakeRequester();
-    requester.result = { messages: [], coverage: { covered: [], gaps: [], limits: [] }, nested: { approvals: [{ approval_code: "123456" }] } };
+    requester.result = { messages: [], coverage: { covered: [], gaps: [], limits: [] }, nested: { credentials: [{ access_token: "secret" }] } };
     const handlers = createToolHandlers(requester);
     await expect(handlers.inbox_search({ chat, interval, query: "find" })).rejects.toBeInstanceOf(McpSecretResponseError);
 
-    requester.result = { intent_id: "intent-1", expires_at: 123, metadata: { code: "123456" } };
-    await expect(handlers.send_propose({ actor: "agent", scope: chat, body: "draft" })).rejects.toBeInstanceOf(McpSecretResponseError);
+    requester.result = { intent_id: "intent-1", expires_at: 123, metadata: { sender_token: "secret" } };
+    await expect(handlers.message_send({ request_id: "stable-send-request-0001", chat, body: "draft" })).rejects.toBeInstanceOf(McpSecretResponseError);
   });
 
   test("wraps a daemon failure with its method and a typed code", async () => {
@@ -186,4 +182,22 @@ describe("inboxd MCP agent server", () => {
     const handle = serveMcpStdio(requester, { transport });
     await expect(handle.close()).resolves.toBeUndefined();
   });
+});
+
+test("MCP delegated sender credential is handshake-only and non-TTY", async () => {
+  const transport = new FakeProtocolTransport();
+  const requester = createAgentProtocolRequester(async () => transport, "private-owner-secret");
+  const params = { request_id: "stable-mcp-request-0001", chat, body: "hello" };
+  const pending = requester.request("message.send", params);
+  const hello = await nextRequest(transport, 0);
+  expect(hello.params).toEqual({ role: "sender", sender_token: "private-owner-secret" });
+  transport.respond(hello, { ready: true });
+  const subscribe = await nextRequest(transport, 1);
+  transport.respond(subscribe, { subscribed: [] });
+  const send = await nextRequest(transport, 2);
+  expect(send).toMatchObject({ method: "message.send", params });
+  expect(JSON.stringify(send)).not.toContain("private-owner-secret");
+  transport.respond(send, { request_id: "stable-mcp-request-0001", state: "sent" });
+  await expect(pending).resolves.toEqual({ request_id: "stable-mcp-request-0001", state: "sent" });
+  requester.stop();
 });

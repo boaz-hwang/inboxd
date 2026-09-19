@@ -67,6 +67,21 @@ fn state_path() -> Option<String> {
     env::var("INBOXD_FAKE_WORKER_STATE").ok()
 }
 
+// Lifecycle tests release this gate explicitly or kill the worker. Their
+// synchronization must not depend on winning a short timeout race at startup.
+fn wait_for_release() {
+    let state = state_path().expect("gated scenario needs state path");
+    let release = Path::new(&state).with_extension("release");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !release.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "test gate was not released"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
 fn record_call(operation: &str) {
     if let Some(path) = state_path() {
         let mut file = OpenOptions::new()
@@ -364,6 +379,9 @@ fn main() {
 
     let mut value = if operation == "send" {
         record_call(operation);
+        if scenario == "send_gated" {
+            wait_for_release();
+        }
         match scenario.as_str() {
             "send_failed" => response(
                 &request,
@@ -377,6 +395,13 @@ fn main() {
         }
     } else if operation == "read_receipt" {
         record_call(operation);
+        if scenario == "read_receipt_gated" {
+            wait_for_release();
+        }
+        if scenario == "read_receipt_timeout" {
+            thread::sleep(Duration::from_secs(2));
+            return;
+        }
         let mut evidence = json!({
             "receipt_id":request["operation"]["receipt_id"],
             "destination":request["operation"]["expected"]["destination"],

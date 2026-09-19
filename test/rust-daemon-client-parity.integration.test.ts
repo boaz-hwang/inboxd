@@ -4,14 +4,16 @@ import { createUdsCliHandlers, runCli } from "../packages/cli/src/index.ts";
 import { connectUdsTransport } from "../packages/cli/src/transport.ts";
 import { createAgentProtocolRequester, createToolHandlers } from "../packages/mcp/src/index.ts";
 import { ReconnectingProtocolClient, type ProtocolMessage, type ProtocolTransport } from "../packages/protocol/src/index.ts";
-import { renderScreen } from "../packages/tui/src/index.ts";
-import { createConnectedTuiController, readTuiApproverToken } from "../packages/tui/src/main.ts";
+import { createInitialState } from "../packages/tui/src/index.ts";
+import { createConnectedTuiController } from "../packages/tui/src/main.ts";
+import { readOwnerToken } from "../packages/host/src/owner-token.ts";
 import { connectTuiUdsTransport } from "../packages/tui/src/transport.ts";
 import {
   FIXTURE_CHAT,
   FIXTURE_INTERVAL,
   RawUdsConnection,
   RustDaemonHarness,
+  waitFor,
 } from "./helpers/rust-daemon-harness.ts";
 
 const harnesses: RustDaemonHarness[] = [];
@@ -72,11 +74,12 @@ describeWithRustDaemon("release Rust daemon UDS parity", () => {
   test("handles fragmented UTF-8, all roles, correlated batches, malformed frames, and the 64 KiB ceiling", async () => {
     const harness = await fixture();
 
-    for (const role of ["reader", "agent", "mcp", "approver"] as const) {
+    for (const role of ["reader", "agent", "mcp", "approver", "sender"] as const) {
       const connection = await RawUdsConnection.connect(harness.socketPath);
       const response = await connection.request(`hello-${role}`, "system.hello", {
         role,
         ...(role === "approver" ? { approver_token: harness.token() } : {}),
+        ...(role === "sender" ? { sender_token: harness.token() } : {}),
       });
       expect(response).toMatchObject({ id: `hello-${role}`, method: "system.hello", ok: true, result: { protocol: "inboxd", ready: true } });
       connection.close();
@@ -110,7 +113,7 @@ describeWithRustDaemon("release Rust daemon UDS parity", () => {
     survivor.close();
   });
 
-  test("serves frozen reads, safety, settings, capabilities, and replacement subscriptions", async () => {
+  test("serves frozen reads and rejects retired approval execution without creating an intent", async () => {
     const harness = await fixture(true);
     const reader = new ReconnectingProtocolClient({ role: "reader", connect: () => connectUdsTransport(harness.socketPath) });
     clients.push(reader);
@@ -147,46 +150,25 @@ describeWithRustDaemon("release Rust daemon UDS parity", () => {
     const agent = new ReconnectingProtocolClient({ role: "agent", connect: () => connectUdsTransport(harness.socketPath) });
     clients.push(agent);
     await agent.start([]);
-    const first = await agent.request("safety.intent.create", { actor: "agent:parity", scope: FIXTURE_CHAT, body: "approve fixture" });
-    expect(typeof first.intent_id).toBe("string");
-    expect(typeof first.expires_at).toBe("number");
-    const firstIntentId = first.intent_id as string;
-    expect(await subscriber.nextJson()).toMatchObject({ type: "event", method: "safety.intent.changed", params: { intent_id: firstIntentId, state: "Proposed" } });
-
+    await expect(agent.request("message.send", { request_id: "untrusted-request-1234", chat: FIXTURE_CHAT, body: "must not send" })).rejects.toThrow();
+    await expect(subscriber.nextJson(150)).rejects.toThrow(/timed out/i);
     expect(await subscriber.request("sub-replace", "subscribe", { topics: ["coverage.changed"] })).toMatchObject({
       result: { subscribed: ["coverage.changed"] },
     });
-    const second = await agent.request("safety.intent.create", { actor: "agent:parity", scope: FIXTURE_CHAT, body: "reject fixture" });
-    expect(typeof second.intent_id).toBe("string");
-    const secondIntentId = second.intent_id as string;
-    await expect(subscriber.nextJson(150)).rejects.toThrow(/timed out/i);
-
     const approver = new ReconnectingProtocolClient({
-      role: "approver",
-      isTTY: () => true,
-      approverToken: harness.token(),
+      role: "approver", isTTY: () => true, approverToken: harness.token(),
       connect: () => connectUdsTransport(harness.socketPath),
     });
     clients.push(approver);
-    await approver.start(["safety.intent.changed"]);
-    expect(await approver.request("safety.intent.listPending", {})).toMatchObject({ intents: expect.arrayContaining([
-      expect.objectContaining({ intent_id: firstIntentId }),
-      expect.objectContaining({ intent_id: secondIntentId }),
-    ]) });
-    const claimed = await approver.request("safety.intent.claimApprovalCode", { intent_id: firstIntentId });
-    expect(claimed.code).toMatch(/^\d{6}$/);
-    expect(await approver.request("safety.intent.approve", {
-      intent_id: firstIntentId,
-      code: claimed.code,
-      actor: "agent:parity",
-      scope: FIXTURE_CHAT,
-    })).toMatchObject({ state: "Approved" });
-    expect(await approver.request("safety.intent.claimApprovalCode", { intent_id: firstIntentId })).toEqual({ unavailable: true });
-    expect(await approver.request("safety.intent.reject", { intent_id: secondIntentId, reason: "fixture" })).toMatchObject({ state: "Expired" });
+    await approver.start([]);
+    expect(await approver.request("safety.intent.listPending", {})).toMatchObject({ intents: [] });
     await expect(approver.request("sync.backfill", { ...FIXTURE_CHAT, ...FIXTURE_INTERVAL })).rejects.toThrow(/unavailable/i);
 
     const raw = await RawUdsConnection.connect(harness.socketPath);
     await raw.request("raw-hello", "system.hello", { role: "reader" });
+    for (const method of ["safety.intent.create", "safety.intent.claimApprovalCode", "safety.intent.approve", "account.send"]) {
+      expect(await raw.request(method, method, {})).toMatchObject({ ok: false });
+    }
     for (const method of ["settings.get", "settings.update"]) {
       expect(await raw.request(method, method, {})).toMatchObject({ method, ok: false, error: { code: "UNSUPPORTED" } });
     }
@@ -216,10 +198,9 @@ describeWithRustDaemon("release Rust daemon UDS parity", () => {
     expect(await tools.inbox_evidence({ chats: [FIXTURE_CHAT], interval: FIXTURE_INTERVAL })).toMatchObject({ evidence: [{ message: { msg_id: "m2" } }, { message: { msg_id: "m1" } }] });
 
     const controller = createConnectedTuiController({
-      role: "approver",
-      isTTY: () => true,
-      approverToken: readTuiApproverToken(harness.socketPath),
-      connect: () => connectTuiUdsTransport(harness.socketPath, "approver"),
+      role: "sender",
+      senderToken: readOwnerToken(harness.socketPath),
+      connect: () => connectTuiUdsTransport(harness.socketPath, "sender"),
     });
     clients.push(controller);
     controller.setActiveChat(FIXTURE_CHAT);
@@ -233,6 +214,23 @@ describeWithRustDaemon("release Rust daemon UDS parity", () => {
     ]);
     await controller.dispatchKey("2");
     expect(controller.state.views.search.data).toMatchObject([{ id: "m2", body: "fixture second needle" }]);
+  });
+
+  testWithConfiguredWorkers("CLI and delegated MCP share the same durable direct-send identity", async () => {
+    const harness = new RustDaemonHarness({ providers: [CONFIGURED_PROVIDERS[0]], fixedWorkerBinary: process.env.INBOXD_FAKE_WORKER_BIN! });
+    harnesses.push(harness);
+    await harness.start();
+    const cli = createUdsCliHandlers({ socketPath: harness.socketPath, role: "sender" });
+    clients.push(cli);
+    const requester = createAgentProtocolRequester(() => connectUdsTransport(harness.socketPath), harness.token());
+    clients.push(requester);
+    const tools = createToolHandlers(requester);
+    const payload = { request_id: crypto.randomUUID(), chat: chat(SLACK_RESOURCE), body: "one shared send" };
+    const sent = await runCli(["message", "send", JSON.stringify(payload)], { handlers: cli, write: () => {} });
+    expect(["Sent", "Verified"]).toContain(sent.state as string);
+    expect(await tools.message_send(payload)).toEqual(sent);
+    expect(await tools.send_status({ id: payload.request_id })).toEqual(sent);
+    await expect(tools.message_send({ ...payload, body: "different content" })).rejects.toThrow();
   });
 
   testWithConfiguredWorkers("configured release daemon authenticates four fixed workers and the real TUI fails closed after worker loss", async () => {
@@ -260,11 +258,22 @@ describeWithRustDaemon("release Rust daemon UDS parity", () => {
       { resource: TELEGRAM_RESOURCE, auth: "authenticated" },
     ]);
 
+    const transmitted: Record<string, any>[] = [];
     const controller = createConnectedTuiController({
-      role: "approver",
-      isTTY: () => true,
-      approverToken: readTuiApproverToken(harness.socketPath),
-      connect: () => connectTuiUdsTransport(harness.socketPath, "approver"),
+      // Scope workers exercise backfill and the shared direct-send executor.
+      initialState: { ...createInitialState(), accountMode: false },
+      role: "sender",
+      senderToken: readOwnerToken(harness.socketPath),
+      connect: async () => {
+        const inner = await connectTuiUdsTransport(harness.socketPath, "sender");
+        return {
+          send(message: ProtocolMessage) {
+            if (message.type === "request" && message.method === "message.send") transmitted.push(message.params);
+            inner.send(message);
+          },
+          onMessage: inner.onMessage.bind(inner), onClose: inner.onClose.bind(inner), close: inner.close.bind(inner),
+        };
+      },
     });
     clients.push(controller);
     await controller.start();
@@ -306,28 +315,18 @@ describeWithRustDaemon("release Rust daemon UDS parity", () => {
     await typeKeys(controller, "approved preview");
     await controller.dispatchKey("Enter");
 
-    const pending = await observer.request("safety.intent.listPending", {});
-    const intents = pending.intents as Array<Record<string, any>>;
-    expect(intents).toEqual(expect.arrayContaining([
+    expect(transmitted).toHaveLength(3);
+    expect(transmitted).toEqual(expect.arrayContaining([
       expect.objectContaining({ envelope: expect.objectContaining({ destination: SLACK_RESOURCE, content: { mode: "text", body: "slack proposal" } }) }),
       expect.objectContaining({ envelope: expect.objectContaining({ destination: TELEGRAM_RESOURCE, content: { mode: "text", body: "telegram reply" }, reply: { parent_id: "m1" } }) }),
       expect.objectContaining({ envelope: { v: 2, destination: KAKAO_OFFICIAL_RESOURCE, content: { mode: "approved_template", template_id: "template-1", arguments: { amount: 1000 }, preview: "approved preview" } } }),
     ]));
-
-    await controller.dispatchKey("4");
-    const officialIndex = controller.state.views.approvals.data.findIndex(row => row.resource?.kind === "destination" && row.resource.destination_id === "recipient-uuid");
-    expect(officialIndex).toBeGreaterThanOrEqual(0);
-    while (controller.state.focus < officialIndex) await controller.dispatchKey("j");
-    await controller.dispatchKey("Enter");
-    const code = controller.currentApprovalCode();
-    expect(code).toMatch(/^\d{6}$/);
-    await controller.dispatchKey("a");
-    await typeKeys(controller, code!);
-    await controller.dispatchKey("Enter");
-    const officialIntent = intents.find(intent => intent.envelope?.destination?.kind === "destination")!;
-    expect(controller.state.views.approvals.data.find(row => row.id === officialIntent.intent_id)?.state).toBe("Sent");
-
-    const beforeWorkerLoss = (await observer.request("safety.intent.listPending", {})).intents as Array<Record<string, any>>;
+    for (const request of transmitted) {
+      const result = await observer.request("send.status", { id: request.request_id as string });
+      expect(["Sent", "Verified"]).toContain(result.state as string);
+    }
+    expect(controller.state.lastSend?.state).toBe("Sent");
+    const beforeWorkerLoss = transmitted.length;
     harness.removeFixedWorker("slack");
     await controller.receiveEvent("capability.changed");
     expect(controller.state.capabilities.data.find(item => item.resource.kind === "chat" && item.resource.platform === "slack")?.auth).toMatchObject({ state: "unknown", reason: "worker_unavailable" });
@@ -336,73 +335,63 @@ describeWithRustDaemon("release Rust daemon UDS parity", () => {
     await controller.dispatchKey("c");
     expect(controller.state.composeActive).toBe(false);
     expect(controller.state.notice).toMatch(/capability refresh|AUTH unknown reason=worker_unavailable/);
-    const afterWorkerLoss = (await observer.request("safety.intent.listPending", {})).intents as Array<Record<string, any>>;
-    expect(afterWorkerLoss.map(intent => intent.intent_id)).toEqual(beforeWorkerLoss.map(intent => intent.intent_id));
+    expect(transmitted).toHaveLength(beforeWorkerLoss);
   });
 
-  testWithConfiguredWorkers("lost approval response stays uncertain in the real TUI and never retries a Rust-owned send", async () => {
-    const harness = new RustDaemonHarness({
-      providers: CONFIGURED_PROVIDERS,
-      fixedWorkerBinary: process.env.INBOXD_FAKE_WORKER_BIN!,
-    });
+  testWithConfiguredWorkers("lost direct-send response stays uncertain in the real TUI and status recovery never resends", async () => {
+    const harness = new RustDaemonHarness({ providers: CONFIGURED_PROVIDERS, fixedWorkerBinary: process.env.INBOXD_FAKE_WORKER_BIN! });
     harnesses.push(harness);
     await harness.start();
-
-    const agent = new ReconnectingProtocolClient({
-      role: "agent",
-      connect: () => connectUdsTransport(harness.socketPath),
-    });
-    clients.push(agent);
-    await agent.start([]);
-    const proposed = await agent.request("safety.intent.create", {
-      actor: "tui:operator",
-      scope: SLACK_RESOURCE,
-      body: "response loss must not retry",
-    });
-    const intentId = proposed.intent_id as string;
-
-    let dropApprovalResponse = true;
+    let dropResponse = true;
+    let sends = 0;
+    let completedOutcome: unknown;
+    let statusRequests = 0;
     const controller = createConnectedTuiController({
-      role: "approver",
-      isTTY: () => true,
-      approverToken: readTuiApproverToken(harness.socketPath),
+      initialState: { ...createInitialState(), accountMode: false },
+      role: "sender", senderToken: readOwnerToken(harness.socketPath),
       connect: async () => {
-        const inner = await connectTuiUdsTransport(harness.socketPath, "approver");
-        const transport: ProtocolTransport = {
+        const inner = await connectTuiUdsTransport(harness.socketPath, "sender");
+        return {
           send(message: ProtocolMessage) {
+            if (message.type === "request" && message.method === "message.send") sends++;
+            if (message.type === "request" && message.method === "send.status") statusRequests++;
             inner.send(message);
-            if (dropApprovalResponse && message.type === "request" && message.method === "safety.intent.approve") {
-              dropApprovalResponse = false;
-              inner.close();
-            }
           },
-          onMessage: (listener) => inner.onMessage(listener),
-          onClose: (listener) => inner.onClose(listener),
-          close: () => inner.close(),
-        };
-        return transport;
+          onMessage(listener: (message: ProtocolMessage) => void) {
+            return inner.onMessage(message => {
+              if (dropResponse && message.type === "response" && message.method === "message.send" && message.ok) {
+                completedOutcome = message.result;
+                dropResponse = false;
+                inner.close();
+                return;
+              }
+              listener(message);
+            });
+          },
+          onClose: inner.onClose.bind(inner), close: inner.close.bind(inner),
+        } satisfies ProtocolTransport;
       },
     });
     clients.push(controller);
     await controller.start();
-    await controller.receiveEvent("safety.intent.changed");
-    await controller.dispatchKey("4");
+    controller.setActiveResource(SLACK_RESOURCE);
+    await controller.dispatchKey("3");
+    await controller.dispatchKey("c");
+    await typeKeys(controller, "response loss must not retry");
     await controller.dispatchKey("Enter");
-    const code = controller.currentApprovalCode();
-    expect(code).toMatch(/^\d{6}$/);
-    await controller.dispatchKey("a");
-    await typeKeys(controller, code!);
-    await controller.dispatchKey("Enter");
-
-    expect(dropApprovalResponse).toBe(false);
-    expect(controller.state.connection.status).toBe("reconnecting");
-    expect(controller.state.views.approvals.data.find(row => row.id === intentId)).toMatchObject({ state: "Uncertain", codeRequired: false });
-    expect(controller.currentApprovalCode()).toBeUndefined();
-    expect(renderScreen(controller.state, { width: 80, height: 24 })).toContain("다시 보내지 마세요");
-
+    expect(dropResponse).toBe(false);
+    expect(completedOutcome).toMatchObject({ state: expect.stringMatching(/^(Sent|Verified)$/) });
+    expect(controller.state.lastSend?.state).toBe("Uncertain");
+    expect(typeof controller.state.lastSend?.requestId).toBe("string");
+    const requestId = controller.state.lastSend!.requestId;
+    expect(sends).toBe(1);
     await controller.start();
+    await waitFor(() => controller.state.connection.status === "connected");
+    await controller.dispatchKey("s");
+    expect(statusRequests).toBe(1);
+    expect(controller.state.lastSend?.requestId).toBe(requestId);
+    expect(["Sent", "Verified"], controller.state.notice).toContain(controller.state.lastSend!.state);
     await controller.dispatchKey("a");
-    await controller.dispatchKey("Enter");
-    expect(controller.state.approvalPrompt).toBe(false);
+    expect(sends).toBe(1);
   });
 });

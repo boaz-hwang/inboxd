@@ -1,3 +1,5 @@
+import { SlackClient, SlackListener } from "agent-messenger/slack";
+import { readSelectedAttachment } from "../../../packages/host/src/attachments.ts";
 import { readBounded } from "../../../packages/accounts/src/io.ts";
 import type { AccountAdapter } from "../../../packages/accounts/src/contracts.ts";
 
@@ -10,6 +12,7 @@ export function createSlackAccount(config: {
   bot_token: string;
   session_cookie?: string;
 }, fetcher: typeof fetch = fetch): AccountAdapter {
+  let stopListening: (() => void) | undefined;
   async function call(
     method: string,
     body: Record<string, unknown> = {},
@@ -41,11 +44,41 @@ export function createSlackAccount(config: {
     return result;
   }
   return {
-    close() {},
+    close() { stopListening?.(); },
+    async listen(emit) {
+      if (!config.session_cookie) { emit({ event: "state", state: "unsupported" }); return () => {}; }
+      const client = await new SlackClient().login({ token: config.bot_token, cookie: config.session_cookie });
+      const listener = new SlackListener(client);
+      listener.on("connected", () => emit({ event: "state", state: "connected" }));
+      listener.on("disconnected", () => emit({ event: "state", state: "disconnected" }));
+      listener.on("error", () => emit({ event: "state", state: "disconnected" }));
+      listener.on("slack_event", event => {
+        if (!["user_typing", "presence_change", "pong"].includes(event.type)) emit({ event: "changed" });
+      });
+      stopListening = () => listener.stop();
+      // RTM setup cannot block reads/sends; the SDK owns socket heartbeats/reconnect.
+      void listener.start().catch(() => emit({ event: "state", state: "disconnected" }));
+      return stopListening;
+    },
     async run(req) {
+      if (req.op === "slack_send_file") {
+        let bytes: Buffer;
+        try { bytes = await readSelectedAttachment(req.file); }
+        catch { return { state: "Failed", reason: "파일을 읽을 수 없거나 선택 이후 변경되었습니다" }; }
+        const upload = await call("files.getUploadURLExternal", { filename: req.file.name, length: bytes.length });
+        const url = new URL(upload.upload_url);
+        if (url.protocol !== "https:" || url.hostname !== "files.slack.com" || url.username || url.password || url.port) throw new Error("Slack upload URL rejected");
+        if (typeof upload.file_id !== "string" || !upload.file_id) throw new Error("Slack file ID missing");
+        const response = await fetcher(url, { method: "POST", redirect: "error", signal: AbortSignal.timeout(50_000), headers: { "content-type": "application/octet-stream" }, body: new Uint8Array(bytes) });
+        await response.body?.cancel();
+        if (!response.ok) throw new Error("Slack 파일 업로드 실패");
+        const complete = await call("files.completeUploadExternal", { files: [{ id: upload.file_id, title: req.file.name }], channel_id: req.chat_id });
+        if (!Array.isArray(complete.files) || !complete.files.some((file: { id?: string }) => file.id === upload.file_id)) throw new Error("Slack 파일 전송 확인 실패");
+        return { state: "Sent", receipt: upload.file_id };
+      }
       const method = req.op.startsWith("slack.") ? req.op.slice(6) : "";
       if (!methods.has(method)) throw new Error("지원하지 않는 Slack 작업");
-      return { data: await call(method, req.params ?? {}) };
+      return { data: await call(method, "params" in req ? req.params : {}) };
     },
   };
 }

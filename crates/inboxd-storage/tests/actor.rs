@@ -1,7 +1,7 @@
 use std::{
     fs,
     process::Command,
-    sync::{Arc, Mutex, mpsc},
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
@@ -217,91 +217,69 @@ fn writer_identity_is_alias_safe_cross_process_and_error_precise() {
     assert!(child.wait().unwrap().success());
 }
 
+fn lock_writes(path: &std::path::Path, key: &[u8]) -> NativeHost {
+    let locker = NativeHost::open_development(path, key).unwrap();
+    locker.call("sql.transaction.begin", Value::Null).unwrap();
+    locker
+}
+fn write_key(id: &str) -> Value {
+    json!({"platform":"slack","account":"work","chat_id":"C1","msg_id":id})
+}
+fn write_batch(id: &str) -> Value {
+    json!({"events":[{"kind":"create","revision":{"source":"adapter","value":1},"message":{"key":write_key(id),"author_id":"a","ts":1,"body":"accepted write","attachments":[]}}]})
+}
+
 #[test]
 fn calls_backpressure_and_shutdown_are_bounded_and_distinct() {
     let directory = private_tempdir();
     let path = directory.path().join("bounded.db");
-    let (entered_sender, entered_receiver) = mpsc::sync_channel(1);
-    let (release_sender, release_receiver) = mpsc::sync_channel(1);
-    let release_receiver = Arc::new(Mutex::new(release_receiver));
-    let policy_release = Arc::clone(&release_receiver);
-    let actor = Arc::new(
-        StorageActor::start(
-            StorageActorConfig::new(&path, [0x53; 32])
-                .with_queue_capacity(1)
-                .with_call_timeout(Duration::from_millis(40))
-                .with_shutdown_timeout(Duration::from_millis(40))
-                .with_send_policy(move |_| {
-                    let _ = entered_sender.try_send(());
-                    policy_release.lock().unwrap().recv().is_ok()
-                }),
-        )
-        .unwrap(),
-    );
-    let scope = json!({"platform":"slack","account":"work","chat_id":"C1"});
-    let created = actor
-        .call(
-            StorageOperation::SafetyPropose,
-            json!({
-                "proposal":{"actor":"agent:bounded","scope":scope,"body":"body"},
-                "approval_ttl_ms":60_000,
-            }),
-        )
-        .unwrap();
-    let code = actor
-        .call(
-            StorageOperation::SafetyClaimApprovalCode,
-            json!({"intent_id":created["intent_id"]}),
-        )
-        .unwrap()["code"]
-        .clone();
-    actor
-        .call(
-            StorageOperation::SafetyApprove,
-            json!({
-                "intent_id":created["intent_id"],"code":code,
-                "actor":"agent:bounded","scope":scope,
-            }),
-        )
-        .unwrap();
-
-    let blocked_actor = Arc::clone(&actor);
-    let intent_id = created["intent_id"].clone();
-    let blocked = thread::spawn(move || {
-        blocked_actor.call(
-            StorageOperation::SafetyClaim,
-            json!({
-                "intent_id":intent_id,"transport_present":true,"send_capable":true,
-                "quota_limit":1,"global_quota_limit":1,
-            }),
-        )
-    });
-    entered_receiver
-        .recv_timeout(Duration::from_secs(1))
-        .unwrap();
-
-    let queued = actor
-        .call(StorageOperation::Diagnose, Value::Null)
-        .unwrap_err();
-    assert_eq!(queued.name, "ActorCallTimeoutError");
-    let overloaded = actor
-        .call(StorageOperation::Diagnose, Value::Null)
-        .unwrap_err();
-    assert_eq!(overloaded.name, "ActorOverloadedError");
+    let mut actor = StorageActor::start(
+        StorageActorConfig::new(&path, [0x53; 32])
+            .with_queue_capacity(1)
+            .with_call_timeout(Duration::from_millis(40))
+            .with_shutdown_timeout(Duration::from_millis(40)),
+    )
+    .unwrap();
+    let locker = lock_writes(&path, &[0x53; 32]);
     assert_eq!(
-        blocked.join().unwrap().unwrap_err().name,
+        actor
+            .call(StorageOperation::ApplySyncBatch, write_batch("blocked"))
+            .unwrap_err()
+            .name,
         "ActorCallTimeoutError"
     );
-
-    let mut actor = Arc::try_unwrap(actor).ok().unwrap();
-    let started = Instant::now();
-    let shutdown = actor.shutdown().unwrap_err();
-    assert_eq!(shutdown.name, "ActorShutdownTimeoutError");
-    assert!(started.elapsed() < Duration::from_secs(1));
-    release_sender.send(()).unwrap();
+    assert_eq!(
+        actor
+            .call(StorageOperation::Diagnose, Value::Null)
+            .unwrap_err()
+            .name,
+        "ActorCallTimeoutError"
+    );
+    assert_eq!(
+        actor
+            .call(StorageOperation::Diagnose, Value::Null)
+            .unwrap_err()
+            .name,
+        "ActorOverloadedError"
+    );
+    assert_eq!(
+        actor.shutdown().unwrap_err().name,
+        "ActorShutdownTimeoutError"
+    );
+    locker
+        .call("sql.transaction.rollback", Value::Null)
+        .unwrap();
+    drop(locker);
+    // First shutdown has queued a stop; completion after lock release is bounded.
+    std::thread::sleep(Duration::from_millis(80));
     actor.shutdown().unwrap();
-
     let mut reopened = StorageActor::start(StorageActorConfig::new(&path, [0x53; 32])).unwrap();
+    assert!(
+        !reopened
+            .call(StorageOperation::GetMessage, write_key("blocked"))
+            .unwrap()
+            .is_null()
+    );
     reopened.shutdown().unwrap();
 }
 
@@ -397,58 +375,20 @@ fn starting_distinct_actor_preserves_existing_sqlite_transaction_lock() {
 fn drop_waits_for_worker_completion_and_writer_lease_release() {
     let directory = private_tempdir();
     let path = directory.path().join("drop-joins.db");
-    let (entered_sender, entered_receiver) = mpsc::sync_channel(1);
-    let (release_sender, release_receiver) = mpsc::sync_channel(1);
-    let release_receiver = Arc::new(Mutex::new(release_receiver));
-    let policy_release = Arc::clone(&release_receiver);
-    let actor = Arc::new(
-        StorageActor::start(
-            StorageActorConfig::new(&path, [0x56; 32])
-                .with_call_timeout(Duration::from_millis(40))
-                .with_shutdown_timeout(Duration::from_millis(40))
-                .with_send_policy(move |_| {
-                    let _ = entered_sender.try_send(());
-                    policy_release.lock().unwrap().recv().is_ok()
-                }),
-        )
-        .unwrap(),
-    );
-    let scope = json!({"platform":"slack","account":"work","chat_id":"C1"});
-    let created = actor
-        .call(
-            StorageOperation::SafetyPropose,
-            json!({"proposal":{"actor":"agent:drop","scope":scope,"body":"body"},"approval_ttl_ms":60_000}),
-        )
-        .unwrap();
-    let code = actor
-        .call(
-            StorageOperation::SafetyClaimApprovalCode,
-            json!({"intent_id":created["intent_id"]}),
-        )
-        .unwrap()["code"]
-        .clone();
-    actor
-        .call(
-            StorageOperation::SafetyApprove,
-            json!({"intent_id":created["intent_id"],"code":code,"actor":"agent:drop","scope":scope}),
-        )
-        .unwrap();
-    let blocked_actor = Arc::clone(&actor);
-    let intent_id = created["intent_id"].clone();
-    let blocked = thread::spawn(move || {
-        blocked_actor.call(
-            StorageOperation::SafetyClaim,
-            json!({"intent_id":intent_id,"transport_present":true,"send_capable":true,"quota_limit":1,"global_quota_limit":1}),
-        )
-    });
-    entered_receiver
-        .recv_timeout(Duration::from_secs(1))
-        .unwrap();
+    let actor = StorageActor::start(
+        StorageActorConfig::new(&path, [0x56; 32])
+            .with_call_timeout(Duration::from_millis(40))
+            .with_shutdown_timeout(Duration::from_millis(40)),
+    )
+    .unwrap();
+    let locker = lock_writes(&path, &[0x56; 32]);
     assert_eq!(
-        blocked.join().unwrap().unwrap_err().name,
+        actor
+            .call(StorageOperation::ApplySyncBatch, write_batch("drop"))
+            .unwrap_err()
+            .name,
         "ActorCallTimeoutError"
     );
-    let actor = Arc::try_unwrap(actor).ok().unwrap();
     let (dropped_sender, dropped_receiver) = mpsc::sync_channel(1);
     let dropper = thread::spawn(move || {
         drop(actor);
@@ -458,59 +398,21 @@ fn drop_waits_for_worker_completion_and_writer_lease_release() {
         dropped_receiver.recv_timeout(Duration::from_millis(100)),
         Err(mpsc::RecvTimeoutError::Timeout)
     ));
-    release_sender.send(()).unwrap();
+    locker
+        .call("sql.transaction.rollback", Value::Null)
+        .unwrap();
+    drop(locker);
     dropped_receiver
         .recv_timeout(Duration::from_secs(10))
         .unwrap();
     dropper.join().unwrap();
-
     let mut reopened = StorageActor::start(StorageActorConfig::new(&path, [0x56; 32])).unwrap();
-    reopened.shutdown().unwrap();
-}
-
-#[test]
-fn panicked_actor_is_joined_before_shutdown_returns() {
-    let directory = private_tempdir();
-    let path = directory.path().join("panic-joins.db");
-    let mut actor = StorageActor::start(
-        StorageActorConfig::new(&path, [0x57; 32]).with_send_policy(|_| {
-            panic!("injected policy panic");
-        }),
-    )
-    .unwrap();
-    let scope = json!({"platform":"slack","account":"work","chat_id":"C1"});
-    let created = actor
-        .call(
-            StorageOperation::SafetyPropose,
-            json!({"proposal":{"actor":"agent:panic","scope":scope,"body":"body"},"approval_ttl_ms":60_000}),
-        )
-        .unwrap();
-    let code = actor
-        .call(
-            StorageOperation::SafetyClaimApprovalCode,
-            json!({"intent_id":created["intent_id"]}),
-        )
-        .unwrap()["code"]
-        .clone();
-    actor
-        .call(
-            StorageOperation::SafetyApprove,
-            json!({"intent_id":created["intent_id"],"code":code,"actor":"agent:panic","scope":scope}),
-        )
-        .unwrap();
-    assert_eq!(
-        actor
-            .call(
-                StorageOperation::SafetyClaim,
-                json!({"intent_id":created["intent_id"],"transport_present":true,"send_capable":true,"quota_limit":1,"global_quota_limit":1}),
-            )
-            .unwrap_err()
-            .name,
-        "ActorPanickedError"
+    assert!(
+        !reopened
+            .call(StorageOperation::GetMessage, write_key("drop"))
+            .unwrap()
+            .is_null()
     );
-    assert_eq!(actor.shutdown().unwrap_err().name, "ActorPanickedError");
-
-    let mut reopened = StorageActor::start(StorageActorConfig::new(&path, [0x57; 32])).unwrap();
     reopened.shutdown().unwrap();
 }
 
@@ -522,4 +424,89 @@ fn actor_configuration_rejects_an_unbounded_or_empty_queue() {
         StorageActor::start(StorageActorConfig::new(&path, [0x52; 32]).with_queue_capacity(0))
             .unwrap_err();
     assert_eq!(error.name, "ActorConfigurationError");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn async_database_wait_leaves_single_executor_responsive() {
+    let directory = private_tempdir();
+    let path = directory.path().join("async-responsive.db");
+    let mut actor = StorageActor::start(
+        StorageActorConfig::new(&path, [0x61; 32]).with_call_timeout(Duration::from_secs(1)),
+    )
+    .unwrap();
+    let locker = lock_writes(&path, &[0x61; 32]);
+    let (result, ()) = tokio::join!(
+        actor.call_async(StorageOperation::ApplySyncBatch, write_batch("responsive")),
+        async {
+            // A blocking wait on this executor prevents the timer from releasing SQLite.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            locker
+                .call("sql.transaction.rollback", Value::Null)
+                .unwrap();
+        }
+    );
+    result.unwrap();
+    drop(locker);
+    actor.shutdown().unwrap();
+    assert_eq!(
+        actor
+            .call_async(StorageOperation::Diagnose, Value::Null)
+            .await
+            .unwrap_err()
+            .name,
+        "ActorStoppedError"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn async_timeout_and_cancellation_preserve_accepted_writes_without_replay() {
+    let directory = private_tempdir();
+    let path = directory.path().join("async-timeout.db");
+    let mut actor = StorageActor::start(
+        StorageActorConfig::new(&path, [0x62; 32])
+            .with_queue_capacity(2)
+            .with_call_timeout(Duration::from_millis(50)),
+    )
+    .unwrap();
+    let locker = lock_writes(&path, &[0x62; 32]);
+    for id in ["blocked", "timeout"] {
+        assert_eq!(
+            actor
+                .call_async(StorageOperation::ApplySyncBatch, write_batch(id))
+                .await
+                .unwrap_err()
+                .name,
+            "ActorCallTimeoutError"
+        );
+    }
+    {
+        let write = actor.call_async(StorageOperation::ApplySyncBatch, write_batch("cancelled"));
+        tokio::pin!(write);
+        tokio::select! { biased; result=&mut write=>panic!("blocked write completed: {result:?}"), _=tokio::task::yield_now()=>{}, }
+    }
+    assert_eq!(
+        actor
+            .call_async(StorageOperation::Diagnose, Value::Null)
+            .await
+            .unwrap_err()
+            .name,
+        "ActorOverloadedError"
+    );
+    locker
+        .call("sql.transaction.rollback", Value::Null)
+        .unwrap();
+    drop(locker);
+    actor.shutdown().unwrap();
+    let mut reopened = StorageActor::start(StorageActorConfig::new(&path, [0x62; 32])).unwrap();
+    for id in ["blocked", "timeout", "cancelled"] {
+        assert!(
+            !reopened
+                .call_async(StorageOperation::GetMessage, write_key(id))
+                .await
+                .unwrap()
+                .is_null(),
+            "accepted {id} write lost"
+        );
+    }
+    reopened.shutdown().unwrap();
 }

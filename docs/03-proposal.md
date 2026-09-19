@@ -1,5 +1,10 @@
 # 03 — Proposal: inboxd
 
+> 이 문서는 2026-09-17 기준의 제품/검증 기록이다. 이후 전송은 요청별 승인 없이
+> 인증된 `message.send` 하나로 통합했다. 현재 동작은
+> [전송 계약](12-account-workspace.md#direct-sends)과
+> [리팩토링 구조](16-rust-account-backends.md)를 따른다.
+
 ## 핵심 철학
 
 **서버를 믿지 않는다. 쓰기를 믿지 않는다. “결과 없음”과 “모름”을 구분한다.**

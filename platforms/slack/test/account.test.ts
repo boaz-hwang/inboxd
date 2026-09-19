@@ -1,41 +1,39 @@
+import { dispatch, dispatchWire } from "../../../packages/accounts/src/dispatch.ts";
 import { expect, test } from "bun:test";
 import { createSlackAccount } from "../src/account.ts";
 
-test("bulk names retain external DM fallback; unchanged covered rooms skip history", async () => {
+test("provider primitives forward exactly one API call with authentication", async () => {
   const calls: string[] = [];
-  let invalid = false;
-  const account = createSlackAccount({ bot_token: "fixture" }, (async (url: string, options: RequestInit) => {
-    const method = url.split("/").at(-1)!;
-    calls.push(method);
-    const params = new URLSearchParams(String(options.body));
-    const results: Record<string, unknown> = {
-      "users.list": { members: [{ id: "u", profile: { display_name: "원래 이름" } }] },
-      "users.info": { user: { profile: { display_name: "외부 이름" } } },
-      "conversations.list": { channels: [{ id: "a", is_im: true, user: "u" }, { id: "b", is_im: true, user: "external" }] },
-      "client.counts": { ims: [{ id: "a", latest: "42", updated: "1", history_invalid: invalid }] },
-      "conversations.history": { messages: [{ ts: "42", text: params.get("channel") }] },
-    };
-    return new Response(JSON.stringify({ ok: true, ...results[method] as object }));
+  const account = createSlackAccount({ bot_token: "fixture", session_cookie: "session" }, (async (url: string, options: RequestInit) => {
+    calls.push(url);
+    expect(options.redirect).toBe("error");
+    expect(new Headers(options.headers).get("authorization")).toBe("Bearer fixture");
+    expect(new Headers(options.headers).get("cookie")).toBe("d=session");
+    expect(new URLSearchParams(String(options.body)).get("cursor")).toBe("next");
+    return Response.json({ ok: true, members: [{ id: "u" }], response_metadata: { next_cursor: "another" } });
   }) as typeof fetch);
-  const first = await account.run({ op: "chats" });
-  expect(first.chats?.map(c => c.title)).toEqual(["원래 이름", "외부 이름"]);
-  expect(calls.filter(c => c === "users.info")).toHaveLength(1);
-  await account.run({ op: "chats" }); // establish change-watermark baseline without adding a cold-start request
-  calls.length = 0;
-  await account.run({ op: "chats" });
-  expect(calls.sort()).toEqual(["client.counts", "conversations.history", "conversations.list"].sort());
-  invalid = true; calls.length = 0;
-  await account.run({ op: "chats" });
-  expect(calls.filter(c => c === "conversations.history")).toHaveLength(2);
+  const result = await dispatch(account, { op: "slack.users.list", params: { cursor: "next", limit: 200 } });
+  expect(result.data as unknown).toEqual({ ok: true, members: [{ id: "u" }], response_metadata: { next_cursor: "another" } });
+  expect(calls).toEqual(["https://slack.com/api/users.list"]);
 });
 
-test("concurrent repeated senders share a single profile lookup", async () => {
-  let users = 0;
-  const account = createSlackAccount({ bot_token: "fixture" }, (async (url: string) => {
-    if (url.endsWith("users.info")) { users++; await new Promise(r => setTimeout(r, 5)); return Response.json({ ok: true, user: { name: "actual" } }); }
-    return Response.json({ ok: true, messages: Array.from({ length: 10 }, (_, i) => ({ ts: String(i), user: "same", text: "body" })) });
+test("send makes a single mutation and returns receipt without enrichment", async () => {
+  let calls = 0;
+  const account = createSlackAccount({ bot_token: "fixture" }, (async (_url: string, options: RequestInit) => {
+    calls++;
+    const params = new URLSearchParams(String(options.body));
+    expect(params.get("client_msg_id")).toBe("dedup");
+    return Response.json({ ok: true, ts: "42", message: { user: "unknown" } });
   }) as typeof fetch);
-  const result = await account.run({ op: "messages", chat_id: "a" });
-  expect(users).toBe(1);
-  expect(result.messages).toHaveLength(10);
+  expect((await dispatch(account, { op: "slack.chat.postMessage", params: { channel: "c", text: "body", client_msg_id: "dedup" } })).data as unknown).toEqual({ ok: true, ts: "42", message: { user: "unknown" } });
+  expect(calls).toBe(1);
+});
+
+test("unsupported operations and provider errors fail without retries", async () => {
+  let calls = 0;
+  const account = createSlackAccount({ bot_token: "fixture" }, (async (_url: string) => { calls++; return Response.json({ ok: false }); }) as typeof fetch);
+  await expect(dispatchWire(account, { op: "chats" })).rejects.toThrow("unsupported primitive");
+  expect(calls).toBe(0);
+  await expect(dispatch(account, { op: "slack.chat.postMessage", params: {channel:"c",text:"hello",client_msg_id:"request"} })).rejects.toThrow("Slack 조회 실패");
+  expect(calls).toBe(1);
 });

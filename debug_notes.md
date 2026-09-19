@@ -1,5 +1,31 @@
 # Debug Notes: Telegram connected but composer asks for connection
 
+## Rust account backend refactor verification (2026-09-19)
+
+- Initial full suites failed four Rust worker trust tests and two Bun launcher
+  tests. New account policy/real subprocess tests passed.
+- The inherited macOS temporary directory started with `/var`, a symlink to
+  `/private/var`. The production trust checks correctly reject symlink ancestors;
+  fixtures used the OS temporary directory and incorrectly expected it trusted.
+- Changing only `TMPDIR` to an owner-only temporary directory directly under the
+  current user's home made all 13 Rust worker tests and all four Bun launcher
+  tests pass. No trust validation was relaxed and no system permissions changed.
+- The affected trusted fixture builders now create their temporary roots under
+  canonical home paths, including config and provider acceptance fixtures. The
+  final full suites pass with the default environment and no `TMPDIR` override.
+- Clippy also caught one nonminimal cache-expiry boolean in the new Slack Rust
+  backend; simplifying it preserved behavior and the strict Clippy gate passed.
+- Review additionally caught lost acknowledged receipts from post-send name
+  lookups, cancelled-send cache invalidation, and provider cursor cycles hidden
+  by public UUID cursors. Implementation fixes have regression tests.
+- Opt-in CLI fixtures were updated to the installed `.inboxd/state/sock` layout
+  with a shorter temporary prefix for macOS socket limits. Scope-worker TUI
+  fixtures explicitly select their existing scope mode instead of automatically
+  entering the new account workspace. Original behavioral assertions remain.
+- Final verification: Bun 469 passed/0 failed (release daemon/fake-worker lanes
+  enabled); default Rust workspace/all-features passed (one existing opt-in
+  large performance gate ignored); strict Clippy, typecheck and boundaries passed.
+
 ## Startup performance investigation (2026-09-19)
 
 Follow-up API audit: docs/14-api-call-audit.md. Slack users.list works but omits
@@ -106,3 +132,11 @@ are not isolated cold-start trials; cold API counts were measured separately.
 Final Bun suite: 449 pass, 13 opt-in skips. Full 81-room
 refresh still takes seconds; this is first usable chat, not all-provider completion.
 See docs/15-startup-optimization-results.md for measurements and remaining limits.
+
+## 2026-09-19: Kakao self-chat send succeeded but history stayed stale
+
+- Observation: the live TUI reported `Verified`; its room preview changed, while message history lagged. The TUI already calls `account.messages` after successful sends. This is separate from unsolicited incoming-message push updates.
+- Cause: `direct_send::execute` selects an exact fixed binding before account dispatch. That worker can send and independently verify delivery, but it did not invalidate `AccountService`'s separate history/backend caches. Kakao could therefore return its complete, fresh pre-send snapshot. Account-native sends already fenced those caches. The viewport also retained its previous focus after a successful refresh.
+- Reproduction: a real Bun Kakao adapter fixture first loads a complete 100-message history. Delivery through the independent send boundary introduces message 101. Without invalidation, an overlapping read restores stale cached history. The regression fails with the old behavior and passes with the shared boundary.
+- Fix: fixed-worker dispatch uses the existing per-account send lock, invalidates cached state before/after dispatch, and holds a weak lifetime marker so overlapping reads cannot publish stale snapshots. Cancellation drops the marker without retaining a false in-progress state. No extra polling loop, send retry, or new cache is introduced. Successful TUI sends focus the newest refreshed message.
+- Validation: workspace Rust tests, Clippy, TypeScript checks, import boundaries, all 114 TUI tests, and 70 render captures pass. Tested external-send overlap and cancellation with synthetic providers; no real test messages sent. Installed product refreshed.

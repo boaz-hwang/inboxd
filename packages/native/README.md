@@ -19,7 +19,7 @@ another thread.
 The callback receives `{method,args}` and returns the same result envelope.
 Its frozen host methods are `sql.run|get|all|exec`,
 `sql.transaction.begin|commit|rollback`, `host.now`, `host.id`,
-`host.approvalCode`, `host.allowSend`, `host.canonicalJson`, `host.canonicalSha256`,
+`host.canonicalJson`, `host.canonicalSha256`,
 `host.sha256Text`,
 `host.jsonStringify`, `host.jsonParse`, `host.numberToString`,
 `host.utf16Compare` (`{left,right}` → -1/0/1), `host.codePointLength`, and

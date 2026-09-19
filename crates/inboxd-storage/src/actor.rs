@@ -23,7 +23,7 @@ use zeroize::Zeroizing;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::os::fd::{AsRawFd, RawFd};
 
-use crate::{DEFAULT_PENDING_INTENT_CAPACITY, MAX_PENDING_INTENT_CAPACITY, NativeHost};
+use crate::NativeHost;
 
 const DEFAULT_QUEUE_CAPACITY: usize = 64;
 const MAX_QUEUE_CAPACITY: usize = 4096;
@@ -36,17 +36,13 @@ const ACTOR_RUNNING: u8 = 1;
 const ACTOR_STOPPED: u8 = 2;
 const ACTOR_PANICKED: u8 = 3;
 
-type TrustedSendPolicy = Arc<dyn Fn(&Value) -> bool + Send + Sync + 'static>;
-
 pub struct StorageActorConfig {
     path: PathBuf,
     key: Zeroizing<Vec<u8>>,
     queue_capacity: usize,
-    pending_intent_capacity: usize,
     startup_timeout: Duration,
     call_timeout: Duration,
     shutdown_timeout: Duration,
-    send_policy: Option<TrustedSendPolicy>,
 }
 
 impl std::fmt::Debug for StorageActorConfig {
@@ -56,11 +52,9 @@ impl std::fmt::Debug for StorageActorConfig {
             .field("path", &self.path)
             .field("key", &"<redacted>")
             .field("queue_capacity", &self.queue_capacity)
-            .field("pending_intent_capacity", &self.pending_intent_capacity)
             .field("startup_timeout", &self.startup_timeout)
             .field("call_timeout", &self.call_timeout)
             .field("shutdown_timeout", &self.shutdown_timeout)
-            .field("send_policy", &self.send_policy.is_some())
             .finish()
     }
 }
@@ -71,21 +65,14 @@ impl StorageActorConfig {
             path: path.as_ref().to_owned(),
             key: Zeroizing::new(key.into()),
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
-            pending_intent_capacity: DEFAULT_PENDING_INTENT_CAPACITY,
             startup_timeout: DEFAULT_STARTUP_TIMEOUT,
             call_timeout: DEFAULT_CALL_TIMEOUT,
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
-            send_policy: None,
         }
     }
 
     pub fn with_queue_capacity(mut self, queue_capacity: usize) -> Self {
         self.queue_capacity = queue_capacity;
-        self
-    }
-
-    pub fn with_pending_intent_capacity(mut self, pending_intent_capacity: usize) -> Self {
-        self.pending_intent_capacity = pending_intent_capacity;
         self
     }
 
@@ -101,16 +88,6 @@ impl StorageActorConfig {
 
     pub fn with_shutdown_timeout(mut self, timeout: Duration) -> Self {
         self.shutdown_timeout = timeout;
-        self
-    }
-
-    /// Installs the trusted, synchronous in-process policy evaluated before
-    /// entering the claim transaction. The policy must not perform I/O.
-    pub fn with_send_policy(
-        mut self,
-        policy: impl Fn(&Value) -> bool + Send + Sync + 'static,
-    ) -> Self {
-        self.send_policy = Some(Arc::new(policy));
         self
     }
 }
@@ -130,19 +107,17 @@ pub enum StorageOperation {
     InboxMessages,
     SearchMessages,
     RecoverInterruptedSends,
+    OwnerSendReserve,
+    OwnerSendComplete,
+    OwnerSendLookup,
+    OwnerSendStatus,
     ChatList,
     AuditRead,
     SendStatus,
     SafetyInitialize,
-    SafetyPropose,
-    SafetyClaimApprovalCode,
     SafetyListPendingPage,
     SafetyGetIntent,
-    SafetyApprove,
     SafetyReject,
-    SafetyClaim,
-    SafetyFinalize,
-    SafetyVerifyReceipt,
 }
 
 impl StorageOperation {
@@ -161,19 +136,35 @@ impl StorageOperation {
             Self::InboxMessages => "store.inboxMessages",
             Self::SearchMessages => "store.searchMessages",
             Self::RecoverInterruptedSends => "daemon.recoverInterruptedSends",
+            Self::OwnerSendReserve => "ownerSend.reserve",
+            Self::OwnerSendComplete => "ownerSend.complete",
+            Self::OwnerSendLookup => "ownerSend.lookup",
+            Self::OwnerSendStatus => "ownerSend.status",
             Self::ChatList => "daemon.chatList",
             Self::AuditRead => "daemon.auditRead",
             Self::SendStatus => "daemon.sendStatus",
             Self::SafetyInitialize => "safety.initialize",
-            Self::SafetyPropose => "safety.propose",
-            Self::SafetyClaimApprovalCode => "safety.claimApprovalCode",
             Self::SafetyListPendingPage => "safety.listPendingPage",
             Self::SafetyGetIntent => "safety.getIntent",
-            Self::SafetyApprove => "safety.approve",
             Self::SafetyReject => "safety.reject",
-            Self::SafetyClaim => "safety.claim",
-            Self::SafetyFinalize => "safety.finalize",
-            Self::SafetyVerifyReceipt => "safety.verifyReceipt",
+        }
+    }
+}
+
+enum ActorResponse {
+    Blocking(SyncSender<CoreResult<Value>>),
+    Async(tokio::sync::oneshot::Sender<CoreResult<Value>>),
+}
+
+impl ActorResponse {
+    fn send(self, result: CoreResult<Value>) {
+        match self {
+            Self::Blocking(sender) => {
+                let _ = sender.send(result);
+            }
+            Self::Async(sender) => {
+                let _ = sender.send(result);
+            }
         }
     }
 }
@@ -182,7 +173,7 @@ enum ActorMessage {
     Call {
         operation: StorageOperation,
         input: Value,
-        response: SyncSender<CoreResult<Value>>,
+        response: ActorResponse,
     },
     Shutdown,
 }
@@ -255,12 +246,7 @@ impl StorageActor {
                 format!("queue capacity must be from 1 to {MAX_QUEUE_CAPACITY}"),
             ));
         }
-        if !(1..=MAX_PENDING_INTENT_CAPACITY).contains(&config.pending_intent_capacity) {
-            return Err(CoreError::new(
-                "ActorConfigurationError",
-                format!("pending intent capacity must be from 1 to {MAX_PENDING_INTENT_CAPACITY}"),
-            ));
-        }
+
         validate_timeout(config.startup_timeout, "startup timeout")?;
         validate_timeout(config.call_timeout, "call timeout")?;
         validate_timeout(config.shutdown_timeout, "shutdown timeout")?;
@@ -275,10 +261,19 @@ impl StorageActor {
         // A slow startup is reported only after synchronous ownership cleanup;
         // there is never a JoinHandle to detach on this path.
         let (host, lease) = open_writer(config)?;
-        host.execute("store.migrate", &Value::Null)?;
-        host.execute("safety.initialize", &Value::Null)?;
-        host.execute("daemon.recoverInterruptedSends", &Value::Null)?;
-        host.execute("store.diagnose", &Value::Null)?;
+        // Struct field drop order applies on startup error, spawn failure,
+        // worker panic and normal shutdown alike.
+        let owner = StorageOwner {
+            host,
+            _lease: lease,
+        };
+        owner.host.execute("store.migrate", &Value::Null)?;
+        owner.host.execute("safety.initialize", &Value::Null)?;
+        owner
+            .host
+            .execute("daemon.recoverInterruptedSends", &Value::Null)?;
+        owner.host.execute("ownerSend.recover", &Value::Null)?;
+        owner.host.execute("store.diagnose", &Value::Null)?;
         if startup_started.elapsed() > startup_timeout {
             return Err(CoreError::new(
                 "ActorStartupTimeoutError",
@@ -294,7 +289,7 @@ impl StorageActor {
             .name("inboxd-storage".into())
             .spawn(move || {
                 let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
-                    let _lease = lease;
+                    let owner = owner;
                     while let Ok(message) = receiver.recv() {
                         match message {
                             ActorMessage::Call {
@@ -303,11 +298,11 @@ impl StorageActor {
                                 response,
                             } => {
                                 let result = contain_actor_call(&thread_state, || {
-                                    host.execute(operation.as_str(), &input)
+                                    owner.host.execute(operation.as_str(), &input)
                                 });
                                 let panicked =
                                     thread_state.load(Ordering::Acquire) == ACTOR_PANICKED;
-                                let _ = response.send(result);
+                                response.send(result);
                                 if panicked {
                                     break;
                                 }
@@ -335,33 +330,11 @@ impl StorageActor {
         })
     }
 
+    /// Blocking compatibility API for synchronous callers. Async runtimes must
+    /// use `call_async` so a slow database does not occupy an executor thread.
     pub fn call(&self, operation: StorageOperation, input: Value) -> CoreResult<Value> {
-        let sender = self.sender.as_ref().ok_or_else(|| {
-            actor_terminal_error(
-                self.state.load(Ordering::Acquire),
-                "storage actor is not running",
-            )
-        })?;
         let (response, result) = mpsc::sync_channel(1);
-        match sender.try_send(ActorMessage::Call {
-            operation,
-            input,
-            response,
-        }) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => {
-                return Err(CoreError::new(
-                    "ActorOverloadedError",
-                    "storage actor queue is full",
-                ));
-            }
-            Err(TrySendError::Disconnected(_)) => {
-                return Err(actor_terminal_error(
-                    self.state.load(Ordering::Acquire),
-                    "storage actor is not running",
-                ));
-            }
-        }
+        self.enqueue(operation, input, ActorResponse::Blocking(response))?;
         match result.recv_timeout(self.call_timeout) {
             Ok(result) => result,
             Err(mpsc::RecvTimeoutError::Timeout) => Err(CoreError::new(
@@ -371,6 +344,54 @@ impl StorageActor {
             Err(mpsc::RecvTimeoutError::Disconnected) => Err(actor_terminal_error(
                 self.state.load(Ordering::Acquire),
                 "storage actor stopped without a response",
+            )),
+        }
+    }
+
+    /// Enqueues once and suspends while the single database owner executes it.
+    /// Timeout or cancellation abandons only the response: an accepted write may
+    /// still commit. Callers must not infer rollback or automatically replay it.
+    pub async fn call_async(&self, operation: StorageOperation, input: Value) -> CoreResult<Value> {
+        let (response, result) = tokio::sync::oneshot::channel();
+        self.enqueue(operation, input, ActorResponse::Async(response))?;
+        match tokio::time::timeout(self.call_timeout, result).await {
+            Ok(Ok(result)) => result,
+            Err(_) => Err(CoreError::new(
+                "ActorCallTimeoutError",
+                "storage actor call timed out",
+            )),
+            Ok(Err(_)) => Err(actor_terminal_error(
+                self.state.load(Ordering::Acquire),
+                "storage actor stopped without a response",
+            )),
+        }
+    }
+
+    fn enqueue(
+        &self,
+        operation: StorageOperation,
+        input: Value,
+        response: ActorResponse,
+    ) -> CoreResult<()> {
+        let sender = self.sender.as_ref().ok_or_else(|| {
+            actor_terminal_error(
+                self.state.load(Ordering::Acquire),
+                "storage actor is not running",
+            )
+        })?;
+        match sender.try_send(ActorMessage::Call {
+            operation,
+            input,
+            response,
+        }) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => Err(CoreError::new(
+                "ActorOverloadedError",
+                "storage actor queue is full",
+            )),
+            Err(TrySendError::Disconnected(_)) => Err(actor_terminal_error(
+                self.state.load(Ordering::Acquire),
+                "storage actor is not running",
             )),
         }
     }
@@ -719,6 +740,12 @@ fn verify_new_database_descriptor(_: &OpenDescriptorSnapshot, _: &File) -> CoreR
     ))
 }
 
+// Fields drop in declaration order: close SQLCipher before unlocking ownership.
+struct StorageOwner {
+    host: NativeHost,
+    _lease: WriterLease,
+}
+
 struct WriterLease {
     identity: File,
     _lock: File,
@@ -727,6 +754,20 @@ struct WriterLease {
 
 struct PathMutationGuard {
     _lock: File,
+}
+
+impl Drop for WriterLease {
+    fn drop(&mut self) {
+        // Closing our fd is insufficient while a concurrently forked child
+        // still shares its open file description before exec/CLOEXEC.
+        let _ = FileExt::unlock(&self._lock);
+    }
+}
+
+impl Drop for PathMutationGuard {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self._lock);
+    }
 }
 
 fn writer_lock_root() -> CoreResult<PathBuf> {
@@ -1023,13 +1064,7 @@ fn acquire_writer_lock(path: &Path) -> CoreResult<(PathBuf, WriterLease)> {
 }
 
 fn open_writer(config: StorageActorConfig) -> CoreResult<(NativeHost, WriterLease)> {
-    let StorageActorConfig {
-        path,
-        key,
-        pending_intent_capacity,
-        send_policy,
-        ..
-    } = config;
+    let StorageActorConfig { path, key, .. } = config;
     let (path, lease) = acquire_writer_lock(&path)?;
     let production_open_guard = NativeHost::acquire_production_open_guard()?;
     #[cfg(test)]
@@ -1040,7 +1075,7 @@ fn open_writer(config: StorageActorConfig) -> CoreResult<(NativeHost, WriterLeas
     if host.is_err() {
         run_test_post_open_hook(&path);
     }
-    let mut host = host?;
+    let host = host?;
     let opened_descriptor_proof =
         verify_new_database_descriptor(&descriptors_before_open, &lease.identity);
     #[cfg(test)]
@@ -1053,13 +1088,6 @@ fn open_writer(config: StorageActorConfig) -> CoreResult<(NativeHost, WriterLeas
         ));
     }
     verify_open_identity(&path, &lease.identity)?;
-    host.set_pending_intent_capacity(pending_intent_capacity)?;
-    if let Some(policy) = send_policy {
-        host.set_hooks(crate::NativeHooks {
-            approval_code: None,
-            allow_send: Some(Box::new(move |intent| policy(intent))),
-        });
-    }
     Ok((host, lease))
 }
 
@@ -1067,6 +1095,31 @@ fn open_writer(config: StorageActorConfig) -> CoreResult<(NativeHost, WriterLeas
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn released_writer_lease_does_not_wait_for_inherited_descriptor_copies() {
+        let directory = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let path = directory
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("inherited.db");
+        let (_, lease) = acquire_writer_lock(&path).unwrap();
+        // dup and fork share the same open file description. A concurrent spawn
+        // can hold these copies until exec applies CLOEXEC, even after shutdown
+        // has joined the actor thread.
+        let inherited_path = lease._path_guard._lock.try_clone().unwrap();
+        let inherited_identity = lease._lock.try_clone().unwrap();
+        drop(lease);
+        let (_, reopened) = acquire_writer_lock(&path)
+            .expect("released owner must unlock even while descriptor copies exist");
+        drop((reopened, inherited_path, inherited_identity));
+    }
 
     #[test]
     fn cross_process_path_swap_helper() {

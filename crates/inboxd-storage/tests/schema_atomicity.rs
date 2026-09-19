@@ -121,12 +121,12 @@ fn assert_v3_rejected_without_mutation(host: &NativeHost, label: &str) {
     );
     let error = host.execute("store.migrate", &Value::Null).unwrap_err();
     assert_eq!(error.name, "StoreSchemaError", "{label}");
-    assert_eq!(error.message, "Store schema 3 failed validation", "{label}");
+    assert_eq!(error.message, "Store schema 4 failed validation", "{label}");
     assert_eq!(complete_shape(host), before, "{label} was mutated");
 }
 
 #[test]
-fn exact_pre_r1_schema_v3_is_immutable_and_material_definition_drift_is_rejected() {
+fn exact_pre_r1_schema_v3_migrates_additively_and_material_definition_drift_is_rejected() {
     let directory = tempfile::tempdir().unwrap();
     let key = [0x70; 32];
 
@@ -135,19 +135,27 @@ fn exact_pre_r1_schema_v3_is_immutable_and_material_definition_drift_is_rejected
     install_v3(&canonical, PRE_R1_SCHEMA_V3);
     let canonical_complete = complete_shape(&canonical);
     let canonical_material = material_shape(&canonical);
-    assert_eq!(canonical.execute("store.migrate", &Value::Null).unwrap(), 3);
-    assert_eq!(complete_shape(&canonical), canonical_complete);
+    assert_eq!(canonical.execute("store.migrate", &Value::Null).unwrap(), 4);
+    assert_eq!(material_shape(&canonical), canonical_material);
+    let migrated_complete = complete_shape(&canonical);
+    assert_eq!(migrated_complete.len(), canonical_complete.len() + 1);
+    assert_eq!(
+        SqlHost::new(&canonical)
+            .get("PRAGMA user_version", &[])
+            .unwrap()["user_version"],
+        4
+    );
     assert_eq!(
         canonical.execute("store.diagnose", &Value::Null).unwrap()["ready"],
         true
     );
 
     let fresh = NativeHost::open_production(&directory.path().join("fresh.db"), &key).unwrap();
-    assert_eq!(fresh.execute("store.migrate", &Value::Null).unwrap(), 3);
+    assert_eq!(fresh.execute("store.migrate", &Value::Null).unwrap(), 4);
     assert_eq!(material_shape(&fresh), canonical_material);
-    assert_eq!(complete_shape(&fresh), canonical_complete);
-    assert_eq!(fresh.execute("store.migrate", &Value::Null).unwrap(), 3);
-    assert_eq!(complete_shape(&fresh), canonical_complete);
+    assert_eq!(complete_shape(&fresh), migrated_complete);
+    assert_eq!(fresh.execute("store.migrate", &Value::Null).unwrap(), 4);
+    assert_eq!(complete_shape(&fresh), migrated_complete);
 
     let drifts = [
         (
@@ -211,7 +219,7 @@ fn exact_pre_r1_schema_v3_is_immutable_and_material_definition_drift_is_rejected
             "{label} was accepted"
         );
         let error = host.execute("store.migrate", &Value::Null).unwrap_err();
-        assert_eq!(error.message, "Store schema 3 failed validation", "{label}");
+        assert_eq!(error.message, "Store schema 4 failed validation", "{label}");
         assert_eq!(complete_shape(&host), before, "{label} was mutated");
     }
 }
@@ -292,7 +300,7 @@ fn version_three_is_not_ready_without_the_complete_schema() {
         false
     );
     let error = host.execute("store.migrate", &Value::Null).unwrap_err();
-    assert_eq!(error.message, "Store schema 3 failed validation");
+    assert_eq!(error.message, "Store schema 4 failed validation");
     assert_eq!(
         SqlHost::new(&host).get("PRAGMA user_version", &[]).unwrap()["user_version"],
         3
@@ -314,7 +322,7 @@ fn incompatible_schema_migration_rolls_back_every_partial_object() {
         .unwrap();
 
     let error = host.execute("store.migrate", &Value::Null).unwrap_err();
-    assert_eq!(error.message, "Store schema 3 failed validation");
+    assert_eq!(error.message, "Store schema 4 failed validation");
     assert_eq!(
         sql.all(
             "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",

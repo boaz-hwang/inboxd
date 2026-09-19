@@ -75,8 +75,8 @@ const rows: Record<Screen, Row[]> = {
     { id: "m-chat-2", resource: slackResource, chat: chat(slackResource), author: "Ari", ts: "09:42", body: "수정됨", edited: true },
   ],
   approvals: [
-    { id: "intent-1", resource: slackResource, chat: chat(slackResource), state: "Proposed", destination: "slack:work:ops", expires: "10m", body: "승인 대기 제안", codeRequired: true },
-    { id: "intent-2", resource: kakaoOfficialResource, state: "Uncertain", destination: "kakao:official-app:friend-uuid", expires: "expired", body: "공식 템플릿 자동 재전송 금지", codeRequired: false },
+    { id: "intent-1", resource: slackResource, chat: chat(slackResource), state: "Proposed", destination: "slack:work:ops", expires: "10m", body: "과거 승인 요청" },
+    { id: "intent-2", resource: kakaoOfficialResource, state: "Uncertain", destination: "kakao:official-app:friend-uuid", expires: "expired", body: "공식 템플릿 자동 재전송 금지" },
   ],
   doctor: [
     { id: "encryption", state: "SQLCipher ready=true", evidenceLines: ["Cipher: fixture-version", "Schema: 2"] },
@@ -149,7 +149,7 @@ function readOnlyChatState(): TuiState {
 function completionLostState(): TuiState {
   let state = evidenceState("approvals");
   state = reduce(state, { type: "querySucceeded", generation: 1, screen: "approvals", data: [{
-    id: "in-flight", resource: slackResource, chat: chat(slackResource), state: "Uncertain", destination: "slack:work:ops", codeRequired: false,
+    id: "in-flight", resource: slackResource, chat: chat(slackResource), state: "Uncertain", destination: "slack:work:ops",
     evidenceLines: ["session observation", "outcome unknown; do not resend"],
   }] });
   return reduce(state, { type: "disconnected", generation: 1 });
@@ -157,70 +157,6 @@ function completionLostState(): TuiState {
 
 function staleDoctorState(): TuiState {
   return reduce(evidenceState("doctor"), { type: "disconnected", generation: 1 });
-}
-
-function unavailableApprovalState(state: TuiState, notice: string): TuiState {
-  return {
-    ...reduce(state, {
-      type: "querySucceeded",
-      generation: state.connection.generation,
-      screen: "approvals",
-      data: rows.approvals.map((row, index) => index === 0 ? { ...row, state: "Code unavailable", codeRequired: false } : row),
-    }),
-    notice,
-  };
-}
-
-async function rejectedApprovalState(): Promise<TuiState> {
-  const controller = createTuiController({ client: {
-    start: async () => {},
-    stop: () => {},
-    request: async (method) => {
-      if (method === "capability.list") return { v: 1, resources: capabilities };
-      if (method === "chat.list") return { chats: [] };
-      if (method === "safety.intent.listPending") return { intents: [{ intent_id: "intent-1", actor: "operator", scope: { platform: "slack", account: "work", chat_id: "ops" }, state: "Proposed", body: "승인 대기 제안", expires_at: "10m" }] };
-      if (method === "safety.intent.claimApprovalCode") return { code: "654321" };
-      if (method === "safety.intent.approve") throw new Error("invalid approval code");
-      return {};
-    },
-  } });
-  await controller.start();
-  await controller.dispatchKey("4");
-  await controller.dispatchKey("a");
-  for (const key of "000000") await controller.dispatchKey(key);
-  await controller.dispatchKey("Enter");
-  const state = controller.state;
-  controller.stop();
-  return state;
-}
-
-async function kakaoTemplateSentState(): Promise<TuiState> {
-  const envelope = {
-    v: 2,
-    destination: kakaoOfficialResource,
-    content: { mode: "approved_template", template_id: "notice-7", arguments: { amount: 1000 }, preview: "승인: 1000" },
-  } as const;
-  const controller = createTuiController({ client: {
-    start: async () => {},
-    stop: () => {},
-    request: async (method) => {
-      if (method === "capability.list") return { v: 1, resources: capabilities };
-      if (method === "chat.list") return { chats: [] };
-      if (method === "safety.intent.listPending") return { intents: [{ intent_id: "template-1", actor: "operator", envelope, state: "Proposed", expires_at: "10m" }] };
-      if (method === "safety.intent.claimApprovalCode") return { code: "654321" };
-      if (method === "safety.intent.approve") return { state: "Verified" };
-      return {};
-    },
-  } });
-  await controller.start();
-  await controller.dispatchKey("4");
-  await controller.dispatchKey("a");
-  for (const key of "654321") await controller.dispatchKey(key);
-  await controller.dispatchKey("Enter");
-  await controller.dispatchKey("d");
-  const state = controller.state;
-  controller.stop();
-  return state;
 }
 
 async function settleNativeInput(): Promise<void> {
@@ -253,7 +189,7 @@ async function nativeJourneyFrame(
       if (method === "chat.list") return { chats: [] };
       if (method === "message.inbox") return { messages: [{ msg_id: "native-parent", body: "Native reply parent" }] };
       if (method === "safety.intent.listPending") return { intents: [] };
-      if (method === "safety.intent.create") return { intent_id: "native-proposal", state: "Proposed" };
+      if (method === "message.send") return { state: "Sent" };
       return {};
     },
   } });
@@ -264,7 +200,7 @@ async function nativeJourneyFrame(
     await drive(harness.mockInput, controller);
     await settleNativeInput();
     await harness.flush();
-    return renderScreen(controller.state, size, { approvalCode: controller.currentApprovalCode() });
+    return renderScreen(controller.state, size);
   } finally {
     mounted.destroy();
     controller.stop();
@@ -326,8 +262,6 @@ await mkdir(outputDirectory, { recursive: true });
 await Promise.all(readdirSync(outputDirectory)
   .filter(name => name.endsWith(".txt"))
   .map(name => rm(join(outputDirectory, name))));
-const rejectedApproval = await rejectedApprovalState();
-const kakaoTemplateSent = await kakaoTemplateSentState();
 for (const screen of screens) {
   for (const size of sizes) await capture(screen, evidenceState(screen), size);
   for (const size of sizes) await capture(`${screen}-detail`, activatedDetailState(screen), size);
@@ -340,9 +274,6 @@ for (const size of sizes) {
   await capture("doctor-stale", staleDoctorState(), size);
   await capture("inbox-scope-limit", scopeLimitState(), size);
   await capture("approvals-completion-lost", completionLostState(), size);
-  let prompt = activatedDetailState("approvals");
-  for (const key of ["a", "1", "2", "3", "4"]) prompt = reduce(prompt, { type: "key", key });
-  await capture("approvals-active-prompt", prompt, size);
   let compose = activatedDetailState("chat");
   for (const key of ["c", ..."검토 후 배포할까요? 👩‍💻"]) compose = reduce(compose, { type: "key", key });
   // Fixture content is deterministic; interactive control behavior has native input tests.
@@ -351,7 +282,7 @@ for (const size of sizes) {
   for (const outcome of ["Sent", "Verified", "Uncertain"]) {
     for (const screen of ["chat", "approvals"] as const) {
       const state = reduce(evidenceState(screen), { type: "querySucceeded", generation: 1, screen: "approvals", data: [{
-        id: `outcome-${outcome}`, chat: { platform: "slack", account: "work", chat_id: "ops" }, state: outcome, destination: "slack:work:ops", body: "Operator-reviewed proposal", codeRequired: false,
+        id: `outcome-${outcome}`, chat: { platform: "slack", account: "work", chat_id: "ops" }, state: outcome, destination: "slack:work:ops", body: "Historical send record",
       }] });
       await capture(`${screen}-${outcome.toLowerCase()}`, state, size);
     }
@@ -363,14 +294,7 @@ for (const size of sizes) {
   await capture("inbox-long-detail", long, size);
   for (let i = 0; i < 40; i++) long = reduce(long, { type: "key", key: "PageDown" });
   await capture("inbox-long-detail-scrolled", long, size);
-  await capture("approvals-rejected", rejectedApproval, size);
   await capture("chat-read-only", readOnlyChatState(), size);
-  await capture("approvals-kakao-template-sent", kakaoTemplateSent, size);
-  let reconnected = disconnectedApprovalsState(false);
-  reconnected = reduce(reconnected, { type: "connected", generation: 2 });
-  reconnected = reduce(reconnected, { type: "subscribed", generation: 2 });
-  for (const screen of screens) reconnected = reduce(reconnected, { type: "querySucceeded", generation: 2, screen, data: rows[screen] });
-  await capture("approvals-reconnected", unavailableApprovalState(reconnected, "approval code unavailable after reconnect — re-proposal required"), size);
   await captureNativeJourneys(size);
 }
 

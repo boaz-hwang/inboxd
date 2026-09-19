@@ -21,10 +21,9 @@ use tokio::{
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::{CapabilityRegistry, DaemonError, Result, ServerOwner, coordinator};
+use crate::{CapabilityRegistry, DaemonError, Result, ServerOwner};
 
 const DEFAULT_INTERVAL_END: u64 = 9_007_199_254_740_991;
-const APPROVAL_TTL_MS: u64 = 15 * 60 * 1_000;
 
 struct Subscriber {
     topics: Arc<Mutex<BTreeSet<String>>>,
@@ -113,6 +112,7 @@ pub(crate) async fn run_server(
     runtime: ServerRuntime,
     mut shutdown: oneshot::Receiver<()>,
 ) -> Arc<ServerOwner> {
+    let mut live = runtime.accounts.start_live(Arc::clone(&runtime.events));
     let mut connections = JoinSet::new();
     loop {
         tokio::select! {
@@ -146,8 +146,11 @@ pub(crate) async fn run_server(
             _ = &mut shutdown => break,
         }
     }
+    live.abort_all();
+    while live.join_next().await.is_some() {}
     connections.abort_all();
     while connections.join_next().await.is_some() {}
+    runtime.accounts.stop_live().await;
     runtime.connection_tasks.store(0, Ordering::Release);
     owner
 }
@@ -156,6 +159,7 @@ struct Session {
     id: String,
     role: Option<ClientRole>,
     trusted_approver: bool,
+    trusted_sender: bool,
     topics: Arc<Mutex<BTreeSet<String>>>,
 }
 
@@ -188,6 +192,7 @@ async fn handle_connection(
         id: session_id.clone(),
         role: None,
         trusted_approver: false,
+        trusted_sender: false,
         topics,
     };
     let mut reads: tokio::task::JoinSet<(Value, String, String)> = tokio::task::JoinSet::new();
@@ -399,13 +404,13 @@ fn page(params: &Map<String, Value>) -> std::result::Result<Map<String, Value>, 
     Ok(result)
 }
 
-fn actor_call(
+async fn actor_call(
     actor: &StorageActor,
     operation: StorageOperation,
     input: Value,
     bad_request_errors: bool,
 ) -> RpcResult {
-    actor.call(operation, input).map_err(|error| {
+    actor.call_async(operation, input).await.map_err(|error| {
         if bad_request_errors
             && matches!(
                 error.name.as_str(),
@@ -425,11 +430,12 @@ fn role_value(role: Option<ClientRole>) -> Value {
         Some(ClientRole::Agent) => json!("agent"),
         Some(ClientRole::Mcp) => json!("mcp"),
         Some(ClientRole::Approver) => json!("approver"),
+        Some(ClientRole::Sender) => json!("sender"),
         None => Value::Null,
     }
 }
 
-fn audit_read(
+async fn audit_read(
     session: &Session,
     actor: &StorageActor,
     action: &str,
@@ -447,7 +453,8 @@ fn audit_read(
             "result_count":result_count,
         }),
         false,
-    )?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -463,11 +470,14 @@ fn assert_trusted_approver(session: &Session) -> std::result::Result<(), RpcErro
     Ok(())
 }
 
-fn publish_safety(events: &EventHub, actor: &StorageActor, intent_id: &str) {
-    if let Ok(intent) = actor.call(
-        StorageOperation::SafetyGetIntent,
-        json!({"intent_id":intent_id}),
-    ) {
+async fn publish_safety(events: &EventHub, actor: &StorageActor, intent_id: &str) {
+    if let Ok(intent) = actor
+        .call_async(
+            StorageOperation::SafetyGetIntent,
+            json!({"intent_id":intent_id}),
+        )
+        .await
+    {
         if let Some(state) = intent.get("state") {
             let _ = events.publish(
                 "safety.intent.changed",
@@ -603,6 +613,11 @@ async fn dispatch(
                 approver_token,
                 request.params.get("approver_token").and_then(Value::as_str),
             );
+        session.trusted_sender = role == ClientRole::Sender
+            && token_matches(
+                approver_token,
+                request.params.get("sender_token").and_then(Value::as_str),
+            );
         return Ok(json!({"protocol":"inboxd","ready":true}));
     }
     if session.role.is_none() {
@@ -613,7 +628,8 @@ async fn dispatch(
     match request.method.as_str() {
         "system.ping" => Ok(json!({"pong":true})),
         "system.status" => {
-            let encryption = actor_call(actor, StorageOperation::Diagnose, json!({}), false)?;
+            let encryption =
+                actor_call(actor, StorageOperation::Diagnose, json!({}), false).await?;
             let directory = capabilities.list();
             let mut auth = serde_json::Map::new();
             if let Some(resources) = directory["resources"].as_array() {
@@ -632,11 +648,16 @@ async fn dispatch(
             .list(&Value::Object(request.params.clone()))
             .await
             .map_err(RpcError::unsupported),
-        "account.messages" | "account.search" | "account.send" => {
-            let op = request.method.strip_prefix("account.").unwrap();
-            if op == "send" {
-                assert_trusted_approver(session)?;
+        "message.send" => {
+            if !session.trusted_sender && !session.trusted_approver {
+                return Err(RpcError::unsupported(
+                    "authenticated local sender authorization is required",
+                ));
             }
+            crate::direct_send::execute(actor, capabilities, accounts, &Value::Object(request.params.clone()), json!({"role":role_value(session.role),"session_id":session.id,"authority":"local-owner-token","method":request.method})).await.map_err(RpcError::unsupported)
+        }
+        "account.messages" | "account.search" => {
+            let op = request.method.strip_prefix("account.").unwrap();
             accounts
                 .query(op, &Value::Object(request.params.clone()))
                 .await
@@ -644,9 +665,9 @@ async fn dispatch(
         }
         "chat.list" => {
             let input = Value::Object(page(&request.params)?);
-            let found = actor_call(actor, StorageOperation::ChatList, input, true)?;
+            let found = actor_call(actor, StorageOperation::ChatList, input, true).await?;
             let count = found["chats"].as_array().map_or(0, Vec::len);
-            audit_read(session, actor, "read.chat_list", "all-chats".into(), count)?;
+            audit_read(session, actor, "read.chat_list", "all-chats".into(), count).await?;
             Ok(found)
         }
         "message.recent" | "message.evidence" => {
@@ -660,7 +681,8 @@ async fn dispatch(
                 operation,
                 Value::Object(request.params.clone()),
                 true,
-            )?;
+            )
+            .await?;
             let field = if request.method == "message.recent" {
                 "messages"
             } else {
@@ -675,7 +697,7 @@ async fn dispatch(
             let subject =
                 serde_json::to_string(request.params.get("chats").unwrap_or(&Value::Null))
                     .unwrap_or_default();
-            audit_read(session, actor, action, subject, count)?;
+            audit_read(session, actor, action, subject, count).await?;
             Ok(found)
         }
         "message.inbox" | "message.search" => {
@@ -704,7 +726,7 @@ async fn dispatch(
             } else {
                 StorageOperation::InboxMessages
             };
-            let found = actor_call(actor, operation, Value::Object(input), true)?;
+            let found = actor_call(actor, operation, Value::Object(input), true).await?;
             let count = found["messages"].as_array().map_or(0, Vec::len);
             let key = format!(
                 "{}\0{}\0{}",
@@ -722,7 +744,8 @@ async fn dispatch(
                 },
                 key,
                 count,
-            )?;
+            )
+            .await?;
             Ok(found)
         }
         "message.get" => {
@@ -733,7 +756,8 @@ async fn dispatch(
                 "chat_id":chat["chat_id"],
                 "msg_id":string(request.params.get("msg_id"), "msg_id")?,
             });
-            let message = actor_call(actor, StorageOperation::GetMessage, key.clone(), true)?;
+            let message =
+                actor_call(actor, StorageOperation::GetMessage, key.clone(), true).await?;
             let subject = format!(
                 "{}\0{}\0{}\0{}",
                 key["platform"].as_str().unwrap_or_default(),
@@ -747,11 +771,14 @@ async fn dispatch(
                 "read.message",
                 subject,
                 usize::from(!message.is_null()),
-            )?;
+            )
+            .await?;
             Ok(json!({"message":message}))
         }
         "sync.backfill" => {
-            assert_trusted_approver(session)?;
+            if !session.trusted_sender {
+                assert_trusted_approver(session)?;
+            }
             let (chat, interval) = if request.params.contains_key("chat") {
                 (chat(&request.params)?, interval(&request.params)?)
             } else {
@@ -779,7 +806,8 @@ async fn dispatch(
                     "sync.backfill is unavailable because no worker is configured",
                 )
             })?;
-            let sync = actor_call(actor, StorageOperation::ReadSyncState, chat.clone(), false)?;
+            let sync =
+                actor_call(actor, StorageOperation::ReadSyncState, chat.clone(), false).await?;
             let expected_page_sequence = sync
                 .get("page_sequence")
                 .and_then(Value::as_u64)
@@ -799,13 +827,13 @@ async fn dispatch(
             let event_count = page.messages.len() + page.tombstones.len();
             let authoritative = page.authoritative;
             let batch = plan.into_apply_sync_batch(page, expected_page_sequence)?;
-            actor_call(actor, StorageOperation::ApplySyncBatch, batch, false)?;
+            actor_call(actor, StorageOperation::ApplySyncBatch, batch, false).await?;
             // Notify only after durable commit, including empty-page coverage updates.
             let _ = events.publish("message.upserted", json!({"chat":chat}));
             let _ = events.publish("coverage.changed", json!({"chat":chat}));
             Ok(json!({"event_count":event_count,"authoritative":authoritative}))
         }
-        "sync.status" => Ok(json!({"state":"idle"})),
+        "sync.status" => Ok(accounts.live_status()),
         "auth.status" => {
             let directory = capabilities.list();
             let authenticated = directory["resources"].as_array().is_some_and(|resources| {
@@ -834,29 +862,17 @@ async fn dispatch(
             }
             Ok(capabilities.list())
         }
-        "safety.intent.create" => {
-            let created = actor_call(
-                actor,
-                StorageOperation::SafetyPropose,
-                json!({
-                    "proposal":Value::Object(request.params.clone()),
-                    "approval_ttl_ms":APPROVAL_TTL_MS,
-                }),
-                true,
-            )?;
-            if let Some(intent_id) = created.get("intent_id").and_then(Value::as_str) {
-                publish_safety(events, actor, intent_id);
-            }
-            Ok(created)
-        }
         "safety.intent.listPending" => {
-            assert_trusted_approver(session)?;
+            if !session.trusted_sender {
+                assert_trusted_approver(session)?;
+            }
             let found = actor_call(
                 actor,
                 StorageOperation::SafetyListPendingPage,
                 Value::Object(page(&request.params)?),
                 true,
-            )?;
+            )
+            .await?;
             let count = found["intents"].as_array().map_or(0, Vec::len);
             audit_read(
                 session,
@@ -864,60 +880,51 @@ async fn dispatch(
                 "read.safety_intent_list",
                 "pending-intents".into(),
                 count,
-            )?;
+            )
+            .await?;
             Ok(found)
         }
-        "safety.intent.claimApprovalCode" => {
-            assert_trusted_approver(session)?;
-            let intent_id = string(request.params.get("intent_id"), "intent_id")?;
-            let result = actor_call(
-                actor,
-                StorageOperation::SafetyClaimApprovalCode,
-                json!({"intent_id":intent_id}),
-                true,
-            )?;
-            if result.get("unavailable") == Some(&json!(true)) {
-                publish_safety(events, actor, &intent_id);
-            }
-            Ok(result)
-        }
-        "safety.intent.approve" => {
-            assert_trusted_approver(session)?;
-            let intent_id = string(request.params.get("intent_id"), "intent_id")?;
-            let approved = actor_call(
-                actor,
-                StorageOperation::SafetyApprove,
-                Value::Object(request.params.clone()),
-                false,
-            )?;
-            publish_safety(events, actor, &intent_id);
-            if !capabilities.has_workers() {
-                return Ok(approved);
-            }
-            let outcome = coordinator::execute(actor, capabilities, &intent_id, approved)
-                .await
-                .map_err(|error| RpcError::unsupported(error.message))?;
-            publish_safety(events, actor, &intent_id);
-            Ok(outcome)
-        }
         "safety.intent.reject" => {
-            assert_trusted_approver(session)?;
+            if !session.trusted_sender {
+                assert_trusted_approver(session)?;
+            }
             let intent_id = string(request.params.get("intent_id"), "intent_id")?;
             let rejected = actor_call(
                 actor,
                 StorageOperation::SafetyReject,
                 json!({"intent_id":intent_id}),
                 false,
-            )?;
-            publish_safety(events, actor, &intent_id);
+            )
+            .await?;
+            publish_safety(events, actor, &intent_id).await;
             Ok(rejected)
         }
-        "send.status" => actor_call(
-            actor,
-            StorageOperation::SendStatus,
-            json!({"id":string(request.params.get("id"), "id")?}),
-            true,
-        ),
+        "send.status" => {
+            let id = string(
+                request
+                    .params
+                    .get("id")
+                    .or_else(|| request.params.get("request_id")),
+                "id",
+            )?;
+            let direct = actor_call(
+                actor,
+                StorageOperation::OwnerSendStatus,
+                json!({"id":id}),
+                true,
+            )
+            .await?;
+            if !direct.is_null() {
+                return Ok(direct);
+            }
+            actor_call(
+                actor,
+                StorageOperation::SendStatus,
+                json!({"id":string(request.params.get("id"), "id")?}),
+                true,
+            )
+            .await
+        }
         "subscribe" => {
             let topics = request
                 .params

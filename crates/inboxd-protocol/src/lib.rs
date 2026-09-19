@@ -10,6 +10,39 @@ pub const MAX_WORKER_FRAME_BYTES: usize = 16_777_216;
 pub const MAX_CURSOR_BYTES: usize = 4_096;
 const MAX_SAFE_NUMBER: f64 = 9_007_199_254_740_991.0;
 
+pub fn validate_local_attachment(value: &Value) -> Result<()> {
+    let file = object(value, "attachment")?;
+    exact_keys(file, &["path", "name", "size", "sha256"], "attachment")?;
+    let path = bounded_utf8_string(file.get("path"), "file path", 4096)?;
+    let name = bounded_utf8_string(file.get("name"), "file name", 255)?;
+    let invalid = |s: &str| s.chars().any(|c| c <= '\u{1f}' || c == '\u{7f}');
+    if !path.starts_with('/')
+        || invalid(path)
+        || invalid(name)
+        || name.contains(['/', '\\'])
+        || matches!(name, "." | "..")
+    {
+        return Err(ProtocolError::bad_request("invalid attachment path/name"));
+    }
+    if !file
+        .get("size")
+        .and_then(Value::as_f64)
+        .is_some_and(|n| n.fract() == 0.0 && (1.0..=104857600.0).contains(&n))
+    {
+        return Err(ProtocolError::bad_request(
+            "attachment must be 1 byte to 100 MiB",
+        ));
+    }
+    if !file.get("sha256").and_then(Value::as_str).is_some_and(|s| {
+        s.len() == 64
+            && s.bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    }) {
+        return Err(ProtocolError::bad_request("invalid attachment digest"));
+    }
+    Ok(())
+}
+
 pub const LEGACY_REQUEST_METHODS: [&str; 21] = [
     "system.hello",
     "system.ping",
@@ -34,7 +67,7 @@ pub const LEGACY_REQUEST_METHODS: [&str; 21] = [
     "subscribe",
 ];
 
-pub const REQUEST_METHODS: [&str; 26] = [
+pub const REQUEST_METHODS: [&str; 23] = [
     "system.hello",
     "system.ping",
     "system.status",
@@ -47,10 +80,7 @@ pub const REQUEST_METHODS: [&str; 26] = [
     "sync.status",
     "sync.backfill",
     "auth.status",
-    "safety.intent.create",
     "safety.intent.listPending",
-    "safety.intent.claimApprovalCode",
-    "safety.intent.approve",
     "safety.intent.reject",
     "send.status",
     "settings.get",
@@ -60,12 +90,13 @@ pub const REQUEST_METHODS: [&str; 26] = [
     "account.list",
     "account.messages",
     "account.search",
-    "account.send",
+    "message.send",
 ];
 
-pub const EVENT_METHODS: [&str; 4] = [
+pub const EVENT_METHODS: [&str; 5] = [
     "message.upserted",
     "coverage.changed",
+    "account.changed",
     "safety.intent.changed",
     "capability.changed",
 ];
@@ -102,6 +133,7 @@ pub enum ClientRole {
     Agent,
     Mcp,
     Approver,
+    Sender,
 }
 
 impl ClientRole {
@@ -111,6 +143,7 @@ impl ClientRole {
             "agent" => Ok(Self::Agent),
             "mcp" => Ok(Self::Mcp),
             "approver" => Ok(Self::Approver),
+            "sender" => Ok(Self::Sender),
             _ => Err(ProtocolError::bad_request(format!(
                 "unknown client role: {value}"
             ))),
@@ -137,16 +170,17 @@ pub fn parse_request(value: &Value, role: Option<ClientRole>) -> Result<Protocol
             "unknown request method: {method}"
         )));
     }
-    if role.is_some_and(|role| role != ClientRole::Approver)
-        && matches!(
-            method,
-            "account.send"
-                | "safety.intent.listPending"
-                | "safety.intent.claimApprovalCode"
-                | "safety.intent.approve"
-                | "safety.intent.reject"
-        )
-    {
+    if role.is_some_and(|role| {
+        role != ClientRole::Approver
+            && !(role == ClientRole::Sender
+                && matches!(method, "safety.intent.listPending" | "safety.intent.reject"))
+    }) && matches!(
+        method,
+        "safety.intent.listPending"
+            | "safety.intent.claimApprovalCode"
+            | "safety.intent.approve"
+            | "safety.intent.reject"
+    ) {
         return Err(ProtocolError::bad_request(format!(
             "{method} requires an approver role"
         )));
@@ -168,6 +202,25 @@ pub fn parse_request(value: &Value, role: Option<ClientRole>) -> Result<Protocol
             if token.len() > 4_096 {
                 return Err(ProtocolError::bad_request("approver token is too long"));
             }
+        }
+    }
+    if method == "message.send"
+        && role.is_some_and(|role| !matches!(role, ClientRole::Approver | ClientRole::Sender))
+    {
+        return Err(ProtocolError::bad_request(
+            "send requires authenticated sender role",
+        ));
+    }
+    if let Some(token) = params.get("sender_token") {
+        if method != "system.hello"
+            || params["role"] != "sender"
+            || token
+                .as_str()
+                .is_none_or(|s| s.is_empty() || s.len() > 4096)
+        {
+            return Err(ProtocolError::bad_request(
+                "sender token may only be supplied in sender hello",
+            ));
         }
     }
     Ok(ProtocolRequest {
@@ -853,12 +906,23 @@ fn validate_auth(value: &Value) -> Result<()> {
     Ok(())
 }
 
-fn validate_send_envelope(value: &Value) -> Result<()> {
+pub fn validate_send_envelope(value: &Value) -> Result<()> {
     let envelope = object(value, "send envelope")?;
     if envelope.get("v") != Some(&json!(2)) {
         return Err(ProtocolError::bad_request(
             "send envelope version must be 2",
         ));
+    }
+    if envelope
+        .keys()
+        .any(|key| !matches!(key.as_str(), "v" | "destination" | "content" | "reply"))
+    {
+        return Err(ProtocolError::bad_request("unknown send envelope field"));
+    }
+    if let Some(reply) = envelope.get("reply") {
+        let reply = object(reply, "send reply")?;
+        exact_keys(reply, &["parent_id"], "send reply")?;
+        bounded_utf8_string(reply.get("parent_id"), "parent id", 4096)?;
     }
     let destination = object(
         envelope.get("destination").unwrap_or(&Value::Null),
@@ -889,6 +953,7 @@ fn validate_send_envelope(value: &Value) -> Result<()> {
     )?;
     match content.get("mode").and_then(Value::as_str) {
         Some("text") => {
+            exact_keys(content, &["mode", "body"], "text content")?;
             bounded_utf8_string(content.get("body"), "send body", 65_536)?;
             if destination.get("kind").and_then(Value::as_str) != Some("chat") {
                 return Err(ProtocolError::bad_request(
@@ -897,6 +962,14 @@ fn validate_send_envelope(value: &Value) -> Result<()> {
             }
         }
         Some("approved_template") => {
+            exact_keys(
+                content,
+                &["mode", "template_id", "preview", "arguments"],
+                "template content",
+            )?;
+            if envelope.get("reply").is_some() {
+                return Err(ProtocolError::bad_request("template replies unsupported"));
+            }
             bounded_utf8_string(content.get("template_id"), "template id", 1_024)?;
             bounded_utf8_string(content.get("preview"), "template preview", 65_536)?;
             object(
