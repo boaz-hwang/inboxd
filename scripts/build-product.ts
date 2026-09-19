@@ -29,6 +29,7 @@ const dependencyLockPaths = ["Cargo.lock", "bun.lock"] as const;
 const workerEntrypoints = [
   { name: "inboxd-slack-worker", source: "platforms/slack/src/bin.ts" },
   { name: "inboxd-telegram-worker", source: "platforms/telegram/src/worker-entrypoint.ts" },
+  { name: "inboxd-telegram-bootstrap", source: "platforms/telegram/src/bootstrap.ts" },
   { name: "inboxd-kakao-local-worker", source: "contrib/kakao/src/worker-entrypoint.ts" },
   { name: "inboxd-kakao-message-worker", source: "platforms/kakao-message/src/bin.ts" },
 ] as const;

@@ -104,7 +104,7 @@ function manifestRuntimeFile(
     && entry.sha256 === createHash("sha256").update(contents).digest("hex");
 }
 
-function packagedTdlibRuntime(): {
+export function packagedTdlibRuntime(): {
   readonly tdjsonPath: string;
 } | undefined {
   const executableDirectory = dirname(process.execPath);

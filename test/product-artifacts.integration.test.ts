@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import {
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -9,11 +10,10 @@ import {
   symlinkSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
-import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
-const temporaryRoot = mkdtempSync(join(tmpdir(), "inboxd-product-artifacts-"));
+const temporaryRoot = mkdtempSync(join(process.env.HOME!, ".inboxd-product-artifacts-"));
 const productDirectory = join(temporaryRoot, "product", "release");
 const secretSentinel = "inboxd-product-build-must-not-copy-this-secret";
 const manifestName = "manifest.json";
@@ -24,6 +24,7 @@ const executableNames = [
   "inboxd-daemon",
   "inboxd-slack-worker",
   "inboxd-telegram-worker",
+  "inboxd-telegram-bootstrap",
   "inboxd-kakao-local-worker",
   "inboxd-kakao-message-worker",
 ] as const;
@@ -31,6 +32,7 @@ const expectedSources = new Map<string, string>([
   ["inboxd-daemon", "crates/inboxd-daemon/src/main.rs"],
   ["inboxd-slack-worker", "platforms/slack/src/bin.ts"],
   ["inboxd-telegram-worker", "platforms/telegram/src/worker-entrypoint.ts"],
+  ["inboxd-telegram-bootstrap", "platforms/telegram/src/bootstrap.ts"],
   ["inboxd-kakao-local-worker", "contrib/kakao/src/worker-entrypoint.ts"],
   ["inboxd-kakao-message-worker", "platforms/kakao-message/src/bin.ts"],
   [telegramTdjsonName, "@prebuilt-tdlib/darwin-arm64/libtdjson.dylib"],
@@ -334,6 +336,50 @@ describe("atomic production product artifacts", () => {
     expect(daemonUsage.code).not.toBe(0);
     expect(daemonUsage.stdout).toBe("");
     expect(daemonUsage.stderr).toContain("usage: inboxd-daemon --config <owner-only-config.json>");
+
+    const bootstrapHome = join(temporaryRoot, "bootstrap-home");
+    const bootstrapRoot = join(bootstrapHome, ".inboxd");
+    const bootstrapState = join(bootstrapRoot, "state", "telegram", "artifact-binding");
+    const bootstrapDatabase = join(bootstrapState, "database");
+    const bootstrapFiles = join(bootstrapState, "files");
+    const bootstrapQr = join(bootstrapRoot, "telegram-login.html");
+    const bootstrapResult = join(bootstrapRoot, "telegram-bootstrap-result.json");
+    mkdirSync(bootstrapDatabase, { recursive: true, mode: 0o700 });
+    mkdirSync(bootstrapFiles, { recursive: true, mode: 0o700 });
+    const stateAclAdded = Bun.spawnSync({
+      cmd: ["/bin/chmod", "+a", "group:everyone allow read,write,delete", bootstrapDatabase],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(stateAclAdded.exitCode, stateAclAdded.stderr.toString()).toBe(0);
+    try {
+      const rejectedBootstrap = await run([
+        "/usr/bin/sandbox-exec",
+        "-p",
+        `(version 1) (allow default) (deny file-read-data (subpath "${join(root, "node_modules")}"))`,
+        join(productDirectory, "inboxd-telegram-bootstrap"),
+      ], { env: {
+        DYLD_PRINT_LIBRARIES: "1",
+        HOME: bootstrapHome,
+        INBOXD_TELEGRAM_API_HASH: "00000000000000000000000000000000",
+        INBOXD_TELEGRAM_API_ID: "1",
+        INBOXD_TELEGRAM_BINDING_ID: "telegram-artifact-test",
+        INBOXD_TELEGRAM_DATABASE_DIRECTORY: bootstrapDatabase,
+        INBOXD_TELEGRAM_FILES_DIRECTORY: bootstrapFiles,
+        INBOXD_TELEGRAM_QR_HTML: bootstrapQr,
+        INBOXD_TELEGRAM_BOOTSTRAP_RESULT: bootstrapResult,
+      } });
+      expect(rejectedBootstrap.code).not.toBe(0);
+      expect(rejectedBootstrap.stdout).toBe("");
+      expect(rejectedBootstrap.stderr).toContain("Telegram bootstrap terminated: failure");
+      expect(rejectedBootstrap.stderr).not.toContain(join(productDirectory, telegramTdlAddonName));
+      expect(rejectedBootstrap.stderr).not.toContain(join(productDirectory, telegramTdjsonName));
+      expect(existsSync(bootstrapQr)).toBeFalse();
+      expect(existsSync(bootstrapResult)).toBeFalse();
+    } finally {
+      const stateAclRemoved = Bun.spawnSync({ cmd: ["/bin/chmod", "-a#", "0", bootstrapDatabase] });
+      expect(stateAclRemoved.exitCode).toBe(0);
+    }
 
     const completeSnapshot = snapshot(productDirectory);
     const failedBuild = await buildProduct(productDirectory, { CARGO: "/usr/bin/false" });

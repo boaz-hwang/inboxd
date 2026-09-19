@@ -2,7 +2,7 @@
   "schema": "inboxd.tui.capture-manifest.v1",
   "repository": "/Users/hwang-gyeongchan/sideproject/inboxd",
   "base": "fe16bded80f663641aaeb7f621c2e27ce8a96ad4",
-  "working_tree_base": "3836bdb183b319f38f116bc7e2f3e54419c588f0",
+  "working_tree_base": "800c411f1cfb7669dc5aa81cb7d1821ef78bdcf9",
   "runtime": "1.3.11",
   "source_hashes": {
     "renderer": "b91d593eedf1fb5d110c10b209424667da99a30864a135acd8b89f031818be86",
