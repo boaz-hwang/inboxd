@@ -87,6 +87,11 @@ Validation uses synthetic SDK events and provider processes. Live accounts have
 not been used to establish end-to-end delivery or long-running reconnection
 reliability for this change.
 
+Initial real-account checks and a content-free observation run are now tracked in
+[Live reliability validation](21-live-reliability-validation.md). Those checks
+found a stale local-search result after a Slack deletion; the P0 matrix remains
+incomplete and long-running reliability is not yet established.
+
 Validation on 2026-09-19: 691 Bun tests passed with no failures, including real
 UDS CLI/MCP/TUI tests using retained release test-feature binaries. Full Rust
 workspace tests with all features, strict Clippy, TypeScript checks, import
