@@ -11,7 +11,7 @@ only the owner's self conversation. No historical ingestion was started.
 | Daemon send followed by actual provider read | One matching message | One matching message | One matching message |
 | Independently generated new message | Observed after provider API send | Pending | Pending |
 | Independent edit | Updated body observed | Manual app edit confirmed in remote read and local search | Manual app edit confirmed in remote read and local search |
-| Independent delete | Absent remotely, **still present in local search** | Pending | Pending |
+| Independent delete | Absent remotely, **still present in local search** | Absent from refreshed history, **still present in local search** | Still present in refreshed history and local search; deletion option awaiting confirmation |
 | Wi-Fi off for 20 seconds, then on | Connected; earlier probe still present once | Same | Same |
 | Account worker termination and recovery | Connected; earlier probe still present once | Same | Same |
 | Daemon restart | Recovery verified after retry; first scenario invocation errored | Same shared daemon | Same shared daemon |
@@ -47,6 +47,18 @@ local-search correctness must be judged separately. This failure prevents claimi
 end-to-end deletion reliability. No production fix is included in this validation
 change.
 
+### Manual Telegram/Kakao deletion check
+
+The owner confirmed deleting the edited probes. Explicit `account.messages`
+refreshes and exact-marker local searches showed:
+
+- Telegram: zero remote matches, one stale edited local hit. This reproduces the
+  deletion propagation gap also observed with Slack.
+- Kakao: one edited remote match and one matching local hit. This is not yet an
+  established deletion propagation failure: the deletion option and provider-side
+  deletion visibility need clarification. No additional messages were sent or
+  deleted by this check.
+
 ### Outstanding execution constraints
 
 - Official-app UI automation could not start: its session authentication broker
@@ -54,8 +66,11 @@ change.
   Telegram/Kakao edits were subsequently confirmed in both refreshed remote reads
   and local search, with one matching message and identical edited bodies in each.
   This establishes read/persistence correctness after a manual edit, not automatic
-  TUI refresh or precise event latency. Deletion of those same probes has been
-  requested and remains pending.
+  TUI refresh or precise event latency. After the owner reported deleting both probes, Telegram returned zero remote
+  matches but one edited local-search hit. Kakao returned one edited match in both
+  refreshed history and local search. The Kakao deletion option (everyone versus
+  local-only) has been requested before attributing the result to a provider or
+  synchronization defect.
 - Automatic wake scheduling returned an administrator-required error. Sleep was
   not triggered without an established wake mechanism.
 - The first restart scenario returned an error before recording its final check.
