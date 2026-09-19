@@ -1,0 +1,136 @@
+diff --git a/node_modules/agent-messenger/.bun-tag-1e7d028d02f6928b b/.bun-tag-1e7d028d02f6928b
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/dist/src/platforms/kakaotalk/client.js b/dist/src/platforms/kakaotalk/client.js
+index 71c1a5442bc303f6886056565697bff9cdd35218..008e82c78dd6d8491a386ac2e5f4e1a31633e36c 100644
+--- a/dist/src/platforms/kakaotalk/client.js
++++ b/dist/src/platforms/kakaotalk/client.js
+@@ -751,7 +751,7 @@ export class KakaoTalkClient {
+             const newSyncState = mergeSyncState(syncState, loginResult);
+             await saveSyncState(this.deviceUuid, newSyncState);
+             this.nameCache.ingest((loginResult.chatDatas ?? []));
+-            return { session, loginResult };
++            return { session, loginResult, needsChatListBootstrap: syncState !== undefined };
+         }
+         catch (error) {
+             session.close();
+@@ -816,18 +816,22 @@ export class KakaoTalkClient {
+         }
+     }
+     async getChats(options) {
+-        return this.executeWithReconnect(async ({ session, loginResult }) => {
++        return this.executeWithReconnect(async ({ session, loginResult, needsChatListBootstrap }) => {
+             try {
+                 const allChats = [];
+                 const seenChatIds = new Set();
+-                collectChats((loginResult.chatDatas ?? []), allChats, seenChatIds);
++                if (!needsChatListBootstrap) {
++                    collectChats((loginResult.chatDatas ?? []), allChats, seenChatIds);
++                }
+                 // Paginate via LCHATLIST when explicitly requested (--all / --search) OR when
+                 // the login snapshot is empty. New device registrations often return an empty
+                 // chatDatas with eof=true because the server has no prior sync state for the
+                 // device — LCHATLIST fetches the canonical chat list regardless of device history.
+                 const snapshotEmpty = allChats.length === 0;
+-                if (options?.all || options?.search || snapshotEmpty) {
+-                    let cursor = loginResult;
++                if (options?.all || options?.search || snapshotEmpty || needsChatListBootstrap) {
++                    let cursor = needsChatListBootstrap
++                        ? { lastTokenId: Long.ZERO, lastChatId: Long.ZERO, eof: false }
++                        : loginResult;
+                     let pages = 0;
+                     const requireCompleteList = options?.all === true;
+                     while (pages < MAX_PAGES) {
+@@ -1175,7 +1179,8 @@ export class KakaoTalkClient {
+         });
+     }
+     async sendMessage(chatId, text, options) {
+-        return this.executeWithReconnect(async ({ session }) => {
++        const { session } = await this.ensureSession()
++    return (async () => {
+             try {
+                 const response = options?.replyTo
+                     ? await session.sendReply(parseLong(chatId), text, buildReplyExtra(options.replyTo))
+@@ -1191,7 +1196,7 @@ export class KakaoTalkClient {
+             catch (error) {
+                 throw wrapError(error, 'send_message_failed');
+             }
+-        });
++        })();
+     }
+     async sendTyping(chatId, opts) {
+         const parsedChatId = parseChatId(chatId);
+diff --git a/src/platforms/kakaotalk/client.ts b/src/platforms/kakaotalk/client.ts
+index 76a4ccb403ca6ba92891cf16ffd210a76e3b8cc0..98cb8c274754ee8d23bd4d309b7917ff556ded71 100644
+--- a/src/platforms/kakaotalk/client.ts
++++ b/src/platforms/kakaotalk/client.ts
+@@ -101,6 +101,7 @@ type ChatData = Record<string, unknown>
+ interface SessionState {
+   session: LocoSession
+   loginResult: LoginListResponse
++  needsChatListBootstrap: boolean
+ }
+ 
+ class MemberNameCache {
+@@ -959,7 +960,7 @@ export class KakaoTalkClient {
+ 
+       this.nameCache.ingest((loginResult.chatDatas ?? []) as ChatData[])
+ 
+-      return { session, loginResult }
++      return { session, loginResult, needsChatListBootstrap: syncState !== undefined }
+     } catch (error) {
+       session.close()
+       const code = isLoginResponseError(error) ? error.code : 'login_failed'
+@@ -1025,20 +1026,29 @@ export class KakaoTalkClient {
+   }
+ 
+   async getChats(options?: { all?: boolean; search?: string; resolveTitles?: boolean }): Promise<KakaoChat[]> {
+-    return this.executeWithReconnect(async ({ session, loginResult }) => {
++    return this.executeWithReconnect(async ({ session, loginResult, needsChatListBootstrap }) => {
+       try {
+         const allChats: ChatData[] = []
+         const seenChatIds = new Set<string>()
+ 
+-        collectChats((loginResult.chatDatas ?? []) as ChatData[], allChats, seenChatIds)
++        if (!needsChatListBootstrap) {
++          collectChats((loginResult.chatDatas ?? []) as ChatData[], allChats, seenChatIds)
++        }
+ 
+         // Paginate via LCHATLIST when explicitly requested (--all / --search) OR when
+         // the login snapshot is empty. New device registrations often return an empty
+         // chatDatas with eof=true because the server has no prior sync state for the
+         // device — LCHATLIST fetches the canonical chat list regardless of device history.
+         const snapshotEmpty = allChats.length === 0
+-        if (options?.all || options?.search || snapshotEmpty) {
+-          let cursor: ChatListResponse = loginResult
++        if (options?.all || options?.search || snapshotEmpty || needsChatListBootstrap) {
++          let cursor: ChatListResponse = needsChatListBootstrap
++            ? {
++                chatDatas: [],
++                lastTokenId: toLongLike(0),
++                lastChatId: toLongLike(0),
++                eof: false,
++              }
++            : loginResult
+           let pages = 0
+           const requireCompleteList = options?.all === true
+ 
+@@ -1421,7 +1431,8 @@ export class KakaoTalkClient {
+   }
+ 
+   async sendMessage(chatId: string, text: string, options?: { replyTo?: KakaoReplyTarget }): Promise<KakaoSendResult> {
+-    return this.executeWithReconnect(async ({ session }) => {
++    const { session } = await this.ensureSession()
++    return (async () => {
+       try {
+         const response = options?.replyTo
+           ? await session.sendReply(
+@@ -1441,7 +1452,7 @@ export class KakaoTalkClient {
+       } catch (error) {
+         throw wrapError(error, 'send_message_failed')
+       }
+-    })
++    })()
+   }
+ 
+   async sendTyping(chatId: string, opts?: { linkId?: string }): Promise<KakaoTypingResult> {

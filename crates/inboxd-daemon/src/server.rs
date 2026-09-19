@@ -99,6 +99,7 @@ impl EventHub {
 }
 
 pub(crate) struct ServerRuntime {
+    pub(crate) accounts: Arc<crate::accounts::AccountService>,
     pub(crate) events: Arc<EventHub>,
     pub(crate) capabilities: Arc<CapabilityRegistry>,
     pub(crate) connection_tasks: Arc<AtomicUsize>,
@@ -124,6 +125,7 @@ pub(crate) async fn run_server(
                     let token = Arc::clone(&approver_token);
                     let events = Arc::clone(&runtime.events);
                     let capabilities = Arc::clone(&runtime.capabilities);
+                    let accounts = Arc::clone(&runtime.accounts);
                     let max_queued_events = runtime.max_queued_events;
                     connections.spawn(async move {
                         handle_connection(
@@ -133,6 +135,7 @@ pub(crate) async fn run_server(
                             events,
                             capabilities,
                             max_queued_events,
+                            accounts,
                         )
                         .await;
                     });
@@ -163,6 +166,7 @@ async fn handle_connection(
     events: Arc<EventHub>,
     capabilities: Arc<CapabilityRegistry>,
     max_queued_events: usize,
+    accounts: Arc<crate::accounts::AccountService>,
 ) {
     let mut decoder = match JsonLinesDecoder::new(MAX_CLIENT_FRAME_BYTES) {
         Ok(decoder) => decoder,
@@ -186,6 +190,7 @@ async fn handle_connection(
         trusted_approver: false,
         topics,
     };
+    let mut reads: tokio::task::JoinSet<(Value, String, String)> = tokio::task::JoinSet::new();
     let mut chunk = [0_u8; 8_192];
     'connection: loop {
         if closed.load(Ordering::Acquire) {
@@ -197,6 +202,11 @@ async fn handle_connection(
             event = event_receiver.recv() => {
                 let Some(event) = event else { break; };
                 if write_frame(&mut socket, event).await.is_err() { break; }
+            }
+            completed = reads.join_next(), if !reads.is_empty() => {
+                if let Some(Ok((response, id, method))) = completed {
+                    if write_response(&mut socket, response, &id, &method).await.is_err() { break; }
+                }
             }
             received = socket.read(&mut chunk) => {
                 let received = match received {
@@ -225,12 +235,31 @@ async fn handle_connection(
                             continue;
                         }
                     };
+                    if session.role.is_some() && matches!(request.method.as_str(), "account.messages" | "account.search" | "account.list") {
+                        if reads.len() >= 16 {
+                            if write_frame(&mut socket, failure(&request.id, &request.method, "BAD_REQUEST", "동시 조회 제한")).await.is_err() { break 'connection; }
+                            continue;
+                        }
+                        let accounts = Arc::clone(&accounts);
+                        reads.spawn(async move {
+                            let params = Value::Object(request.params);
+                            let result = if request.method == "account.list" { accounts.list(&params).await }
+                                else { accounts.query(request.method.strip_prefix("account.").unwrap(), &params).await };
+                            let response = match result {
+                                Ok(value) => success(&request.id, &request.method, value),
+                                Err(error) => failure(&request.id, &request.method, "UNSUPPORTED", &error),
+                            };
+                            (response, request.id, request.method)
+                        });
+                        continue;
+                    }
                     let response = match dispatch(
                         &mut session,
                         &actor,
                         &approver_token,
                         &events,
                         &capabilities,
+                        &accounts,
                         &request,
                     )
                     .await
@@ -556,6 +585,7 @@ async fn dispatch(
     approver_token: &str,
     events: &EventHub,
     capabilities: &CapabilityRegistry,
+    accounts: &crate::accounts::AccountService,
     request: &ProtocolRequest,
 ) -> RpcResult {
     if request.method == "system.hello" {
@@ -582,7 +612,36 @@ async fn dispatch(
     }
     match request.method.as_str() {
         "system.ping" => Ok(json!({"pong":true})),
-        "system.status" => Ok(json!({"ready":true,"owner":"daemon"})),
+        "system.status" => {
+            let encryption = actor_call(actor, StorageOperation::Diagnose, json!({}), false)?;
+            let directory = capabilities.list();
+            let mut auth = serde_json::Map::new();
+            if let Some(resources) = directory["resources"].as_array() {
+                for resource in resources {
+                    if let Some(platform) = resource["resource"]["platform"].as_str() {
+                        auth.insert(platform.to_owned(), resource["auth"].clone());
+                    }
+                }
+            }
+            Ok(
+                json!({"ready":true,"owner":"daemon","encryption":encryption,"auth":auth,
+                "isolation":{"grade":"same-user","protected":false,"warning":"same-user shell access is outside isolation"}}),
+            )
+        }
+        "account.list" => accounts
+            .list(&Value::Object(request.params.clone()))
+            .await
+            .map_err(RpcError::unsupported),
+        "account.messages" | "account.search" | "account.send" => {
+            let op = request.method.strip_prefix("account.").unwrap();
+            if op == "send" {
+                assert_trusted_approver(session)?;
+            }
+            accounts
+                .query(op, &Value::Object(request.params.clone()))
+                .await
+                .map_err(RpcError::unsupported)
+        }
         "chat.list" => {
             let input = Value::Object(page(&request.params)?);
             let found = actor_call(actor, StorageOperation::ChatList, input, true)?;
@@ -741,10 +800,22 @@ async fn dispatch(
             let authoritative = page.authoritative;
             let batch = plan.into_apply_sync_batch(page, expected_page_sequence)?;
             actor_call(actor, StorageOperation::ApplySyncBatch, batch, false)?;
+            // Notify only after durable commit, including empty-page coverage updates.
+            let _ = events.publish("message.upserted", json!({"chat":chat}));
+            let _ = events.publish("coverage.changed", json!({"chat":chat}));
             Ok(json!({"event_count":event_count,"authoritative":authoritative}))
         }
         "sync.status" => Ok(json!({"state":"idle"})),
-        "auth.status" => Ok(json!({"authenticated":false})),
+        "auth.status" => {
+            let directory = capabilities.list();
+            let authenticated = directory["resources"].as_array().is_some_and(|resources| {
+                !resources.is_empty()
+                    && resources
+                        .iter()
+                        .all(|r| r["auth"]["state"] == "authenticated")
+            });
+            Ok(json!({"authenticated":authenticated}))
+        }
         "capability.list" => {
             if request.params.keys().any(|key| key != "refresh")
                 || request

@@ -60,3 +60,86 @@ The current local gates do **not** rewrite those five-question outcomes. They al
 2. A binding registry is trusted injected host state; it is not proof that config can create a live provider or that credentials are available.
 3. Never store message bodies, private identifiers, credentials, live timestamps, database copies, or raw accessibility trees in this ledger.
 4. `offline-ready/live-blocked` is the only current product posture; it is not full-MVP or production-live acceptance.
+
+## 2026-09-19 — personal account connections and real packaged TUI
+
+Scope: owner-local macOS installation, existing Telegram/Slack/Kakao personal
+sessions, self conversations only. No third-party conversation was used for
+sending. Private account/chat IDs, message bodies, credentials and approval codes
+are intentionally omitted from this ledger.
+
+| Platform | Connection evidence | Read | One TUI-approved send | Independent readback |
+| --- | --- | --- | --- | --- |
+| Telegram | TDLib resumed the existing QR-authenticated session | Passed | Passed | Verified |
+| Slack | Existing personal desktop/web session, self DM | Passed | Passed | Verified |
+| KakaoTalk | Existing secondary-device session, self chat | Passed | Passed | Verified |
+
+Actual interaction used the installed `inboxd` executable in a 120×40 PTY:
+Chat resource selection, bounded backfill, text composition, Approvals, ephemeral
+code entry and the rendered Verified outcome. Doctor → C opened the account
+connection menu and returning from it resumed the TUI. Fresh account login/QR
+scanning and fresh Kakao phone registration were not forced on already-valid
+sessions and are not claimed as live-tested here.
+
+Failures discovered during live validation and fixed:
+
+- OpenTUI was dynamically imported through a variable and omitted from the
+  standalone build. Literal imports include it in the packaged launcher.
+- Refreshing auth timestamps published capability changes indefinitely; events
+  now represent changes in auth state/reason, while timestamps still update.
+- Personal Slack sessions need form-encoded API calls and their scoped cookie;
+  bot-token transport retains JSON. Both make exactly one send attempt.
+- Kakao incremental LOGINLIST snapshots could produce empty/partial chat lists
+  on subsequent processes. The existing bootstrap fix is now an installed,
+  lockfile-tracked dependency patch, together with disabled send replay.
+- Personal Kakao observations use the core's `unversioned` revision contract.
+- Backfill commits now publish message/coverage notifications for subscribed UIs.
+- Doctor reads actual storage diagnostics and provider auth observations.
+- Renderer shutdown ignores late updates rather than touching destroyed buffers.
+
+Offline validation: full Bun suite passed (416 passed, 13 opt-in daemon integration
+cases skipped, 0 failed); isolated packaged-artifact checks subsequently passed
+(3 tests). Package smoke tests use a temporary HOME to avoid live configuration. Cargo workspace all-feature tests and all-target all-feature
+Clippy passed. macOS trusted-path tests require a private canonical TMPDIR, and
+artifact tests require the Rust toolchain on PATH. TUI render evidence is
+regenerated for both 80×24 and 120×40.
+
+Limits: this does not establish multi-account concurrency, complete Kakao
+history, Kakao replies, unsupported message types, or long-running token refresh.
+Kakao historical pages remain non-authoritative with explicit limits. Existing
+experimental local-reader and official-template safety contracts are unchanged.
+
+Final rebuild restart: the new daemon initially waited inside macOS
+`SecItemCopyMatching` / `get_generic_password`, reaching the launcher readiness
+deadline. After the user handled the local Keychain prompt, the daemon reported
+ready=true with SQLCipher schema_valid=true. The final installed TUI launched
+from /tmp, connected and displayed Doctor diagnostics; provider authentication
+then reported authenticated=true. This resolves the final-rebuild startup block.
+No additional test messages were sent during this restart check.
+
+## 2026-09-19 — conversation workspace and search
+
+The default screen now uses a provider-marked conversation sidebar and a unified
+recent-message feed; raw capability/storage evidence remains available under `d`.
+Conversation search (`/`, Ctrl+K) filters local titles/providers immediately.
+Ctrl+F searches within an open conversation. Message selection, draft editing,
+explicit proposal review and local code approval retain exact resource scopes.
+
+Validation: full Bun suite passed (427 passed, 13 opt-in daemon cases skipped,
+0 failed), followed by the added native mouse/resize regression (workspace suite:
+12 passed). Typecheck, import boundary checks and diff whitespace checks passed.
+Deterministic synthetic 80×24 / 120×40 captures include hashes of the new layout,
+selectors, theme and terminal-cell helpers. Existing inspector tests still cover
+capability evidence, disconnects, unknown outcomes and no automatic resend.
+
+The installed final executable was launched from /tmp in an 80×24 PTY with the
+existing daemon. The live journey found Slack through conversation search,
+opened it, searched for the earlier Inboxd test message, opened the result,
+typed a temporary reply draft, cancelled it and exited with code 0. No additional
+message was sent during this UI validation. The wider layout was exercised in a
+120×40 PTY and both sizes also passed the native OpenTUI keyboard tests.
+
+Scope limits: conversation names depend on the daemon's available metadata;
+missing names receive fallback labels. The unified feed covers registered scopes
+and collected pages. Content search is per conversation, not across all remote
+history; unknown unread/identity/coverage observations are not fabricated.

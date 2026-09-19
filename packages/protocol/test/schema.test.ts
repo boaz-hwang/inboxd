@@ -177,7 +177,7 @@ describe("v1 wire golden bytes", () => {
   test("pins every existing method and event including unsupported settings", () => {
     expect(LEGACY_REQUEST_METHODS).toEqual(compat.request_methods);
     expect(LEGACY_EVENT_METHODS).toEqual(compat.event_methods);
-    expect([...REQUEST_METHODS]).toEqual([...compat.request_methods, "capability.list"]);
+    expect([...REQUEST_METHODS]).toEqual([...compat.request_methods, "capability.list", "account.list", "account.messages", "account.search", "account.send"]);
     expect([...EVENT_METHODS]).toEqual([...compat.event_methods, "capability.changed"]);
     expect(compat.unsupported_methods).toEqual(["settings.get", "settings.update"]);
     for (const method of compat.unsupported_methods) expect(REQUEST_METHODS).toContain(method);

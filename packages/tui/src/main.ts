@@ -7,7 +7,7 @@ import { createTuiController, type TuiController } from "./index.ts";
 import { mountInteractiveTui } from "./runtime.ts";
 import { connectTuiUdsTransport } from "./transport.ts";
 
-export const defaultTuiSocketPath = join(homedir(), ".inboxd", "sock");
+export const defaultTuiSocketPath = join(homedir(), ".inboxd", "state", "sock");
 
 export interface RunTuiOptions {
   readonly socketPath?: string;
@@ -106,7 +106,7 @@ export function createConnectedTuiController(options: ConnectedTuiControllerOpti
 }
 
 /** Starts the real OpenTUI terminal client against the daemon UDS protocol. */
-export async function runTui(options: RunTuiOptions = {}): Promise<void> {
+export async function runTui(options: RunTuiOptions = {}): Promise<"connect" | undefined> {
   if (!isTTY()) throw new Error("inboxd-tui requires stdin and stdout to be TTYs");
   const role = options.role ?? "approver";
   const socketPath = options.socketPath ?? defaultTuiSocketPath;
@@ -117,28 +117,37 @@ export async function runTui(options: RunTuiOptions = {}): Promise<void> {
     ...(role === "approver" ? { approverToken: readTuiApproverToken(socketPath) } : {}),
   });
 
-  const coreModule = "@opentui/core";
-  const { createCliRenderer } = await import(coreModule);
+  const { createCliRenderer } = await import("@opentui/core");
   const renderer = await createCliRenderer({ exitOnCtrlC: false, exitSignals: ["SIGINT", "SIGTERM"] });
+  let connectRequested = false;
+  const onConnectionKey = (event: { sequence: string; preventDefault(): void }) => {
+    if (event.sequence === "C" && controller.state.screen === "doctor" && !controller.state.approvalPrompt && !controller.state.composeActive) {
+      event.preventDefault(); connectRequested = true; renderer.destroy();
+    }
+  };
+  renderer.keyInput.on("keypress", onConnectionKey);
   const mounted = await mountInteractiveTui(renderer, controller);
   const unsubscribe = controller.subscribe((state) => {
     if (state.quitRequested) renderer.destroy();
   });
 
+  const destroyed = new Promise<void>((resolve) => renderer.once("destroy", resolve));
   try {
     await controller.start();
-    await new Promise<void>((resolve) => renderer.once("destroy", resolve));
+    await destroyed;
   } finally {
+    renderer.keyInput.off("keypress", onConnectionKey);
     unsubscribe();
     mounted.destroy();
     controller.stop();
     if (!renderer.isDestroyed) renderer.destroy();
   }
+  return connectRequested ? "connect" : undefined;
 }
 
 /** Converts renderer completion into an explicit executable exit status. */
 export async function runTuiEntrypoint(options: RunTuiEntrypointOptions = {
-  run: () => runTui(),
+  run: async () => { await runTui(); },
   exit: (code) => process.exit(code),
   report: (message) => console.error(message),
 }): Promise<void> {

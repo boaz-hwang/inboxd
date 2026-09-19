@@ -19,6 +19,7 @@ export const SLACK_WORKER_ENV = Object.freeze({
 
 interface SlackWorkerConfig {
   readonly token: string;
+  readonly cookie?: string;
   readonly bindingId: string;
   readonly account: string;
   readonly teamId: string;
@@ -54,7 +55,7 @@ export function loadSlackWorkerConfig(env: Environment): SlackWorkerConfig {
   if (!Array.isArray(allowedChatIds) || allowedChatIds.some((value) => typeof value !== "string")) {
     throw new TypeError("invalid Slack worker configuration");
   }
-  return { token, bindingId, account, teamId, allowedChatIds };
+  return { token, bindingId, account, teamId, allowedChatIds, cookie: env.INBOXD_SLACK_SESSION_COOKIE };
 }
 
 function responseBoundFailure(error: unknown): boolean {
@@ -147,7 +148,7 @@ export async function main(env: Environment = process.env): Promise<number> {
   let config: SlackWorkerConfig;
   try {
     config = loadSlackWorkerConfig(env);
-    if (env === process.env) delete process.env[SLACK_WORKER_ENV.token];
+    if (env === process.env) { delete process.env[SLACK_WORKER_ENV.token]; delete process.env.INBOXD_SLACK_SESSION_COOKIE; }
   } catch {
     return terminate("invalid configuration", 64);
   }
@@ -159,7 +160,7 @@ export async function main(env: Environment = process.env): Promise<number> {
       account: config.account,
       expectedTeamId: config.teamId,
       allowedChatIds: config.allowedChatIds,
-      transport: createSlackWebApiTransport({ token: config.token }),
+      transport: createSlackWebApiTransport({ token: config.token, cookie: config.cookie }),
     });
   } catch {
     return terminate("invalid configuration", 64);

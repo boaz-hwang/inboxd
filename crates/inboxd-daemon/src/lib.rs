@@ -1,6 +1,8 @@
 //! Rust-owned inboxd daemon and UDS lifecycle.
 #![forbid(unsafe_code)]
 
+mod accounts;
+pub use accounts::AccountConfig;
 mod capability;
 mod coordinator;
 mod server;
@@ -9,7 +11,9 @@ mod worker;
 pub use capability::TrustedBinding;
 #[cfg(feature = "test-worker")]
 pub use worker::TestWorkerConfig;
-pub use worker::{ProductionWorkerConfig, WorkerError, WorkerSupervisor};
+pub use worker::{
+    ProductionWorkerConfig, WorkerError, WorkerSupervisor, validate_trusted_executable_for_owner,
+};
 
 use inboxd_storage::{StorageActor, StorageActorConfig};
 use serde_json::{Value, json};
@@ -62,6 +66,7 @@ pub struct DaemonConfig {
     database_key: Zeroizing<Vec<u8>>,
     max_queued_events: usize,
     bindings: Vec<TrustedBinding>,
+    accounts: Vec<AccountConfig>,
 }
 
 impl fmt::Debug for DaemonConfig {
@@ -87,6 +92,7 @@ impl Clone for DaemonConfig {
             database_key: Zeroizing::new(self.database_key.to_vec()),
             max_queued_events: self.max_queued_events,
             bindings: self.bindings.clone(),
+            accounts: self.accounts.clone(),
         }
     }
 }
@@ -105,11 +111,17 @@ impl DaemonConfig {
             database_key: Zeroizing::new(database_key.into()),
             max_queued_events: DEFAULT_MAX_QUEUED_EVENTS,
             bindings: Vec::new(),
+            accounts: Vec::new(),
         }
     }
 
     pub fn with_max_queued_events(mut self, maximum: usize) -> Self {
         self.max_queued_events = maximum;
+        self
+    }
+
+    pub fn with_accounts(mut self, accounts: Vec<AccountConfig>) -> Self {
+        self.accounts = accounts;
         self
     }
 
@@ -279,6 +291,7 @@ pub async fn launch(config: DaemonConfig) -> Result<Daemon> {
             server_owner,
             approver_token,
             ServerRuntime {
+                accounts: Arc::new(accounts::AccountService::new(config.accounts)),
                 events: server_events,
                 capabilities: server_capabilities,
                 connection_tasks: server_connection_tasks,

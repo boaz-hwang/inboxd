@@ -23,20 +23,24 @@ const manifestMode = 0o600;
 const productSchemaVersion = "inboxd-product/v1";
 const manifestName = "manifest.json";
 const telegramTdjsonName = "inboxd-telegram-libtdjson.dylib";
+const telegramAppCredentialsName = "telegram-app.json";
 const telegramTdlAddonDirectory = "prebuilds";
 const telegramTdlAddonName = `${telegramTdlAddonDirectory}/darwin-arm64/tdl.node`;
 const dependencyLockPaths = ["Cargo.lock", "bun.lock"] as const;
+const launcherEntrypoint = { name: "inboxd", source: "packages/cli/src/bin.ts" } as const;
 const workerEntrypoints = [
+  { name: "inboxd-account-worker", source: "packages/accounts/src/worker.ts" },
   { name: "inboxd-slack-worker", source: "platforms/slack/src/bin.ts" },
   { name: "inboxd-telegram-worker", source: "platforms/telegram/src/worker-entrypoint.ts" },
   { name: "inboxd-telegram-bootstrap", source: "platforms/telegram/src/bootstrap.ts" },
+  { name: "inboxd-kakao-personal-worker", source: "contrib/kakao/src/personal-entrypoint.ts" },
   { name: "inboxd-kakao-local-worker", source: "contrib/kakao/src/worker-entrypoint.ts" },
   { name: "inboxd-kakao-message-worker", source: "platforms/kakao-message/src/bin.ts" },
 ] as const;
 
 interface ManifestFile {
   readonly name: string;
-  readonly kind: "daemon" | "worker" | "runtime-library";
+  readonly kind: "application-credential" | "daemon" | "launcher" | "worker" | "runtime-library";
   readonly source_entrypoint: string;
   readonly sha256: string;
   readonly size: number;
@@ -194,7 +198,7 @@ function secureRegularFile(path: string, uid: number, gid: number, mode: number)
 function manifestFile(
   directory: string,
   name: string,
-  kind: "daemon" | "worker" | "runtime-library",
+  kind: "application-credential" | "daemon" | "launcher" | "worker" | "runtime-library",
   sourceEntrypoint: string,
   mode: 0o600 | 0o700,
   uid: number,
@@ -302,6 +306,7 @@ function buildProduct(): void {
       "inboxd-daemon",
       "--bin",
       "inboxd-daemon",
+      "--package", "inboxd-keychain", "--bin", "inboxd-keychain",
       "--no-default-features",
     ], {
       CARGO_TARGET_DIR: targetDirectory,
@@ -317,7 +322,9 @@ function buildProduct(): void {
       fail("Cargo did not produce a regular inboxd-daemon release executable");
     }
     copyFileSync(daemonSource, daemonDestination);
+    copyFileSync(join(targetDirectory, "release", "inboxd-keychain"), join(stage, "inboxd-keychain"));
 
+    compileWorker(bun, stage, launcherEntrypoint.name, launcherEntrypoint.source);
     for (const worker of workerEntrypoints) {
       compileWorker(bun, stage, worker.name, worker.source);
     }
@@ -350,6 +357,20 @@ function buildProduct(): void {
     }
     copyFileSync(telegramTdlAddonSource, join(stage, telegramTdlAddonName));
 
+    const packageTelegramCredentials = process.env.INBOXD_PACKAGE_TELEGRAM_APP === "1";
+    if (packageTelegramCredentials) {
+      const apiId = process.env.INBOXD_TELEGRAM_API_ID ?? "";
+      const apiHash = process.env.INBOXD_TELEGRAM_API_HASH ?? "";
+      if (!/^[1-9]\d{0,9}$/.test(apiId) || !/^[0-9a-f]{32}$/.test(apiHash)) {
+        fail("packaged Telegram app credentials are missing or invalid");
+      }
+      writeFileSync(
+        join(stage, telegramAppCredentialsName),
+        `${JSON.stringify({ api_id: apiId, api_hash: apiHash })}\n`,
+        { encoding: "utf8", mode: 0o600 },
+      );
+    }
+
     const finalDependencyLockHash = dependencyLockHash();
     if (finalDependencyLockHash !== initialDependencyLockHash) {
       fail("dependency locks changed during the product build");
@@ -361,6 +382,16 @@ function buildProduct(): void {
         "inboxd-daemon",
         "daemon",
         "crates/inboxd-daemon/src/main.rs",
+        0o700,
+        uid,
+        gid,
+      ),
+      manifestFile(stage, "inboxd-keychain", "worker", "crates/inboxd-keychain/src/main.rs", 0o700, uid, gid),
+      manifestFile(
+        stage,
+        launcherEntrypoint.name,
+        "launcher",
+        launcherEntrypoint.source,
         0o700,
         uid,
         gid,
@@ -392,6 +423,15 @@ function buildProduct(): void {
         uid,
         gid,
       ),
+      ...(packageTelegramCredentials ? [manifestFile(
+        stage,
+        telegramAppCredentialsName,
+        "application-credential",
+        "installer:telegram-app-credentials",
+        0o600,
+        uid,
+        gid,
+      )] : []),
     ];
     const manifest = {
       schema_version: productSchemaVersion,

@@ -22,6 +22,7 @@ type SlackFetch = (input: string | URL | Request, init?: RequestInit) => Promise
 
 export interface SlackWebApiTransportOptions {
   readonly token: string;
+  readonly cookie?: string;
   readonly fetch?: SlackFetch;
   /** Trusted constructor seam for exact synthetic boundary tests. */
   readonly maxResponseBytes?: number;
@@ -98,20 +99,25 @@ function encodePayload(call: SlackApiCall): string {
 /** One fetch per call, fixed Slack origin, no redirects and no transport retry. */
 export function createSlackWebApiTransport(options: SlackWebApiTransportOptions): SlackApiTransport {
   const token = fixedToken(options.token);
+  const cookie = options.cookie === undefined ? undefined : fixedToken(options.cookie);
+  if (cookie?.includes(";")) throw new TypeError("Slack cookie must contain only the d cookie value");
   const fetchImpl = options.fetch ?? globalThis.fetch;
   if (typeof fetchImpl !== "function") throw new TypeError("Slack Web API fetch implementation is unavailable");
   const maximum = responseByteLimit(options.maxResponseBytes);
 
   return {
     async call(call): Promise<SlackApiResponse> {
-      const body = encodePayload(call);
+      const jsonBody = encodePayload(call);
+      const body = cookie === undefined ? jsonBody : new URLSearchParams(Object.entries(call.payload).map(([key, value]) => [key, typeof value === "object" ? JSON.stringify(value) : String(value)])).toString();
+      if (encoder.encode(body).byteLength > SLACK_WEB_API_REQUEST_BYTES) throw new RangeError("Slack request exceeded its byte limit");
       let response: Response;
       try {
         response = await fetchImpl(`${SLACK_WEB_API_ORIGIN}/${call.method}`, {
           method: "POST",
           headers: {
             authorization: `Bearer ${token}`,
-            "content-type": "application/json; charset=utf-8",
+            ...(cookie === undefined ? {} : { cookie: `d=${cookie}` }),
+            "content-type": cookie === undefined ? "application/json; charset=utf-8" : "application/x-www-form-urlencoded; charset=utf-8",
           },
           body,
           signal: call.signal,

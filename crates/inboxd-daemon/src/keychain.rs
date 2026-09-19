@@ -1,6 +1,7 @@
 use crate::config::KeychainConfig;
-use std::process::{Command, Stdio};
-use zeroize::{Zeroize, Zeroizing};
+#[cfg(feature = "test-key-provider")]
+use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 const MAX_DATABASE_KEY_BYTES: usize = 4_096;
 
@@ -45,40 +46,45 @@ fn hex_nibble(byte: u8) -> u8 {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn keychain_database_key(config: &KeychainConfig) -> Result<Zeroizing<Vec<u8>>, String> {
-    let mut output = Command::new("/usr/bin/security")
-        .arg("find-generic-password")
-        .arg("-s")
-        .arg(&config.service)
-        .arg("-a")
-        .arg(&config.account)
-        .arg("-w")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+fn helper(operation: &str, service: &str, account: &str) -> Result<Zeroizing<Vec<u8>>, String> {
+    for label in [service, account] {
+        if label.is_empty() || label.len() > 256 || label.as_bytes().contains(&0) {
+            return Err("invalid Keychain label".into());
+        }
+    }
+    let executable = std::env::current_exe()
+        .map_err(|_| "Keychain helper path unavailable")?
+        .with_file_name("inboxd-keychain");
+    inboxd_daemon::validate_trusted_executable_for_owner(
+        &executable,
+        rustix::process::geteuid().as_raw(),
+    )
+    .map_err(|_| "Keychain helper must be installed as an owner-only trusted executable")?;
+    let output = std::process::Command::new(executable)
+        .args([operation, service, account])
+        .env_clear()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
         .output()
-        .map_err(|_| "unable to retrieve SQLCipher key from macOS Keychain".to_owned())?;
+        .map_err(|_| "Keychain helper could not start")?;
+    let key = Zeroizing::new(output.stdout);
     if !output.status.success() {
-        output.stdout.zeroize();
-        return Err("unable to retrieve SQLCipher key from macOS Keychain".into());
-    }
-
-    let mut key = Zeroizing::new(std::mem::take(&mut output.stdout));
-    while key.last().is_some_and(|byte| matches!(byte, b'\r' | b'\n')) {
-        key.pop();
-    }
-    if key.is_empty()
-        || key.len() > MAX_DATABASE_KEY_BYTES
-        || key.as_slice().contains(&0)
-        || std::str::from_utf8(key.as_slice()).is_err()
-    {
-        return Err("macOS Keychain returned invalid SQLCipher key material".into());
+        return Err("saved SQLCipher key is not accessible; unlock Keychain or authorize the stable inboxd-keychain helper once (Always Allow); automatic password prompts are disabled".into());
     }
     Ok(key)
 }
-
-#[cfg(not(target_os = "macos"))]
-fn keychain_database_key(_config: &KeychainConfig) -> Result<Zeroizing<Vec<u8>>, String> {
-    Err("macOS Keychain is unavailable on this platform".into())
+fn keychain_database_key(config: &KeychainConfig) -> Result<Zeroizing<Vec<u8>>, String> {
+    let key = helper("get", &config.service, &config.account)?;
+    if key.is_empty()
+        || key.len() > MAX_DATABASE_KEY_BYTES
+        || key.contains(&0)
+        || std::str::from_utf8(key.as_slice()).is_err()
+    {
+        return Err("Keychain returned invalid SQLCipher key material".into());
+    }
+    Ok(key)
+}
+pub(crate) fn ensure_database_key(service: &str, account: &str) -> Result<(), String> {
+    helper("ensure", service, account).map(|_| ())
 }

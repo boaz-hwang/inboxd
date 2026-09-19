@@ -120,3 +120,22 @@ describe("fetch-backed Slack Web API transport", () => {
     expect(calls).toBe(1);
   });
 });
+
+test("personal Slack sessions use one fixed-origin form request and never forward cookies through redirects", async () => {
+  let calls = 0;
+  const transport = createSlackWebApiTransport({ token: "xoxc-synthetic", cookie: "synthetic-session", fetch: async (url, init) => {
+    calls++;
+    expect(String(url)).toBe("https://slack.com/api/chat.postMessage");
+    const headers = new Headers(init?.headers);
+    expect(headers.get("cookie")).toBe("d=synthetic-session");
+    expect(headers.get("content-type")).toContain("application/x-www-form-urlencoded");
+    expect(init?.redirect).toBe("error");
+    const form = new URLSearchParams(String(init?.body));
+    expect(form.get("text")).toBe("hello & 안녕");
+    expect(form.get("mrkdwn")).toBe("false");
+    return new Response('{"ok":true}');
+  } });
+  await transport.call({ method: "chat.postMessage", payload: { channel: "D123", text: "hello & 안녕", mrkdwn: false }, signal });
+  expect(calls).toBe(1);
+  expect(() => createSlackWebApiTransport({ token: "xoxc-synthetic", cookie: "a; another=b" })).toThrow();
+});

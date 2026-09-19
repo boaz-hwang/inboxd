@@ -81,3 +81,25 @@ CLI, MCP, and OpenTUI use UDS only. CLI’s executable path has an observed clea
 The current working tree observed Bun 379 pass / one deliberate opt-in performance skip / zero fail, Rust 4 pass, typecheck, boundaries, Clippy, fmt and diff hygiene. The enabled O5 acceptance used encrypted production `applySyncBatch` for 100,000 anonymous messages (9982.744 ms) and real UDS search with 700 samples (p50 29.346125 ms, p95 72.681875 ms, worst per-query p95 75.873917 ms ≤300). It includes 25 positive and 8 negative Korean/mixed-language cases.
 
 These are offline gates. They do not rerun Slack/Kakao account reads, historical five-question retrieval classification, or any live send. Fresh user authorization is required for L0; V0 must still be independently re-reviewed; no D0 commit exists.
+## Stable macOS Keychain access
+
+The database key remains in the login Keychain. `inboxd-keychain` is an independent
+Rust executable with no daemon, protocol, UI or provider dependency. Only this
+helper accesses Security.framework. Ordinary daemon startup validates the
+owner-only helper executable and receives the existing key through a private
+pipe, held in zeroizing buffers. Neither a Mac login password nor the database
+key is saved in a new plaintext cache or passed in process arguments.
+
+The helper's `get` operation disables Keychain user interaction: normal startup
+cannot repeatedly open password dialogs. A locked or unauthorized item produces
+an actionable failure instead. The existing explicit `--init-keychain` command
+delegates to the helper's `ensure` operation, allowing initial authorization or
+creation. Existing installations must grant the helper **Always Allow** once.
+Ordinary TUI/daemon/provider updates preserve the helper's code identity. Changing
+the helper itself, locking the login Keychain or revoking its access can require
+new authorization; this does not bypass macOS access controls.
+
+The packaged artifact test rebuilds twice and checks the helper hash remains
+identical, validates its permissions, and exercises a noninteractive missing-item
+read. Native tests validate labels and returned key material. Code identity and
+Keychain access requirements follow Apple's [code signing model](https://developer.apple.com/library/archive/documentation/Security/Conceptual/CodeSigningGuide/AboutCS/AboutCS.html).

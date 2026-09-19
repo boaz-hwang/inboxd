@@ -17,22 +17,32 @@ const temporaryRoot = mkdtempSync(join(process.env.HOME!, ".inboxd-product-artif
 const productDirectory = join(temporaryRoot, "product", "release");
 const secretSentinel = "inboxd-product-build-must-not-copy-this-secret";
 const manifestName = "manifest.json";
+const telegramAppCredentialsName = "telegram-app.json";
 const telegramTdjsonName = "inboxd-telegram-libtdjson.dylib";
 const telegramTdlAddonDirectory = "prebuilds";
 const telegramTdlAddonName = `${telegramTdlAddonDirectory}/darwin-arm64/tdl.node`;
 const executableNames = [
   "inboxd-daemon",
+  "inboxd-keychain",
+  "inboxd",
+  "inboxd-account-worker",
   "inboxd-slack-worker",
   "inboxd-telegram-worker",
   "inboxd-telegram-bootstrap",
+  "inboxd-kakao-personal-worker",
   "inboxd-kakao-local-worker",
   "inboxd-kakao-message-worker",
 ] as const;
 const expectedSources = new Map<string, string>([
   ["inboxd-daemon", "crates/inboxd-daemon/src/main.rs"],
+  ["inboxd-keychain", "crates/inboxd-keychain/src/main.rs"],
+  ["inboxd", "packages/cli/src/bin.ts"],
+  [telegramAppCredentialsName, "installer:telegram-app-credentials"],
+  ["inboxd-account-worker", "packages/accounts/src/worker.ts"],
   ["inboxd-slack-worker", "platforms/slack/src/bin.ts"],
   ["inboxd-telegram-worker", "platforms/telegram/src/worker-entrypoint.ts"],
   ["inboxd-telegram-bootstrap", "platforms/telegram/src/bootstrap.ts"],
+  ["inboxd-kakao-personal-worker", "contrib/kakao/src/personal-entrypoint.ts"],
   ["inboxd-kakao-local-worker", "contrib/kakao/src/worker-entrypoint.ts"],
   ["inboxd-kakao-message-worker", "platforms/kakao-message/src/bin.ts"],
   [telegramTdjsonName, "@prebuilt-tdlib/darwin-arm64/libtdjson.dylib"],
@@ -53,7 +63,7 @@ interface ProductManifest {
   };
   readonly files: readonly {
     readonly name: string;
-    readonly kind: "daemon" | "worker" | "runtime-library";
+    readonly kind: "application-credential" | "daemon" | "launcher" | "worker" | "runtime-library";
     readonly source_entrypoint: string;
     readonly sha256: string;
     readonly size: number;
@@ -96,6 +106,9 @@ async function buildProduct(
       ...process.env,
       INBOXD_PRODUCT_OUT: output,
       INBOXD_TEST_PACKAGE_SECRET: secretSentinel,
+      INBOXD_PACKAGE_TELEGRAM_APP: "1",
+      INBOXD_TELEGRAM_API_ID: "12345",
+      INBOXD_TELEGRAM_API_HASH: "0123456789abcdef0123456789abcdef",
       ...overrides,
     },
   });
@@ -257,12 +270,13 @@ afterAll(() => {
 });
 
 describe("atomic production product artifacts", () => {
-  test("builds the release daemon and four real standalone workers into one verified bundle", async () => {
+  test("builds the release daemon, launcher, and real standalone workers into one verified bundle", async () => {
     const firstBuild = await buildProduct();
     expect(firstBuild.code, firstBuild.stderr).toBe(0);
 
     const expectedInventory = [
       ...executableNames,
+      telegramAppCredentialsName,
       telegramTdjsonName,
       telegramTdlAddonDirectory,
       manifestName,
@@ -294,6 +308,7 @@ describe("atomic production product artifacts", () => {
       ...executableNames,
       telegramTdjsonName,
       telegramTdlAddonName,
+      telegramAppCredentialsName,
     ]);
 
     for (const file of manifest.files) {
@@ -302,14 +317,18 @@ describe("atomic production product artifacts", () => {
       expect(stat.isFile(), file.name).toBeTrue();
       expect(stat.isSymbolicLink(), file.name).toBeFalse();
       expect(stat.uid, file.name).toBe(process.getuid!());
-      const expectedMode = file.kind === "runtime-library" ? 0o600 : 0o700;
+      const expectedMode = file.kind === "runtime-library" || file.kind === "application-credential" ? 0o600 : 0o700;
       expect(stat.mode & 0o777, file.name).toBe(expectedMode);
       expect(file.kind).toBe(file.name === "inboxd-daemon"
         ? "daemon"
-        : expectedSources.get(file.name)?.startsWith("platforms/")
+        : file.name === "inboxd"
+          ? "launcher"
+        : file.name === telegramAppCredentialsName
+          ? "application-credential"
+        : file.name === "inboxd-keychain" || file.name === "inboxd-account-worker" || expectedSources.get(file.name)?.startsWith("platforms/")
           || expectedSources.get(file.name)?.startsWith("contrib/") ? "worker" : "runtime-library");
       expect(file.source_entrypoint).toBe(expectedSources.get(file.name)!);
-      expect(file.mode).toBe(file.kind === "runtime-library" ? "0600" : "0700");
+      expect(file.mode).toBe(file.kind === "runtime-library" || file.kind === "application-credential" ? "0600" : "0700");
       expect(file.size).toBe(stat.size);
       expect(file.sha256).toBe(sha256(path));
       expect(readFileSync(path).includes(Buffer.from(secretSentinel)), file.name).toBeFalse();
@@ -328,7 +347,7 @@ describe("atomic production product artifacts", () => {
     expect(telegram.stdout).not.toContain("tdlib_production_adapter_initialization_failed");
 
     for (const workerName of executableNames.filter((name) => name !== "inboxd-daemon")) {
-      const result = await run([join(productDirectory, workerName)], { env: {} });
+      const result = await run([join(productDirectory, workerName)], { env: { HOME: temporaryRoot } });
       expect(result.code, workerName).not.toBe(0);
       expect(result.stdout, workerName).toBe("");
     }
@@ -381,6 +400,10 @@ describe("atomic production product artifacts", () => {
       expect(stateAclRemoved.exitCode).toBe(0);
     }
 
+    const helperHash = sha256(join(productDirectory, "inboxd-keychain"));
+    const noPrompt = await run([join(productDirectory, "inboxd-keychain"), "get", "inboxd-nonexistent-helper-test", "missing"], {env:{HOME:temporaryRoot}});
+    expect(noPrompt.code).not.toBe(0);
+    expect(noPrompt.stdout).toBe("");
     const completeSnapshot = snapshot(productDirectory);
     const failedBuild = await buildProduct(productDirectory, { CARGO: "/usr/bin/false" });
     expect(failedBuild.code).not.toBe(0);
@@ -388,9 +411,10 @@ describe("atomic production product artifacts", () => {
 
     const secondBuild = await buildProduct();
     expect(secondBuild.code, secondBuild.stderr).toBe(0);
+    expect(sha256(join(productDirectory, "inboxd-keychain"))).toBe(helperHash);
     expect(inventory(productDirectory)).toEqual(expectedInventory);
     expect(JSON.parse(readFileSync(manifestPath, "utf8")).files.map((file: { name: string }) => file.name))
-      .toEqual([...executableNames, telegramTdjsonName, telegramTdlAddonName]);
+      .toEqual([...executableNames, telegramTdjsonName, telegramTdlAddonName, telegramAppCredentialsName]);
 
     const tdjsonPath = join(productDirectory, telegramTdjsonName);
     const aclAdded = Bun.spawnSync({

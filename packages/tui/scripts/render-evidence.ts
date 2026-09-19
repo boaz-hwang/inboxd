@@ -90,7 +90,7 @@ const sizes = [{ width: 80, height: 24 }, { width: 120, height: 40 }] as const;
 const outputDirectory = join(import.meta.dir, "..", "rendered");
 
 function evidenceState(screen: Screen): TuiState {
-  let state = createInitialState({ screen, platform: "mixed", period: "24h" });
+  let state = createInitialState({ screen, period: "24h" });
   state = reduce(state, { type: "connected", generation: 1 });
   state = reduce(state, { type: "subscribed", generation: 1 });
   state = reduce(state, { type: "capabilitySucceeded", generation: 1, data: capabilities });
@@ -400,6 +400,10 @@ await Bun.write(join(outputDirectory, "manifest.json"), `${JSON.stringify({
   working_tree_base: workingTreeBase,
   runtime: Bun.version,
   source_hashes: {
+    workspace: sha256(readFileSync(join(repository, "packages/tui/src/workspace.ts"))),
+    model: sha256(readFileSync(join(repository, "packages/tui/src/workspace-model.ts"))),
+    theme: sha256(readFileSync(join(repository, "packages/tui/src/theme.ts"))),
+    text: sha256(readFileSync(join(repository, "packages/tui/src/text.ts"))),
     renderer: sha256(readFileSync(rendererPath)),
     runtime: sha256(readFileSync(runtimePath)),
     generator: sha256(readFileSync(generatorPath)),

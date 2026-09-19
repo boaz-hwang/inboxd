@@ -398,7 +398,7 @@ describeWithRustDaemon("release Rust daemon UDS parity", () => {
     expect(controller.state.connection.status).toBe("reconnecting");
     expect(controller.state.views.approvals.data.find(row => row.id === intentId)).toMatchObject({ state: "Uncertain", codeRequired: false });
     expect(controller.currentApprovalCode()).toBeUndefined();
-    expect(renderScreen(controller.state, { width: 80, height: 24 })).toContain("outcome unknown; do not resend");
+    expect(renderScreen(controller.state, { width: 80, height: 24 })).toContain("다시 보내지 마세요");
 
     await controller.start();
     await controller.dispatchKey("a");

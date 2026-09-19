@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createInitialState, createTuiController, renderScreen } from "../src/index.ts";
+import { createInitialState, createTuiController, renderInspectorScreen } from "../src/index.ts";
 import type { JsonObject, ResourceCapabilityV1 } from "../../protocol/src/schema.ts";
 
 const slack = { platform: "slack", account: "work:one", chat_id: "ops:one" };
@@ -33,7 +33,7 @@ test.each(["Uncertain", "Sent", "Verified", "Sending"])("never approves or retri
   expect(controller.state.views.approvals.data[0]?.codeRequired).toBe(false);
   await controller.dispatchKey("a");
   expect(controller.state.approvalPrompt).toBe(false);
-  expect(renderScreen(controller.state, { width: 80, height: 24 })).toContain(`Approve [disabled: ${state}]`);
+  expect(renderInspectorScreen(controller.state, { width: 80, height: 24 })).toContain(`Approve [disabled: ${state}]`);
   controller.disconnected();
   await controller.start();
   await controller.dispatchKey("a");
@@ -68,7 +68,7 @@ test.each([
   for (const screen of ["4", "3"]) {
     await controller.dispatchKey(screen);
     for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
-      const output = renderScreen(controller.state, size);
+      const output = renderInspectorScreen(controller.state, size);
       expect(output).toContain(state);
       expect(output).toContain(meaning);
       expect(output).toContain("session observation");
@@ -120,7 +120,7 @@ test.each([
   expect(controller.state.views.approvals.data[0]).toMatchObject({ state: "Uncertain", codeRequired: false });
   if (!reconnectFirst) await controller.start();
   for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
-    const text = renderScreen(controller.state, size);
+    const text = renderInspectorScreen(controller.state, size);
     expect(text).toContain("outcome unknown; do not resend");
     expect(text).not.toContain("acknowledged; not verified");
   }
@@ -228,7 +228,7 @@ test("failed diagnostic probes remain unknown rather than fabricating negative a
   } });
   await controller.start();
   await controller.dispatchKey("5");
-  const text = renderScreen(controller.state, { width: 80, height: 24 });
+  const text = renderInspectorScreen(controller.state, { width: 80, height: 24 });
   expect(text).toContain("Authentication: unknown");
   expect(text).toContain("probe unavailable");
   expect(text).not.toContain("authenticated=false");
@@ -253,13 +253,13 @@ test("Doctor renders structured encryption auth sync and isolation without promo
   await controller.start();
   await controller.dispatchKey("5");
   for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
-    const text = renderScreen(controller.state, size);
+    const text = renderInspectorScreen(controller.state, size);
     for (const fact of ["SQLCipher ready=true", "Cipher: 4.9.0", "Schema: 2", "Authentication: slack=unknown", "Sync: slack=degraded", "grade=b protected=false", "same-user access is outside isolation"]) expect(text).toContain(fact);
     expect(text).not.toContain("healthy");
     expect(text).not.toContain("Encryption: unknown");
   }
   controller.disconnected();
-  expect(renderScreen(controller.state, { width: 80, height: 24 })).toContain("stale response retained");
+  expect(renderInspectorScreen(controller.state, { width: 80, height: 24 })).toContain("stale response retained");
   controller.stop();
 });
 
@@ -284,7 +284,7 @@ test("Inbox discovers explicit chats before recent retrieval and preserves its o
   expect(first!.params.chats).toEqual([slack, empty]);
   const interval = first!.params.interval as { from_ts: number; to_ts: number };
   expect(interval.to_ts).toBeGreaterThan(interval.from_ts);
-  expect(calls.slice(0, 4).map(call => call.method)).toEqual(["capability.list", "chat.list", "chat.list", "message.recent"]);
+  expect(calls.slice(0, 5).map(call => call.method)).toEqual(["account.list", "capability.list", "chat.list", "chat.list", "message.recent"]);
   expect(controller.state.views.inbox.data.find(row => row.id === "first")).toMatchObject({ chat: slack, body: "recent body", edited: false, deleted: false });
   expect(controller.state.views.inbox.nextCursor).toBe("aggregate:opaque+/=");
   await Promise.all([controller.dispatchKey("n"), controller.dispatchKey("n")]);
@@ -320,7 +320,7 @@ test("Inbox fails closed above 100 discovered chats without oversized RPC or sta
   expect(controller.state.views.inbox).toMatchObject({ status: "error", data: [], coverage: { freshness: "partial", chats: 0 } });
   expect(controller.state.views.inbox.nextCursor).toBeUndefined();
   for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
-    const text = renderScreen(controller.state, size);
+    const text = renderInspectorScreen(controller.state, size);
     expect(text).toContain("partial");
     expect(text).toContain("100-chat limit");
     expect(text).toContain("Recovery: configure at most 100 chats.");
@@ -352,7 +352,7 @@ test("Inbox bounds discovery pages even when unique cursors return duplicate cha
   expect(pages).toBe(100);
   expect(recentCalls).toBe(0);
   expect(controller.state.views.inbox).toMatchObject({ status: "error", data: [], coverage: { freshness: "partial", chats: 0 } });
-  expect(renderScreen(controller.state, { width: 80, height: 24 })).toContain("discovery page limit");
+  expect(renderInspectorScreen(controller.state, { width: 80, height: 24 })).toContain("discovery page limit");
   controller.stop();
 });
 
@@ -387,13 +387,13 @@ test("Inbox retains per-chat coverage and sourced unread evidence including conf
     coverage: { chats: 2, gaps: 1, freshness: "partial" },
   });
   for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
-    expect(renderScreen(controller.state, size)).toContain("2 chats / 1 gaps");
-    expect(renderScreen(controller.state, size)).toContain("Unread: 0 (platform)");
+    expect(renderInspectorScreen(controller.state, size)).toContain("2 chats / 1 gaps");
+    expect(renderInspectorScreen(controller.state, size)).toContain("Unread: 0 (platform)");
   }
   await controller.dispatchKey("j");
   await controller.dispatchKey("d");
   for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
-    const text = renderScreen(controller.state, size);
+    const text = renderInspectorScreen(controller.state, size);
     expect(text).toContain("Unread: ? (unknown)");
     expect(text).toContain("unobserved");
     expect(text).toContain("uncollected");

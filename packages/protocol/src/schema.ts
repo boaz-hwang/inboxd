@@ -22,7 +22,7 @@ export const LEGACY_REQUEST_METHODS = [
   "subscribe",
 ] as const;
 
-export const REQUEST_METHODS = [...LEGACY_REQUEST_METHODS, "capability.list"] as const;
+export const REQUEST_METHODS = [...LEGACY_REQUEST_METHODS, "capability.list", "account.list", "account.messages", "account.search", "account.send"] as const;
 
 export const LEGACY_EVENT_METHODS = [
   "message.upserted",
@@ -315,7 +315,8 @@ function containsApprovalCode(value: unknown): boolean {
 
 function assertApprovalAccess(method: ProtocolMethod, role?: ClientRole): void {
   if (role !== undefined && role !== "approver" && (
-    method === "safety.intent.listPending"
+    method === "account.send"
+    || method === "safety.intent.listPending"
     || method === "safety.intent.claimApprovalCode"
     || method === "safety.intent.approve"
     || method === "safety.intent.reject"

@@ -185,8 +185,11 @@ impl CapabilityRegistry {
             };
             let mut entries = self.entries.write().unwrap();
             if let Some(entry) = entries.get_mut(&id) {
-                if entry.auth != auth {
-                    entry.auth = auth;
+                // A fresher observation is not a capability change. Publishing it
+                // made subscribers refresh again indefinitely, starving TUI reads.
+                let changed_state = auth_semantics_changed(&entry.auth, &auth);
+                entry.auth = auth;
+                if changed_state {
                     changed.push(id);
                 }
             }
@@ -505,4 +508,21 @@ fn resource_key(resource: &Value) -> Result<String> {
     let resource = validate_resource(resource)?;
     serde_json::to_string(&resource)
         .map_err(|_| DaemonError::new("resource could not be serialized"))
+}
+
+fn auth_semantics_changed(previous: &Value, next: &Value) -> bool {
+    previous.get("state") != next.get("state") || previous.get("reason") != next.get("reason")
+}
+
+#[cfg(test)]
+mod auth_event_tests {
+    use super::*;
+    #[test]
+    fn freshness_does_not_invalidate_subscribers_but_revocation_does() {
+        let auth = json!({"state":"authenticated","reason":null,"observed_at":1});
+        let fresh = json!({"state":"authenticated","reason":null,"observed_at":2});
+        let revoked = json!({"state":"unauthenticated","reason":"revoked","observed_at":2});
+        assert!(!auth_semantics_changed(&auth, &fresh));
+        assert!(auth_semantics_changed(&auth, &revoked));
+    }
 }

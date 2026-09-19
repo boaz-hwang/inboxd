@@ -1,24 +1,24 @@
-INBOXD · connected · mixed                                                      
-● INBOX | 2 SEARCH | 3 CHAT | 4 APPROVALS | 5 DOCTOR                            
-Resource: slack › work › chat:ops                                               
-READ bounded_history max_page=100 pages=1 cursor=opaque                         
-WRITE send content=text reply=yes                                               
-RECEIPT independent_readback                                                    
-AUTH authenticated reason=none observed_at=1726650000                           
-DETAIL (in place)                                                               
-Evidence rail: partial · 3 chats / 1 gaps / 1 limits · connected                
-Inbox                                                                           
-> ● slack › work › chat:ops 운영 Unread: ? (unknown) 09:41 한국어/CJK 경계 텍스…
- ○ telegram › personal › chat:-100123 민수 09:39 Telegram text/reply capability 
- ○ kakao › local › chat:room-7 카카오 로컬 09:38 read-only measured local histo…
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply a Esc ? q                   
+ inboxd  /  전체 메시지   · 전송 확인 1                                         
+ ● 전체   ○ KakaoTalk   ○ Slack   ○ Telegram                                    
+────────────────────────────────────────────────────────────────────────────────
+ 대화 4개  ‹             │ 전체 메시지 · 최근 24h                               
+                         │                                                      
+› [SL] ops               │  [SL] ops · 운영  09:41 · 수정됨                     
+   한국어/CJK 경계 텍스… │  한국어/CJK 경계 텍스트 가나다라마바사아자차카타파   
+                         │  하漢字かなカナ — whole grapheme clipping evidence   
+  [TG] 대화 2            │                                                      
+   Telegram text/reply c…│  [TG] 대화 2 · 민수  09:39                           
+                         │  Telegram text/reply capability                      
+  [KK] room-7            │                                                      
+   read-only measured lo…│  [KK] room-7 · 카카오 로컬  09:38                    
+                         │  read-only measured local history                    
+  [KK] friend-uuid       │                                                      
+   불러온 메시지 없음    │                                                      
+                         │                                                      
+                         │                                                      
+                         │                                                      
+                         │                                                      
+                         │                                                      
+ ↑↓ 선택  Enter 열기     │                                                      
+ 일부 기록만 표시 중 · b 불러오기 · d 상세                                      
+ / 검색  Ctrl+K 대화찾기  Tab 영역 이동  ←→ 필터 선택  ? 도움말                 

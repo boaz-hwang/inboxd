@@ -119,6 +119,7 @@ pub enum ProductionWorkerConfig {
         team_id: String,
         allowed_chat_ids_json: String,
         bot_token: String,
+        session_cookie: Option<String>,
     },
     Telegram {
         account: String,
@@ -128,6 +129,11 @@ pub enum ProductionWorkerConfig {
         api_hash: String,
         database_directory: String,
         files_directory: String,
+    },
+    KakaoPersonal {
+        account: String,
+        chat_id: String,
+        credentials_json: String,
     },
     KakaoLocal {
         fixed_config_json: String,
@@ -148,7 +154,17 @@ pub enum ProductionWorkerConfig {
 impl Zeroize for ProductionWorkerConfig {
     fn zeroize(&mut self) {
         match self {
-            Self::Slack { bot_token, .. } => bot_token.zeroize(),
+            Self::Slack {
+                bot_token,
+                session_cookie,
+                ..
+            } => {
+                bot_token.zeroize();
+                session_cookie.zeroize();
+            }
+            Self::KakaoPersonal {
+                credentials_json, ..
+            } => credentials_json.zeroize(),
             Self::Telegram { api_hash, .. } => api_hash.zeroize(),
             Self::KakaoLocal { .. } => {}
             Self::KakaoOfficial { access_token, .. } => access_token.zeroize(),
@@ -294,7 +310,11 @@ impl ProductionWorkerConfig {
                 team_id,
                 allowed_chat_ids_json,
                 bot_token,
+                session_cookie,
             } => {
+                if let Some(cookie) = session_cookie.take() {
+                    environment.insert("INBOXD_SLACK_SESSION_COOKIE", cookie);
+                }
                 environment.insert("INBOXD_SLACK_ACCOUNT", std::mem::take(account));
                 environment.insert(
                     "INBOXD_SLACK_ALLOWED_CHAT_IDS_JSON",
@@ -336,6 +356,23 @@ impl ProductionWorkerConfig {
                 environment.insert("INBOXD_TELEGRAM_SELF_USER_ID", std::mem::take(self_user_id));
                 ProductionLaunch {
                     executable_name: "inboxd-telegram-worker",
+                    environment,
+                }
+            }
+            Self::KakaoPersonal {
+                account,
+                chat_id,
+                credentials_json,
+            } => {
+                environment.insert("INBOXD_KAKAO_PERSONAL_BINDING", binding_id.to_owned());
+                environment.insert("INBOXD_KAKAO_PERSONAL_ACCOUNT", std::mem::take(account));
+                environment.insert("INBOXD_KAKAO_PERSONAL_CHAT", std::mem::take(chat_id));
+                environment.insert(
+                    "INBOXD_KAKAO_PERSONAL_CREDENTIALS",
+                    std::mem::take(credentials_json),
+                );
+                ProductionLaunch {
+                    executable_name: "inboxd-kakao-personal-worker",
                     environment,
                 }
             }
@@ -897,8 +934,7 @@ impl TrustedPathError {
     }
 }
 
-#[cfg(test)]
-fn validate_trusted_executable_for_owner(path: &Path, owner: u32) -> Result<(), WorkerError> {
+pub fn validate_trusted_executable_for_owner(path: &Path, owner: u32) -> Result<(), WorkerError> {
     open_trusted_executable_for_owner(path, owner).map(|_| ())
 }
 

@@ -1,3 +1,7 @@
+import { displayWidth, truncateCells, wrapCells, fit } from "./text.ts";
+export { displayWidth, truncateCells, wrapCells } from "./text.ts";
+import { renderWorkspace } from "./workspace.ts";
+import { conversationRows, filteredMessages, sameResource, platformOptions, isArchivedResource } from "./workspace-model.ts";
 import type {
   ClientRole,
   JsonObject,
@@ -27,6 +31,10 @@ export interface Row {
   resource?: ResourceRefV1;
   /** Protocol identity; display IDs are never parsed to recover a chat scope. */
   chat?: ChatRef;
+  title?: string;
+  canSend?: boolean;
+  previewOnly?: boolean;
+  authorName?: string;
   author?: string;
   ts?: string;
   body?: string;
@@ -65,6 +73,14 @@ interface CapabilityView {
 
 export interface TuiState {
   screen: Screen;
+  /** Workspace navigation is separate from message selection. */
+  pane?: "filters" | "rooms" | "messages";
+  accountMode?: boolean;
+  sendPending?: boolean;
+  roomFocus?: number;
+  directory?: Row[];
+  directoryRefreshing?: boolean;
+  draftCursor?: number;
   focus: number;
   selected: Record<Screen, number>;
   views: Record<Screen, View>;
@@ -77,6 +93,9 @@ export interface TuiState {
   /** Narrow terminals replace the list with the activated row's detail. */
   detailOpen: boolean;
   detailOffset: number;
+  detailRow?: Row;
+  finderActive?: boolean;
+  finderQuery?: string;
   searchActive: boolean;
   /** Search text is process-memory-only and is cleared on cancel or exit. */
   searchQuery: string;
@@ -134,6 +153,9 @@ function views(): Record<Screen, View> {
 export function createInitialState(settings: { platform?: string; period?: string; screen?: Screen } = {}): TuiState {
   return {
     screen: settings.screen ?? "inbox",
+    pane: "rooms",
+    roomFocus: 0,
+    directory: [],
     focus: 0,
     selected: { inbox: 0, search: 0, chat: 0, approvals: 0, doctor: 0 },
     views: views(),
@@ -197,7 +219,7 @@ function templateArgumentsObject(value: string): JsonObject | undefined {
   }
 }
 
-const nonTextKeys = new Set(["Enter", "Escape", "Backspace", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home"]);
+const nonTextKeys = new Set(["Enter", "Escape", "Backspace", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", "Tab", "ArrowLeft", "ArrowRight", "Delete", "ShiftEnter", "Find", "MessageSearch"]);
 
 function printableInput(key: string): string | undefined {
   return key.length > 0 && !nonTextKeys.has(key) && !/[\u0000-\u001f\u007f-\u009f]/u.test(key) ? key : undefined;
@@ -214,7 +236,7 @@ function removeLastGrapheme(value: string): string {
 
 /** Pure state reducer. A generation must subscribe before its responses or events are trusted. */
 export function reduce(state: TuiState, action: TuiAction): TuiState {
-  if (action.type === "switchScreen") return { ...state, screen: action.screen, focus: state.selected[action.screen], helpOpen: false, detailOpen: false, detailOffset: 0 };
+  if (action.type === "switchScreen") return { ...state, pane: action.screen === "inbox" || (action.screen === "chat" && !state.activeResource) ? "rooms" : "messages", screen: action.screen, focus: state.selected[action.screen], helpOpen: false, detailOpen: false, detailOffset: 0 };
   if (action.type === "connected") {
     if (action.generation < state.connection.generation) return state;
     return {
@@ -250,6 +272,8 @@ export function reduce(state: TuiState, action: TuiAction): TuiState {
       approvalPrompt: false,
       detailOpen: false,
       searchActive: false,
+      finderActive: false,
+      finderQuery: "",
       searchQuery: "",
       composeActive: false,
       composeMode: undefined,
@@ -288,7 +312,7 @@ export function reduce(state: TuiState, action: TuiAction): TuiState {
   }
   if (action.type === "queryFailed") {
     if (!accepted(state, action.generation)) return state;
-    const next = withView(state, action.screen, { ...state.views[action.screen], status: "error", error: action.error, nextCursor: undefined, coverage: action.coverage ?? state.views[action.screen].coverage });
+    const next = withView(state, action.screen, { ...state.views[action.screen], status: "error", data: action.screen === "inbox" ? [] : state.views[action.screen].data, error: action.error, nextCursor: undefined, coverage: action.coverage ?? state.views[action.screen].coverage });
     return { ...next, ...settleRequery(next, action.screen) };
   }
   if (action.type === "querySkipped") {
@@ -301,7 +325,10 @@ export function reduce(state: TuiState, action: TuiAction): TuiState {
   }
   if (action.type === "capabilitySucceeded") {
     if (!accepted(state, action.generation)) return state;
-    return { ...state, requeryCapabilities: false, capabilities: { status: action.data.length === 0 ? "empty" : "ready", data: action.data } };
+    const focusedRoom = conversationRows(state)[state.roomFocus ?? 0]?.resource;
+    const next: TuiState = { ...state, requeryCapabilities: false, capabilities: { status: action.data.length === 0 ? "empty" : "ready", data: action.data } };
+    const index = conversationRows(next).findIndex(room => sameResource(room.resource, focusedRoom));
+    return { ...next, roomFocus: Math.max(0, index) };
   }
   if (action.type === "capabilityFailed") {
     if (!accepted(state, action.generation)) return state;
@@ -319,11 +346,20 @@ export function reduce(state: TuiState, action: TuiAction): TuiState {
   }
 
   if (action.key === "Escape") {
+    if (state.finderActive || state.finderQuery) return { ...state, finderActive: false, finderQuery: "", roomFocus: 0, notice: undefined };
     if (state.approvalPrompt) return { ...state, approvalPrompt: false, codeBuffer: "", notice: "approval code cleared from memory" };
     if (state.searchActive) return { ...state, searchActive: false, searchQuery: "", notice: "search query cleared from memory" };
     if (state.composeActive) return { ...state, composeActive: false, composeMode: undefined, replyTo: undefined, templateStep: undefined, templateId: "", templateArguments: "", draft: "", notice: "compose draft cleared from memory" };
     if (state.helpOpen) return { ...state, helpOpen: false };
     if (state.detailOpen) return { ...state, detailOpen: false, notice: "detail closed" };
+    return state;
+  }
+  if (state.finderActive) {
+    if (action.key === "ArrowDown" || action.key === "ArrowUp") return { ...state, roomFocus: Math.max(0, Math.min(conversationRows(state).length - 1, (state.roomFocus ?? 0) + (action.key === "ArrowDown" ? 1 : -1))) };
+    if (action.key === "Backspace") return { ...state, finderQuery: removeLastGrapheme(state.finderQuery ?? ""), roomFocus: 0 };
+    if (action.key === "Enter") return { ...state, finderActive: false };
+    const input = printableInput(action.key);
+    if (input !== undefined) return { ...state, finderQuery: (state.finderQuery ?? "") + input, roomFocus: 0 };
     return state;
   }
   if (state.approvalPrompt) {
@@ -348,6 +384,20 @@ export function reduce(state: TuiState, action: TuiAction): TuiState {
     return state;
   }
   if (state.composeActive) {
+    if (state.composeMode !== "approved_template") {
+      const cursor = Math.min(state.draftCursor ?? state.draft.length, state.draft.length);
+      const left = state.draft.slice(0, cursor), right = state.draft.slice(cursor);
+      const previous = removeLastGrapheme(left).length;
+      const next = new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(right)[Symbol.iterator]().next().value?.segment.length ?? 0;
+      if (action.key === "ArrowLeft") return { ...state, draftCursor: previous };
+      if (action.key === "ArrowRight") return { ...state, draftCursor: cursor + next };
+      if (action.key === "Home") return { ...state, draftCursor: 0 };
+      if (action.key === "End") return { ...state, draftCursor: state.draft.length };
+      if (action.key === "Backspace") return { ...state, draft: left.slice(0, previous) + right, draftCursor: previous };
+      if (action.key === "Delete") return { ...state, draft: left + right.slice(next), draftCursor: cursor };
+      const insertion = action.key === "ShiftEnter" ? "\n" : printableInput(action.key);
+      if (insertion !== undefined) return { ...state, draft: left + insertion + right, draftCursor: cursor + insertion.length };
+    }
     if (state.composeMode === "approved_template") {
       if (action.key === "Enter") {
         if (state.templateStep === "template_id") {
@@ -383,17 +433,31 @@ export function reduce(state: TuiState, action: TuiAction): TuiState {
     if (input !== undefined) return { ...state, draft: state.draft + input };
     return state;
   }
+  if ((state.screen === "inbox" || state.screen === "chat") && !state.detailOpen) {
+    if (action.key === "Tab") return { ...state, pane: state.pane === "filters" ? "rooms" : state.pane === "rooms" ? "messages" : "filters", notice: undefined };
+    if (action.key === "[" || action.key === "]" || (state.pane === "filters" && (action.key === "ArrowLeft" || action.key === "ArrowRight"))) {
+      const options = platformOptions(state);
+      const current = options.indexOf(state.platform ?? "all");
+      const platform = options[(current + (action.key === "]" || action.key === "ArrowRight" ? 1 : options.length - 1)) % options.length];
+      return { ...state, platform: platform === "all" ? undefined : platform, roomFocus: 0, focus: 0, selected: { ...state.selected, inbox: 0 }, pane: state.pane === "filters" ? "filters" : "rooms", notice: undefined };
+    }
+    if (state.pane === "rooms" && ["j", "k", "ArrowDown", "ArrowUp"].includes(action.key)) {
+      const delta = action.key === "j" || action.key === "ArrowDown" ? 1 : -1;
+      return { ...state, roomFocus: Math.max(0, Math.min(conversationRows(state).length - 1, (state.roomFocus ?? 0) + delta)) };
+    }
+  }
   if (action.key === "PageDown") return { ...state, detailOffset: state.detailOffset + 8 };
   if (action.key === "PageUp") return { ...state, detailOffset: Math.max(0, state.detailOffset - 8) };
   if (action.key === "Home") return { ...state, detailOffset: 0 };
   if (action.key >= "1" && action.key <= "5") return reduce(state, { type: "switchScreen", screen: screens[Number(action.key) - 1]! });
   if (action.key === "?") return { ...state, helpOpen: !state.helpOpen };
-  if (action.key === "/") return { ...state, screen: "search", searchActive: true, searchQuery: "", helpOpen: false, notice: "search input is memory-only" };
+  if (action.key === "Find") return { ...state, screen: "inbox", finderActive: true, finderQuery: "", platform: undefined, pane: "rooms", roomFocus: 0, notice: undefined };
+  if (action.key === "/" || action.key === "MessageSearch") return { ...state, screen: "search", platform: state.accountMode ? state.platform : undefined, searchActive: true, searchQuery: "", helpOpen: false, notice: "search input is memory-only" };
   if (action.key === "q") return { ...state, quitRequested: true, detailOpen: false, draft: "", searchQuery: "", composeActive: false, composeMode: undefined, replyTo: undefined, templateStep: undefined, templateId: "", templateArguments: "", codeBuffer: "", approvalPrompt: false, notice: "memory drafts cleared on exit" };
-  if (action.key === "j" || action.key === "ArrowDown") return { ...state, focus: Math.min(maxFocus(state), state.focus + 1) };
-  if (action.key === "k" || action.key === "ArrowUp") return { ...state, focus: Math.max(0, state.focus - 1) };
+  if (action.key === "j" || action.key === "ArrowDown") { const focus = Math.min(maxFocus(state), state.focus + 1); return { ...state, focus, detailOffset: 0, selected: state.screen === "approvals" ? { ...state.selected, approvals: focus } : state.selected }; }
+  if (action.key === "k" || action.key === "ArrowUp") { const focus = Math.max(0, state.focus - 1); return { ...state, focus, detailOffset: 0, selected: state.screen === "approvals" ? { ...state.selected, approvals: focus } : state.selected }; }
   if (action.key === "d") {
-    return { ...state, selected: { ...state.selected, [state.screen]: state.focus }, detailOpen: true, detailOffset: 0, notice: `${screenLabels[state.screen].toLowerCase()} detail opened` };
+    return { ...state, selected: { ...state.selected, [state.screen]: state.focus }, detailOpen: true, detailRow: undefined, detailOffset: 0, notice: `${screenLabels[state.screen].toLowerCase()} detail opened` };
   }
   if (action.key === "Enter") {
     return { ...state, selected: { ...state.selected, [state.screen]: state.focus }, detailOpen: false, detailOffset: 0, notice: `${screenLabels[state.screen].toLowerCase()} selection activated` };
@@ -421,11 +485,12 @@ export function reduce(state: TuiState, action: TuiAction): TuiState {
     return { ...state, notice: "fetching more results" };
   }
   if (action.key === "c") {
+    if (state.sendPending) return { ...state, notice: "전송 중입니다." };
     if (state.screen !== "chat") return { ...state, notice: "compose proposal is only available in Chat" };
     if (state.connection.status !== "connected") return { ...state, notice: "compose disabled while disconnected" };
     if (!capabilityClaimsCurrent(state)) return { ...state, composeActive: false, draft: "", notice: capabilityRefreshNotice("compose", state) };
     const capability = selectedCapability(state);
-    if (capability === undefined) return { ...state, composeActive: false, draft: "", notice: "compose disabled — exact resource capability unavailable" };
+    if (capability === undefined) return { ...state, composeActive: false, draft: "", notice: isArchivedResource(state, selectedResource(state)) ? "보관 기록은 읽기 전용입니다. / 로 현재 연결된 대화를 선택하세요." : "compose disabled — exact resource capability unavailable" };
     if (capability.auth.state !== "authenticated") return { ...state, composeActive: false, draft: "", notice: `compose disabled — AUTH ${capability.auth.state} reason=${capability.auth.reason}` };
     if (capability.write.mode !== "send") return { ...state, composeActive: false, draft: "", notice: "compose disabled — exact resource is read-only" };
     if (capability.write.content_mode === "approved_template") return {
@@ -439,7 +504,7 @@ export function reduce(state: TuiState, action: TuiAction): TuiState {
       notice: "compose approved template — inputs remain memory-only",
     };
     if (capability.write.content_mode !== "text") return { ...state, composeActive: false, draft: "", notice: "compose disabled — text capability unavailable" };
-    return { ...state, composeActive: true, composeMode: "text", replyTo: undefined, draft: "", notice: "compose text — draft remains memory-only" };
+    return { ...state, composeActive: true, composeMode: "text", replyTo: undefined, draft: "", draftCursor: 0, notice: "compose text — draft remains memory-only" };
   }
   if (action.key === "r") {
     if (state.screen !== "chat") return { ...state, notice: "reply is only available in Chat" };
@@ -449,54 +514,11 @@ export function reduce(state: TuiState, action: TuiAction): TuiState {
     if (capability?.auth.state !== "authenticated" || capability.write.mode !== "send" || capability.write.content_mode !== "text" || !capability.write.reply) {
       return { ...state, composeActive: false, draft: "", notice: "reply capability unavailable for exact resource" };
     }
-    const row = visibleRows(state, "chat")[state.selected.chat];
+    const row = visibleRows(state, "chat")[state.focus];
     if (row === undefined) return { ...state, composeActive: false, draft: "", notice: "reply unavailable — select a message" };
-    return { ...state, composeActive: true, composeMode: "reply", replyTo: row.id, draft: "", notice: `reply to ${row.id} — draft remains memory-only` };
+    return { ...state, composeActive: true, composeMode: "reply", replyTo: row.id, draft: "", draftCursor: 0, notice: `reply to ${row.id} — draft remains memory-only` };
   }
   return state;
-}
-
-export function displayWidth(value: string): number {
-  return Bun.stringWidth(value);
-}
-
-/** Clips by terminal cells and emits an ellipsis without splitting a grapheme. */
-export function truncateCells(value: string, width: number): string {
-  if (width <= 0) return "";
-  if (displayWidth(value) <= width) return value;
-  if (width === 1) return "…";
-  const target = width - 1;
-  let result = "";
-  let used = 0;
-  const clusters = typeof Intl.Segmenter === "function"
-    ? Array.from(new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(value), (part) => part.segment)
-    : Array.from(value);
-  for (const character of clusters) {
-    const characterWidth = displayWidth(character);
-    if (used + characterWidth > target) break;
-    result += character;
-    used += characterWidth;
-  }
-  return `${result}…`;
-}
-
-/** Hard wrap on grapheme boundaries; preserve newlines and every message cell. */
-export function wrapCells(value: string, width: number): string[] {
-  const lines: string[] = [];
-  for (const paragraph of value.split("\n")) {
-    let line = "";
-    for (const { segment } of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(paragraph)) {
-      if (line && displayWidth(line) + displayWidth(segment) > width) { lines.push(line); line = ""; }
-      line += segment;
-    }
-    lines.push(line);
-  }
-  return lines;
-}
-
-function fit(line: string, width: number): string {
-  const clipped = truncateCells(line, width);
-  return clipped + " ".repeat(Math.max(0, width - displayWidth(clipped)));
 }
 
 function count(value: number | undefined, label: string): string {
@@ -520,7 +542,7 @@ function visibleRows(state: TuiState, screen: Screen): Row[] {
       body: `READ ${capability.read.mode} · WRITE ${capability.write.mode}/${capability.write.content_mode} · AUTH ${capability.auth.state}`,
     }));
   }
-  return state.views[screen].data;
+  return screen === "inbox" || screen === "search" ? filteredMessages(state, screen) : state.views[screen].data;
 }
 
 function exactChatResource(chat: ChatRef): ResourceRefV1 {
@@ -541,6 +563,8 @@ function resourcePath(resource: ResourceRefV1): string {
 }
 
 function selectedResource(state: TuiState): ResourceRefV1 | undefined {
+  if (state.detailOpen && state.detailRow) return rowResource(state.detailRow);
+  if (!state.detailOpen && state.pane === "rooms" && (state.screen === "inbox" || state.screen === "chat")) return conversationRows(state)[state.roomFocus ?? 0]?.resource;
   if (state.screen === "chat") {
     return state.activeResource
       ?? rowResource(visibleRows(state, "chat")[state.selected.chat])
@@ -644,7 +668,7 @@ function listContentLines(state: TuiState, height: number): string[] {
     const label = id[0]!.toUpperCase() + id.slice(1);
     return [`${state.focus === index ? ">" : " "} ${label}: ${row?.state ?? "unknown"}`, ...(row?.evidenceLines ?? []).map(line => `  ${line}`)];
   });
-  return ["Doctor", ...diagnostics, `  Daemon: ${stale}`, `  Connection: ${state.connection.status}`, `  Generation: ${state.connection.generation} / subscribed ${state.connection.subscribedGeneration}`];
+  return ["Doctor · C connect accounts", ...diagnostics, `  Daemon: ${stale}`, `  Connection: ${state.connection.status}`, `  Generation: ${state.connection.generation} / subscribed ${state.connection.subscribedGeneration}`];
 }
 
 function canApprove(state: string | undefined): boolean {
@@ -665,7 +689,7 @@ function deliveryLines(state: TuiState): string[] {
 
 function detailLines(state: TuiState, width: number, height: number): string[] {
   const screen = state.screen;
-  const row = visibleRows(state, screen)[state.selected[screen]];
+  const row = state.detailRow ?? visibleRows(state, screen)[state.selected[screen]];
   const title = `Detail — ${screenLabels[screen][0]}${screenLabels[screen].slice(1).toLowerCase()}`;
   if (row === undefined) return [title, ...(screen === "chat" ? deliveryLines(state) : []), "No selected item", "Back: Esc"];
   const details = [
@@ -713,7 +737,7 @@ function wideBodyLines(state: TuiState, width: number, height: number): string[]
 }
 
 /** Deterministic fixed-size text renderer used for capture evidence. */
-export function renderScreen(state: TuiState, size: { width: number; height: number }, ephemeral: { approvalCode?: string } = {}): string {
+export function renderInspectorScreen(state: TuiState, size: { width: number; height: number }, ephemeral: { approvalCode?: string } = {}): string {
   state = { ...state, coverage: state.views[state.screen].coverage ?? state.coverage };
   if (size.width < 80 || size.height < 24) {
     return Array.from({ length: Math.max(1, size.height) }, (_, index) => fit(index === 0 ? "terminal too small — minimum 80×24" : "", Math.max(1, size.width))).join("\n");
@@ -744,6 +768,12 @@ export function renderScreen(state: TuiState, size: { width: number; height: num
   while (lines.length < size.height - 1) lines.push("");
   lines.push("1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply a Esc ? q");
   return lines.slice(0, size.height).map((line) => fit(line, size.width)).join("\n");
+}
+
+/** The workspace is the default; raw evidence is an explicit detail action. */
+export function renderScreen(state: TuiState, size: { width: number; height: number }, ephemeral: { approvalCode?: string } = {}): string {
+  if (state.detailOpen) return renderInspectorScreen(state, size, ephemeral);
+  return renderWorkspace(state, size, ephemeral);
 }
 
 /** Persist only navigation/filter settings; content and secrets are rejected at every nesting level. */
@@ -890,6 +920,7 @@ function messageRows(value: unknown, fallbackResource?: ResourceRefV1): Row[] {
       id,
       resource,
       chat: chat ?? (resource?.kind === "chat" ? { platform: resource.platform, account: resource.account, chat_id: resource.chat_id } : undefined),
+      authorName: stringValue(item.author_name),
       author: stringValue(item.author_id) ?? stringValue(item.author),
       ts: stringValue(item.ts) ?? (numberValue(item.ts) === undefined ? undefined : String(numberValue(item.ts))),
       body: stringValue(item.body),
@@ -906,6 +937,10 @@ function chatRows(value: unknown): Row[] {
     return [{
       id: `${ref.platform}:${ref.account}:${ref.chat_id}`,
       chat: ref,
+      title: stringValue(item.display_name),
+      ts: numberValue(item.latest_ts) === undefined ? undefined : String(item.latest_ts),
+      body: stringValue(item.preview),
+      canSend: item.can_send === true,
       author: stringValue(item.display_name) ?? ref.chat_id,
       destination: `${ref.platform}:${ref.account}`,
     }];
@@ -1009,6 +1044,11 @@ export class TuiController {
   private readonly inFlightPages = new Set<string>();
   private readonly requests = new Map<Screen, number>();
   private capabilityRequest = 0;
+  private accountDirectoryRequest = 0;
+  private accountSearchCursors = new Map<string, string | undefined>();
+  private accountSearchQuery = "";
+  private accountSearchRequest = 0;
+  private directoryTimer?: ReturnType<typeof setTimeout>;
   private readonly listeners = new Set<(state: TuiState) => void>();
 
   constructor(private readonly options: TuiControllerOptions) {
@@ -1046,6 +1086,7 @@ export class TuiController {
   }
 
   async start(): Promise<void> {
+    clearTimeout(this.directoryTimer);
     const generation = ++this.generation;
     this.update({ type: "connected", generation });
     try {
@@ -1062,6 +1103,7 @@ export class TuiController {
   }
 
   stop(): void {
+    clearTimeout(this.directoryTimer);
     this.generation++;
     this.options.client.stop();
     this.approvals.clear();
@@ -1070,10 +1112,11 @@ export class TuiController {
     this.observedOutcomes.clear();
     this.inFlightApprovals.clear();
     this.inFlightPages.clear();
-    this.replace({ ...this.current, draft: "", searchQuery: "", searchActive: false, composeActive: false, composeMode: undefined, replyTo: undefined, templateStep: undefined, templateId: "", templateArguments: "", codeBuffer: "", approvalPrompt: false });
+    this.replace({ ...this.current, draft: "", searchQuery: "", searchActive: false, finderQuery: "", finderActive: false, composeActive: false, composeMode: undefined, replyTo: undefined, templateStep: undefined, templateId: "", templateArguments: "", codeBuffer: "", approvalPrompt: false });
   }
 
   disconnected(degraded = false): void {
+    clearTimeout(this.directoryTimer);
     for (const row of this.inFlightApprovals.values()) this.observeApproval(row, "Uncertain");
     this.inFlightApprovals.clear();
     this.approvals.clear();
@@ -1087,6 +1130,7 @@ export class TuiController {
   async receiveEvent(method: ProtocolEventMethod): Promise<void> {
     const generation = this.generation;
     this.update({ type: "event", generation, method });
+    if (this.current.accountMode === undefined) return;
     await this.refresh();
   }
 
@@ -1118,7 +1162,57 @@ export class TuiController {
     this.invalidateView("search");
   }
 
+  async selectConversation(index: number): Promise<void> {
+    if (this.current.composeActive || this.current.approvalPrompt || this.current.searchActive) return;
+    const room = conversationRows(this.current)[index];
+    if (!room) return;
+    this.setActiveResource(room.resource);
+    this.update({ type: "switchScreen", screen: "chat" });
+    this.replace({ ...this.current, pane: "messages", finderActive: false, roomFocus: index, notice: undefined });
+    if (room.resource.kind === "chat" && this.current.connection.status === "connected") await this.refreshChat(this.generation);
+  }
+
+  focusMessages(): void { this.replace({ ...this.current, pane: "messages" }); }
+
+  async dispatchPaste(text: string): Promise<void> {
+    if (!this.current.composeActive && !this.current.searchActive && !this.current.approvalPrompt && !this.current.finderActive) return;
+    if (this.current.composeActive && this.current.composeMode !== "approved_template") {
+      const normalized = text.replace(/\r\n?/g, "\n").replace(/\t/g, "    ");
+      if (/[\x00-\x08\x0b-\x1f\x7f-\x9f]/.test(normalized)) return;
+      const cursor = this.current.draftCursor ?? this.current.draft.length;
+      this.replace({ ...this.current, draft: this.current.draft.slice(0, cursor) + normalized + this.current.draft.slice(cursor), draftCursor: cursor + normalized.length });
+    } else if (printableInput(text) !== undefined) await this.dispatchKey(text);
+  }
+
   async dispatchKey(key: string): Promise<void> {
+    if (this.current.sendPending && key === "Enter") return;
+    if (key === "Quit") { this.update({ type: "key", key: "Escape" }); this.update({ type: "key", key: "q" }); this.stop(); return; }
+    if (key === "Enter" && this.current.finderActive) {
+      const index = this.current.roomFocus ?? 0;
+      const room = conversationRows(this.current)[index];
+      if (room) {
+        this.replace({ ...this.current, finderActive: false });
+        await this.selectConversation(index);
+        this.replace({ ...this.current, finderQuery: "", roomFocus: conversationRows({ ...this.current, finderQuery: "" }).findIndex(item => sameResource(item.resource, room.resource)) });
+      }
+      return;
+    }
+    const workspace = this.current;
+    const editing = workspace.approvalPrompt || workspace.searchActive || workspace.composeActive || workspace.finderActive;
+    if (!editing && !workspace.detailOpen && !workspace.helpOpen && (workspace.screen === "inbox" || workspace.screen === "chat")) {
+      if (key === "d" && workspace.pane === "rooms") {
+        const room = conversationRows(workspace)[workspace.roomFocus ?? 0];
+        const row = room ? workspace.views.inbox.data.find(row => sameResource(rowResource(row), room.resource)) ?? { id: resourceKey(room.resource), resource: room.resource, body: room.preview } : undefined;
+        this.replace({ ...workspace, detailOpen: true, detailOffset: 0, detailRow: row, notice: undefined });
+        return;
+      }
+      if (key === "Enter" && workspace.pane === "rooms") {
+        await this.selectConversation(workspace.roomFocus ?? 0);
+        return;
+      }
+      if (key === "Enter" && workspace.pane === "messages" && workspace.screen === "chat" && workspace.activeResource) { this.update({ type: "key", key: "c" }); return; }
+      if ((key === "c" || key === "r") && workspace.screen === "chat") this.replace({ ...this.current, pane: "messages" });
+    }
     const before = this.current;
     const code = before.codeBuffer;
     const query = before.searchQuery;
@@ -1130,33 +1224,43 @@ export class TuiController {
     const templateArguments = before.templateArguments;
     const displayedResource = selectedResource(before);
     const focused = focusedResource(before);
-    const inputActive = before.approvalPrompt || before.searchActive || before.composeActive;
+    const inputActive = before.approvalPrompt || before.searchActive || before.composeActive || before.finderActive;
     const nextCursor = before.views[before.screen].nextCursor;
     this.update({ type: "key", key });
-    if (key === "/" && !inputActive) this.invalidateView("search");
-    if (key === "Escape" && before.searchActive) this.setSearch(undefined);
+    if (!inputActive && key === "1") this.replace({ ...this.current, platform: undefined, pane: "rooms", roomFocus: 0 });
+    if (!inputActive && (key === "[" || key === "]" || before.pane === "filters" && ["ArrowLeft", "ArrowRight"].includes(key)) && this.current.platform && this.activeResource?.platform !== this.current.platform) {
+      this.update({ type: "switchScreen", screen: "inbox" });
+      if (before.pane === "filters") this.replace({ ...this.current, pane: "filters" });
+    }
+    if ((key === "MessageSearch" || key === "/") && !inputActive) this.invalidateView("search");
+    if (key === "Escape" && before.screen === "search") { this.setSearch(undefined); this.accountSearchRequest++; }
     if (key === "q" && !inputActive) {
       this.stop();
       return;
     }
     if (key === "Enter" && before.searchActive && query.trim().length > 0) await this.submitSearch(query);
     if (key === "Enter" && before.composeActive && composeMode !== "approved_template" && draft.trim().length > 0) {
-      await this.proposeText(draft, composeMode === "reply" ? replyTo : undefined);
+      if (this.current.accountMode) await this.sendDirect(draft);
+      else await this.proposeText(draft, composeMode === "reply" ? replyTo : undefined);
     }
     if (key === "Enter" && before.composeActive && composeMode === "approved_template" && templateStep === "preview" && draft.trim().length > 0) {
       const args = templateArgumentsObject(templateArguments);
       if (args !== undefined) await this.proposeTemplate(templateId, args, draft);
     }
     if (key === "Enter" && before.approvalPrompt && code.length >= 4) await this.approve(code);
-    if (key === "b" && before.connection.status === "connected" && !inputActive) await this.backfill(displayedResource);
+    if (key === "b" && before.connection.status === "connected" && !inputActive) {
+      if (this.current.accountMode) { await this.refreshAccountDirectory(this.generation, true); if (this.activeChat) await this.refreshChat(this.generation, undefined, false, true); }
+      else await this.backfill(displayedResource);
+    }
     if (key === "n" && before.connection.status === "connected" && !inputActive && nextCursor !== undefined) await this.loadMore(before.screen, nextCursor);
-    if (key === "Enter" && before.screen === "inbox" && !inputActive) await this.openFocusedChat();
+    if (key === "Enter" && (before.screen === "inbox" || before.screen === "search") && !inputActive) await this.openFocusedChat();
     if (key === "Enter" && before.screen === "chat" && before.activeResource === undefined && focused !== undefined && !inputActive) {
       this.setActiveResource(focused);
       if (focused.kind === "chat" && this.current.connection.status === "connected") await this.refreshChat(this.generation);
     }
     if (key === "Escape" && before.screen === "chat" && before.activeResource !== undefined && !inputActive && !before.detailOpen && !before.helpOpen) {
       this.setActiveResource(undefined);
+      this.update({ type: "switchScreen", screen: "inbox" });
     }
     if (key === "3" && !inputActive && this.activeChat !== undefined && this.current.connection.status === "connected") {
       await this.refreshChat(this.generation);
@@ -1169,6 +1273,22 @@ export class TuiController {
   async refresh(): Promise<void> {
     const generation = this.generation;
     if (this.current.connection.status !== "connected") return;
+    if (this.current.accountMode === undefined) {
+      try { const result = await this.options.client.request("account.list", { background: true }); if (generation !== this.generation) return;
+        if (result.available === true) { this.replace({ ...this.current, accountMode: true }); await this.refreshAccountDirectory(generation, false, result); }
+        else this.replace({ ...this.current, accountMode: false });
+      } catch { if (generation !== this.generation || !accepted(this.current,generation)) return; this.replace({ ...this.current, accountMode: false }); }
+    }
+    if (generation !== this.generation || !accepted(this.current,generation)) return;
+    if (this.current.accountMode) {
+      if (this.current.requeryCapabilities) await this.refreshAccountDirectory(generation);
+      if (generation !== this.generation || !accepted(this.current, generation)) return;
+      if (this.current.requery.includes("inbox")) this.accountInbox(generation);
+      if (this.current.requery.includes("chat") && this.activeChat) await this.refreshChat(generation);
+      if (this.current.requery.includes("doctor")) await this.refreshDoctor(generation);
+      this.replace({ ...this.current, requery: [], requeryCapabilities: false });
+      return;
+    }
     if (this.current.requeryCapabilities) await this.refreshCapabilities(generation);
     if (generation !== this.generation || !accepted(this.current, generation)) return;
     // Every request is explicitly mapped to the daemon protocol. No storage or
@@ -1184,6 +1304,119 @@ export class TuiController {
     }
     if (this.current.requery.includes("approvals")) await this.refreshApprovals(generation);
     if (this.current.requery.includes("doctor")) await this.refreshDoctor(generation);
+  }
+
+  private async refreshAccountDirectory(generation: number, refresh = false, first?: JsonObject): Promise<void> {
+    try { await this.loadAccountDirectory(generation, refresh, first); }
+    catch {
+      if (generation !== this.generation || !accepted(this.current, generation)) return;
+      this.update({ type: "capabilityFailed", generation, error: "채팅 목록 조회 실패" });
+      this.replace({ ...this.current, notice: "채팅 목록 조회 실패 · b로 다시 시도하세요." });
+    }
+  }
+
+  private async loadAccountDirectory(generation: number, refresh = false, first?: JsonObject): Promise<void> {
+    const request = ++this.accountDirectoryRequest;
+    const rows: Row[] = []; let cursor: string | undefined; const seen = new Set<string>(); let errors: unknown[] = []; let refreshing = false;
+    do {
+      const result = first ?? await this.options.client.request("account.list", { ...(cursor ? { cursor } : {}), ...(!cursor ? { background: true, ...(refresh ? { refresh: true } : {}) } : {}) }); first = undefined;
+      if (generation !== this.generation || request !== this.accountDirectoryRequest) return;
+      refreshing ||= result.refreshing === true;
+      rows.push(...chatRows(result.chats)); errors = Array.isArray(result.errors) ? result.errors : [];
+      cursor = stringValue(result.next_cursor); if (cursor && seen.has(cursor)) throw new Error("목록 커서 반복"); if (cursor) seen.add(cursor);
+    } while (cursor);
+    const focused = conversationRows(this.current)[this.current.roomFocus ?? 0]?.resource;
+    this.replace({ ...this.current, directory: rows, directoryRefreshing: refreshing, notice: errors.length ? "일부 계정의 채팅 목록을 가져오지 못했습니다. b로 다시 시도하세요." : undefined });
+    const capabilities: ResourceCapabilityV1[] = rows.map(row => ({ v: 1, resource: rowResource(row)!,
+      read: { mode: "bounded_history", limits: { max_page_size: 80, max_pages: 1, cursor: "opaque" } },
+      write: { mode: row.canSend ? "send" : "none", content_mode: row.canSend ? "text" : "none", reply: false },
+      receipt: { level: "ack_only" }, auth: { state: errors.some(e => record(e)?.account === row.chat?.account && record(e)?.platform === row.chat?.platform) ? "unknown" : "authenticated", reason: null, observed_at: Date.now()/1000 } }));
+    this.update({ type: "capabilitySucceeded", generation, data: capabilities });
+    if (focused) this.replace({ ...this.current, roomFocus: Math.max(0, conversationRows(this.current).findIndex(room => sameResource(room.resource, focused))) });
+    this.accountInbox(generation);
+    clearTimeout(this.directoryTimer);
+    if (refreshing) this.directoryTimer = setTimeout(() => {
+      if (generation === this.generation && this.current.connection.status === "connected") void this.refreshAccountDirectory(generation);
+    }, 100);
+  }
+
+  private accountInbox(generation: number): void {
+    const data = (this.current.directory ?? []).filter(row => row.body || Number(row.ts)>0).map(row => ({ ...row, previewOnly: true, id: `preview:${row.id}`, resource: rowResource(row) }));
+    this.update({ type: "querySucceeded", generation, screen: "inbox", data, coverage: { freshness: "partial" } });
+  }
+
+  private async sendDirect(body: string): Promise<void> {
+    const resource = this.activeResource;
+    if (this.current.sendPending || !resource || resource.kind !== "chat" || this.current.connection.status !== "connected") return;
+    const capability = this.current.capabilities.data.find(c => sameResource(c.resource, resource));
+    if (this.current.requeryCapabilities || this.current.capabilities.status !== "ready" || capability?.auth.state !== "authenticated" || capability.write.mode !== "send") { this.replace({ ...this.current, notice: "이 대화에는 전송할 수 없습니다." }); return; }
+    const generation = this.generation;
+    this.replace({ ...this.current, sendPending: true, notice: "전송 중…" });
+    try {
+      const result = await this.options.client.request("account.send", { platform: resource.platform, account: resource.account, chat_id: resource.chat_id, body, request_id: crypto.randomUUID() });
+      if (generation !== this.generation) return;
+      this.replace({ ...this.current, notice: result.state === "Sent" ? "보냈습니다." : "전송 결과를 확인할 수 없습니다. 다시 보내기 전에 메신저를 확인하세요." });
+      if (result.state === "Sent") {
+        this.replace({ ...this.current, directory: this.current.directory?.map(row => sameResource(rowResource(row),resource) ? { ...row, ts: String(Date.now()/1000), body } : row) });
+        this.accountInbox(generation);
+        const sent = messageRows(result.messages);
+        if (sent.length) {
+          const rows = new Map(this.current.views.chat.data.map(row => [row.id, row]));
+          for (const row of sent) rows.set(row.id, row);
+          this.update({ type: "querySucceeded", generation, screen: "chat", data: [...rows.values()], coverage: { freshness: "partial" } });
+        } else await this.refreshChat(generation);
+      }
+    } catch { if (generation === this.generation) this.replace({ ...this.current, notice: "전송 결과 확인 필요 — 자동 재전송하지 않습니다." }); }
+    finally { this.replace({ ...this.current, sendPending: false }); }
+  }
+
+  private async searchAccounts(query: string, append = false): Promise<void> {
+    const generation = this.generation;
+    const request = ++this.accountSearchRequest;
+    const current = () => generation === this.generation && request === this.accountSearchRequest && !this.current.searchActive;
+    this.accountSearchQuery = query;
+    if (!append) this.accountSearchCursors.clear();
+    this.update({ type: "queryLoading", generation, screen: "search" });
+    const accounts = [...new Map((this.current.directory ?? [])
+      .filter(row => !this.current.platform || row.chat?.platform === this.current.platform)
+      .map(row => [JSON.stringify([row.chat!.platform, row.chat!.account]), row.chat!])).entries()];
+    const rows = new Map<string, Row>();
+    const identity = (row: Row) => JSON.stringify([row.chat?.platform, row.chat?.account, row.chat?.chat_id, row.id]);
+    if (append) for (const row of this.current.views.search.data) rows.set(identity(row), row);
+    let failed = false;
+    const publish = () => {
+      const selected = this.current.views.search.data[this.current.focus];
+      const data = [...rows.values()].sort((a,b) => Number(b.ts ?? 0)-Number(a.ts ?? 0));
+      this.update({ type: "querySucceeded", generation, screen: "search", data, coverage: { freshness: "partial" }, nextCursor: [...this.accountSearchCursors.values()].some(Boolean) ? "accounts-next" : undefined });
+      if (selected) {
+        const focus = data.findIndex(row => identity(row) === identity(selected));
+        if (focus >= 0) this.replace({ ...this.current, focus, selected: { ...this.current.selected, search: focus } });
+      }
+    };
+    await Promise.all(accounts.map(async ([key, chat]) => {
+      if (!current()) return;
+      if (append && this.accountSearchCursors.has(key) && !this.accountSearchCursors.get(key)) return;
+      const seen = new Set<string>();
+      try {
+        for (let page = 0; page < 25; page++) {
+          const cursor = this.accountSearchCursors.get(key);
+          if (cursor && seen.has(cursor)) throw new Error("검색 커서 반복");
+          if (cursor) seen.add(cursor);
+          this.replace({ ...this.current, notice: "메시지 검색 중…" });
+          const result = await this.options.client.request("account.search", { platform: chat.platform, account: chat.account, query, ...(cursor ? { cursor } : {}) });
+          if (!current()) return;
+          for (const row of messageRows(result.messages)) rows.set(identity(row), row);
+          const next = stringValue(result.next_cursor);
+          this.accountSearchCursors.set(key, next);
+          publish();
+          if (!next) break;
+        }
+      } catch { failed = true; }
+    }));
+    if (current()) {
+      publish();
+      this.replace({ ...this.current, notice: failed ? "일부 메신저의 검색이 실패했습니다. 검색 결과는 일부입니다." : [...this.accountSearchCursors.values()].some(Boolean) ? "검색 결과 더 있음 · n 계속 검색" : undefined });
+    }
   }
 
   private async refreshCapabilities(generation: number): Promise<void> {
@@ -1215,6 +1448,7 @@ export class TuiController {
     if (this.inFlightPages.has(requestKey)) return;
     this.inFlightPages.add(requestKey);
     try {
+      if (this.current.accountMode && screen === "search") { await this.searchAccounts(this.accountSearchQuery, true); return; }
       if (screen === "inbox") await this.refreshInbox(generation, cursor, true);
       if (screen === "search") await this.refreshSearch(generation, cursor, true);
       if (screen === "chat") await this.refreshChat(generation, cursor, true);
@@ -1244,15 +1478,19 @@ export class TuiController {
     if (!append) {
       // A failed new discovery must never reuse an older scope or continuation.
       this.inboxQuery = undefined;
-      this.invalidateView("inbox");
+      this.update({ type: "queryLoading", generation, screen: "inbox" });
       const chats = new Map<string, ChatRef>();
+      const directory = new Map<string, Row>();
       const seen = new Set<string>();
       let discoveryCursor: string | undefined;
       let discoveryPages = 0;
       do {
         const discovery = await this.call("inbox", generation, "chat.list", discoveryCursor === undefined ? {} : { cursor: discoveryCursor });
         if (discovery === undefined || !discovery.isCurrent()) return;
-        for (const row of chatRows(discovery.result.chats)) chats.set(JSON.stringify(row.chat), row.chat!);
+        for (const row of chatRows(discovery.result.chats)) {
+          chats.set(JSON.stringify(row.chat), row.chat!);
+          directory.set(JSON.stringify(row.chat), row);
+        }
         discoveryCursor = stringValue(discovery.result.next_cursor);
         if (chats.size > 100 || (discoveryCursor !== undefined && seen.has(discoveryCursor))) {
           this.update({ type: "queryFailed", generation, screen: "inbox", error: chats.size > 100 ? "Partial: 100-chat limit exceeded; no query" : "Partial: discovery cursor repeated; no query", coverage: { freshness: "partial", chats: 0 } });
@@ -1265,6 +1503,7 @@ export class TuiController {
         }
         if (discoveryCursor !== undefined) seen.add(discoveryCursor);
       } while (discoveryCursor !== undefined);
+      this.replace({ ...this.current, directory: [...directory.values()] });
       this.inboxQuery = { chats: [...chats.values()], interval: this.intervalForActiveChat() };
       if (chats.size === 0) {
         this.update({ type: "querySucceeded", generation, screen: "inbox", data: [], coverage: { freshness: "unknown", chats: 0 } });
@@ -1309,6 +1548,7 @@ export class TuiController {
   }
 
   private async submitSearch(query: string): Promise<void> {
+    if (this.current.accountMode) { await this.searchAccounts(query); return; }
     const chat = this.search?.chat ?? this.activeChat;
     if (chat === undefined) {
       this.replace({ ...this.current, notice: "search unavailable — open a chat first" });
@@ -1359,7 +1599,7 @@ export class TuiController {
       return;
     }
     try {
-      await this.options.client.request("safety.intent.create", {
+      const created = await this.options.client.request("safety.intent.create", {
         actor: this.options.actor ?? "tui:local",
         envelope: {
           v: 2,
@@ -1370,7 +1610,7 @@ export class TuiController {
       });
       this.update({ type: "event", generation: this.generation, method: "safety.intent.changed" });
       await this.refresh();
-      this.replace({ ...this.current, notice: "proposal created — approve from Approvals with a code" });
+      this.openCreatedApproval(stringValue(created.intent_id));
     } catch (error) {
       this.replace({ ...this.current, notice: `proposal failed — ${error instanceof Error ? error.message : "check daemon and retry"}` });
     }
@@ -1386,7 +1626,7 @@ export class TuiController {
       return;
     }
     try {
-      await this.options.client.request("safety.intent.create", {
+      const created = await this.options.client.request("safety.intent.create", {
         actor: this.options.actor ?? "tui:local",
         envelope: {
           v: 2,
@@ -1396,19 +1636,41 @@ export class TuiController {
       });
       this.update({ type: "event", generation: this.generation, method: "safety.intent.changed" });
       await this.refresh();
-      this.replace({ ...this.current, notice: "template proposal created — approve from Approvals with a code" });
+      this.openCreatedApproval(stringValue(created.intent_id));
     } catch (error) {
       this.replace({ ...this.current, notice: `template proposal failed — ${error instanceof Error ? error.message : "check daemon and retry"}` });
     }
   }
 
-  private async refreshChat(generation: number, cursor?: string, append = false): Promise<void> {
+  private openCreatedApproval(id: string | undefined): void {
+    if (!id) { this.replace({ ...this.current, notice: "proposal created — approve from Approvals with a code" }); return; }
+    const index = this.current.views.approvals.data.findIndex(row => row.id === id);
+    if (index < 0) { this.replace({ ...this.current, notice: "proposal created — approve from Approvals with a code" }); return; }
+    this.update({ type: "switchScreen", screen: "approvals" });
+    this.replace({ ...this.current, focus: index, selected: { ...this.current.selected, approvals: index }, notice: "전송할 대화방과 내용을 확인하세요." });
+  }
+
+  private async refreshChat(generation: number, cursor?: string, append = false, force = false): Promise<void> {
     const chat = this.activeChat;
     if (chat === undefined) return;
-    const response = await this.call("chat", generation, "message.inbox", { chat, ...(cursor === undefined ? {} : { cursor }) });
+    const response = await this.call("chat", generation, this.current.accountMode ? "account.messages" : "message.inbox", { ...(this.current.accountMode ? { ...chat, ...(force ? { refresh: true } : {}) } : { chat }), ...(cursor === undefined ? {} : { cursor }) });
     if (response === undefined || !response.isCurrent()) return;
     const { result } = response;
-    this.update({ type: "querySucceeded", generation, screen: "chat", data: messageRows(result.messages, this.activeResource), coverage: coverage(result.coverage), nextCursor: stringValue(result.next_cursor), append });
+    const wasEmpty = this.current.views.chat.data.length === 0;
+    let messages = messageRows(result.messages, this.activeResource);
+    const priorFocus = this.current.views.chat.data[this.current.focus]?.id;
+    if (this.current.accountMode && append) {
+      messages = [...new Map([...this.current.views.chat.data, ...messages].map(row => [row.id,row])).values()].sort((a,b) => Number(a.ts)-Number(b.ts));
+    }
+    this.update({ type: "querySucceeded", generation, screen: "chat", data: messages, coverage: coverage(result.coverage), nextCursor: stringValue(result.next_cursor), append: append && !this.current.accountMode });
+    if (this.current.accountMode && append && priorFocus) {
+      const focus = Math.max(0,messages.findIndex(row => row.id === priorFocus));
+      this.replace({ ...this.current, focus, selected: { ...this.current.selected, chat: focus } });
+    }
+    if (wasEmpty && !append && this.current.screen === "chat" && messages.length) {
+      const last = messages.length - 1;
+      this.replace({ ...this.current, focus: last, selected: { ...this.current.selected, chat: last } });
+    }
   }
 
   private async refreshApprovals(generation: number, cursor?: string, append = false): Promise<void> {
@@ -1489,12 +1751,32 @@ export class TuiController {
   }
 
   private async openFocusedChat(): Promise<void> {
-    const row = this.current.views.inbox.data[this.current.focus];
+    const row = visibleRows(this.current, this.current.screen)[this.current.focus];
     if (row?.chat === undefined) return;
+    const fromSearch = this.current.screen === "search";
+    if (fromSearch) this.accountSearchRequest++;
     this.setActiveChat(row.chat);
     this.update({ type: "switchScreen", screen: "chat" });
+    this.replace({ ...this.current, roomFocus: Math.max(0, conversationRows(this.current).findIndex(room => sameResource(room.resource, this.activeResource))) });
+    if (this.current.accountMode) {
+      const response = await this.call("chat", this.generation, "account.messages", { ...row.chat, ...(fromSearch ? { message_id: row.id } : {}) });
+      if (response?.isCurrent()) {
+        const data = messageRows(response.result.messages, this.activeResource);
+        if (fromSearch && !data.some(item => item.id === row.id)) data.push(row);
+        this.update({ type: "querySucceeded", generation: this.generation, screen: "chat", data, coverage: { freshness: "partial" }, nextCursor: stringValue(response.result.next_cursor) });
+        const focus = fromSearch ? Math.max(0,data.findIndex(item => item.id === row.id)) : Math.max(0,data.length-1);
+        this.replace({ ...this.current, focus, selected: { ...this.current.selected, chat: focus }, notice: undefined });
+      }
+      return;
+    }
     this.update({ type: "event", generation: this.generation, method: "message.upserted" });
     await this.refresh();
+    const found = this.current.views.chat.data.findIndex(item => item.id === row.id);
+    if (found >= 0) this.replace({ ...this.current, focus: found, selected: { ...this.current.selected, chat: found } });
+    else if (!row.evidenceOnly && !row.previewOnly) {
+      const data = [...this.current.views.chat.data, row];
+      this.replace({ ...withView(this.current, "chat", { ...this.current.views.chat, data }), focus: data.length - 1, selected: { ...this.current.selected, chat: data.length - 1 } });
+    }
   }
 
   private observeApproval(row: Row, state: string): void {

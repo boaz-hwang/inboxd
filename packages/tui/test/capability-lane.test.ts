@@ -5,7 +5,7 @@ import {
   createTuiController,
   mountInteractiveTui,
   reduce,
-  renderScreen,
+  renderInspectorScreen,
   type TuiState,
 } from "../src/index.ts";
 import type { ResourceCapabilityV1 } from "../../protocol/src/schema.ts";
@@ -49,7 +49,7 @@ test("mixed-provider rows keep exact identity and an empty Chat never falls back
     ],
   });
 
-  const inbox = renderScreen(state, { width: 120, height: 40 });
+  const inbox = renderInspectorScreen(state, { width: 120, height: 40 });
   expect(inbox).toContain("slack › work › chat:ops");
   expect(inbox).toContain("telegram › personal › chat:-100123");
   expect(inbox).toContain("READ bounded_history max_page=100 pages=1 cursor=opaque");
@@ -59,7 +59,7 @@ test("mixed-provider rows keep exact identity and an empty Chat never falls back
 
   state = { ...state, screen: "chat", activeResource: capabilities[0]!.resource, activeChat: { platform: "slack", account: "work", chat_id: "ops" } };
   state = reduce(state, { type: "querySucceeded", generation: 1, screen: "chat", data: [] });
-  const chat = renderScreen(state, { width: 80, height: 24 });
+  const chat = renderInspectorScreen(state, { width: 80, height: 24 });
   expect(chat).toContain("No messages");
   expect(chat).not.toContain("SLACK-ONLY");
   expect(chat).not.toContain("TELEGRAM-ONLY");
@@ -194,7 +194,7 @@ test("backfill targets the exact resource displayed in detail when hidden focus 
   expect(controller.state.detailOpen).toBe(true);
   expect(controller.state.selected.inbox).toBe(0);
   expect(controller.state.focus).toBe(1);
-  const detail = renderScreen(controller.state, { width: 80, height: 24 });
+  const detail = renderInspectorScreen(controller.state, { width: 80, height: 24 });
   expect(detail).toContain("Detail — Inbox");
   expect(detail).toContain("Message: slack");
   expect(detail).not.toContain("Message: telegram");
@@ -239,7 +239,7 @@ test("native Chat resource directory selects a DestinationRef and composes its a
     await controller.start();
     await harness.mockInput.typeText("3");
     await Promise.resolve();
-    expect(renderScreen(controller.state, { width: 80, height: 24 })).toContain("destination:friend-uuid");
+    expect(renderInspectorScreen(controller.state, { width: 80, height: 24 })).toContain("destination:friend-uuid");
     for (let index = 0; index < 3; index++) harness.mockInput.pressArrow("down");
     harness.mockInput.pressEnter();
     await Promise.resolve();
@@ -424,7 +424,7 @@ test("Kakao local is read-only while official destinations compose templates wit
   await controller.dispatchKey("3");
   await controller.dispatchKey("c");
   expect(controller.state.composeActive).toBe(true);
-  expect(renderScreen(controller.state, { width: 80, height: 24 })).toContain("Template ID: _");
+  expect(renderInspectorScreen(controller.state, { width: 80, height: 24 })).toContain("Template ID: _");
   for (const key of "notice-7") await controller.dispatchKey(key);
   await controller.dispatchKey("Enter");
   for (const key of "not-json") await controller.dispatchKey(key);
@@ -435,7 +435,7 @@ test("Kakao local is read-only while official destinations compose templates wit
   for (const key of '{"amount":1000}') await controller.dispatchKey(key);
   await controller.dispatchKey("Enter");
   for (const key of "승인: 1000") await controller.dispatchKey(key);
-  const compose = renderScreen(controller.state, { width: 120, height: 40 });
+  const compose = renderInspectorScreen(controller.state, { width: 120, height: 40 });
   expect(compose).toContain("Template ID: notice-7");
   expect(compose).toContain('Arguments JSON: {"amount":1000}');
   expect(compose).toContain("Preview: 승인: 1000_");
@@ -448,7 +448,7 @@ test("Kakao local is read-only while official destinations compose templates wit
   await controller.dispatchKey("Enter");
   expect(approvals).toEqual([{ intent_id: "template-1", code: "654321", actor: "tui:operator", resource: official.resource }]);
   expect(controller.state.views.approvals.data[0]?.state).toBe("Sent");
-  const outcome = renderScreen(controller.state, { width: 120, height: 40 });
+  const outcome = renderInspectorScreen(controller.state, { width: 120, height: 40 });
   expect(outcome).toContain("acknowledged; not verified");
   expect(outcome).not.toContain("destination read-back matched");
 });
@@ -490,5 +490,5 @@ test("DestinationRef Verified is clamped to Sent after its capability disappears
   await controller.dispatchKey("Enter");
 
   expect(controller.state.views.approvals.data[0]?.state).toBe("Sent");
-  expect(renderScreen(controller.state, { width: 80, height: 24 })).toContain("acknowledged; not verified");
+  expect(renderInspectorScreen(controller.state, { width: 80, height: 24 })).toContain("acknowledged; not verified");
 });

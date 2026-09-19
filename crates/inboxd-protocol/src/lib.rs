@@ -34,7 +34,7 @@ pub const LEGACY_REQUEST_METHODS: [&str; 21] = [
     "subscribe",
 ];
 
-pub const REQUEST_METHODS: [&str; 22] = [
+pub const REQUEST_METHODS: [&str; 26] = [
     "system.hello",
     "system.ping",
     "system.status",
@@ -57,6 +57,10 @@ pub const REQUEST_METHODS: [&str; 22] = [
     "settings.update",
     "subscribe",
     "capability.list",
+    "account.list",
+    "account.messages",
+    "account.search",
+    "account.send",
 ];
 
 pub const EVENT_METHODS: [&str; 4] = [
@@ -136,7 +140,8 @@ pub fn parse_request(value: &Value, role: Option<ClientRole>) -> Result<Protocol
     if role.is_some_and(|role| role != ClientRole::Approver)
         && matches!(
             method,
-            "safety.intent.listPending"
+            "account.send"
+                | "safety.intent.listPending"
                 | "safety.intent.claimApprovalCode"
                 | "safety.intent.approve"
                 | "safety.intent.reject"

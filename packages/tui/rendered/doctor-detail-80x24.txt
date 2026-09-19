@@ -1,4 +1,4 @@
-INBOXD · connected · mixed                                                      
+INBOXD · connected · account ?                                                  
 1 INBOX | 2 SEARCH | 3 CHAT | 4 APPROVALS | ● DOCTOR                            
 Resource: none                                                                  
 READ unknown                                                                    

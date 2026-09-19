@@ -10,7 +10,7 @@ import {
   mountInteractiveTui,
   displayWidth,
   reduce,
-  renderScreen,
+  renderInspectorScreen,
   sanitizePersistence,
   truncateCells,
   type TuiState,
@@ -56,10 +56,10 @@ function readyState(): TuiState {
   state = reduce(state, { type: "querySucceeded", generation: 1, screen: "search", data: fixtures.search, coverage: { chats: 3, gaps: 1, freshness: "partial" } });
   state = reduce(state, { type: "querySucceeded", generation: 1, screen: "chat", data: fixtures.chat, coverage: { chats: 3, gaps: 1, freshness: "partial" } });
   state = reduce(state, { type: "querySucceeded", generation: 1, screen: "approvals", data: fixtures.approvals });
-  return { ...state, activeChat: slackChat, activeResource: slackResource };
+  return { ...state, pane: "messages", activeChat: slackChat, activeResource: slackResource };
 }
 
-describe("five-screen operational model", () => {
+describe("operational controller and explicit evidence inspector", () => {
   test("the executable exits zero after a clean renderer teardown", async () => {
     const exitCodes: number[] = [];
 
@@ -93,7 +93,7 @@ describe("five-screen operational model", () => {
       state = reduce(state, { type: "key", key });
       expect(state.screen).toBe(screen);
     }
-    state = reduce(state, { type: "key", key: "1" });
+    state = { ...reduce(state, { type: "key", key: "1" }), pane: "messages" };
     state = reduce(state, { type: "key", key: "j" });
     expect(state.focus).toBe(1);
     state = reduce(state, { type: "key", key: "Enter" });
@@ -102,7 +102,7 @@ describe("five-screen operational model", () => {
     expect(state.helpOpen).toBe(true);
     state = reduce(state, { type: "key", key: "Escape" });
     expect(state.helpOpen).toBe(false);
-    const help = renderScreen(state, { width: 80, height: 24 });
+    const help = renderInspectorScreen(state, { width: 80, height: 24 });
     expect(help).toContain("1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply a Esc ? q");
     state = { ...state, draft: "memory-only reply" };
     state = reduce(state, { type: "key", key: "q" });
@@ -114,27 +114,27 @@ describe("five-screen operational model", () => {
     let state = readyState();
     for (const screen of ["inbox", "search", "chat", "approvals", "doctor"] as const) {
       state = reduce(state, { type: "switchScreen", screen });
-      const render = renderScreen(state, { width: 80, height: 24 });
+      const render = renderInspectorScreen(state, { width: 80, height: 24 });
       expect(render).toContain(`● ${screen.toUpperCase()}`);
       expect(render).toContain(">");
     }
     state = reduce(state, { type: "coverage", coverage: { chats: undefined, gaps: undefined, freshness: "unknown" } });
-    const unknown = renderScreen(state, { width: 80, height: 24 });
+    const unknown = renderInspectorScreen(state, { width: 80, height: 24 });
     expect(unknown).toContain("? chats / ? gaps");
     expect(unknown).not.toContain("0 chats / 0 gaps");
     state = reduce(state, { type: "switchScreen", screen: "inbox" });
     state = reduce(state, { type: "queryLoading", generation: 1, screen: "inbox" });
-    expect(renderScreen(state, { width: 80, height: 24 })).toContain("Loading");
+    expect(renderInspectorScreen(state, { width: 80, height: 24 })).toContain("Loading");
     state = reduce(state, { type: "queryFailed", generation: 1, screen: "inbox", error: "inbox failed" });
-    expect(renderScreen(state, { width: 80, height: 24 })).toContain("inbox failed — retry query");
+    expect(renderInspectorScreen(state, { width: 80, height: 24 })).toContain("inbox failed — retry query");
     state = reduce(state, { type: "querySucceeded", generation: 1, screen: "inbox", data: [] });
-    expect(renderScreen(state, { width: 80, height: 24 })).toContain("No messages");
+    expect(renderInspectorScreen(state, { width: 80, height: 24 })).toContain("No messages");
   });
 
   test("uses a one-pane 80×24 squeeze and a 40/60 split at 120×40", () => {
     const state = readyState();
-    const narrow = renderScreen(state, { width: 80, height: 24 });
-    const wide = renderScreen(state, { width: 120, height: 40 });
+    const narrow = renderInspectorScreen(state, { width: 80, height: 24 });
+    const wide = renderInspectorScreen(state, { width: 120, height: 40 });
     expect(narrow.split("\n")).toHaveLength(24);
     expect(wide.split("\n")).toHaveLength(40);
     expect(narrow).toContain("DETAIL (in place)");
@@ -149,7 +149,7 @@ describe("five-screen operational model", () => {
     let state = readyState();
     state = reduce(state, { type: "switchScreen", screen: "inbox" });
 
-    const wide = renderScreen(state, { width: 120, height: 40 });
+    const wide = renderInspectorScreen(state, { width: 120, height: 40 });
     expect(wide).toContain("LIST 40%");
     expect(wide).toContain("DETAIL 60%");
     expect(wide.split("\n").find(line => line.includes("LIST 40%"))?.indexOf("│")).toBe(48);
@@ -157,7 +157,7 @@ describe("five-screen operational model", () => {
     expect(wide).toContain("Message: 긴 한국어 메시지와 ASCII text");
 
     state = reduce(state, { type: "key", key: "d" });
-    const narrow = renderScreen(state, { width: 80, height: 24 });
+    const narrow = renderInspectorScreen(state, { width: 80, height: 24 });
     expect(narrow).toContain("Detail — Inbox");
     expect(narrow).toContain("Back: Esc");
     expect(narrow).toContain("Message: 긴 한국어 메시지와 ASCII text");
@@ -167,21 +167,21 @@ describe("five-screen operational model", () => {
     let state = readyState();
     state = reduce(state, { type: "switchScreen", screen: "chat" });
     state = reduce(state, { type: "key", key: "d" });
-    expect(renderScreen(state, { width: 80, height: 24 })).toContain("── coverage gap: 1 · partial ──");
+    expect(renderInspectorScreen(state, { width: 80, height: 24 })).toContain("── coverage gap: 1 · partial ──");
 
     state = reduce(state, { type: "switchScreen", screen: "approvals" });
     state = reduce(state, { type: "key", key: "d" });
-    expect(renderScreen(state, { width: 80, height: 24 })).toContain("UNCERTAIN — do not resend automatically");
+    expect(renderInspectorScreen(state, { width: 80, height: 24 })).toContain("UNCERTAIN — do not resend automatically");
   });
 
   test("keeps fixed Search gaps and Chat inline coverage gaps", () => {
     let state = readyState();
     state = reduce(state, { type: "switchScreen", screen: "search" });
-    const search = renderScreen(state, { width: 80, height: 24 });
+    const search = renderInspectorScreen(state, { width: 80, height: 24 });
     expect(search).toContain("Search query: (memory-only)");
     expect(search.split("\n").map((line) => line.trimEnd()).join("\n")).toContain("Coverage: partial · 3 chats / 1 gaps\n\nResults");
     state = reduce(state, { type: "switchScreen", screen: "chat" });
-    const chat = renderScreen(state, { width: 80, height: 24 });
+    const chat = renderInspectorScreen(state, { width: 80, height: 24 });
     expect(chat).toContain("── coverage gap: 1 · partial ──");
     expect(chat).toContain("(edited)");
     expect(chat).toContain("deleted");
@@ -200,7 +200,7 @@ describe("five-screen operational model", () => {
     state = reduce(state, { type: "key", key: "c" });
     state = reduce(state, { type: "key", key: "x" });
 
-    const chat = renderScreen(state, { width: 80, height: 24 });
+    const chat = renderInspectorScreen(state, { width: 80, height: 24 });
     expect(chat).toContain("Compose text: x [memory-only]");
     expect(chat).toContain("── coverage gap: 1 · partial ──");
   });
@@ -210,7 +210,7 @@ describe("five-screen operational model", () => {
     state = reduce(state, { type: "switchScreen", screen: "approvals" });
     for (const key of ["d", "a", "1", "2", "3", "4"]) state = reduce(state, { type: "key", key });
     for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
-      const text = renderScreen(state, size);
+      const text = renderInspectorScreen(state, size);
       expect(text).toContain("Approval code [memory-only]");
       expect(text).toContain("••••_");
       expect(text).toContain("Enter submit · Esc cancel");
@@ -223,7 +223,7 @@ describe("five-screen operational model", () => {
     for (const key of ["d", "c", "x"]) state = reduce(state, { type: "key", key });
     state = { ...state, draft: "long draft ".repeat(50) };
     for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
-      const text = renderScreen(state, size);
+      const text = renderInspectorScreen(state, size);
       expect(text).toContain("Compose text:");
       expect(text).toContain("Enter propose · Esc cancel");
       expect(text).toContain("[memory-only]");
@@ -234,18 +234,18 @@ describe("five-screen operational model", () => {
     expect(displayWidth("👩‍💻🇰🇷é")).toBe(5);
     const body = "가👩‍💻é ".repeat(600) + "END-OF-MESSAGE";
     for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
-      let state = reduce(readyState(), { type: "querySucceeded", generation: 1, screen: "inbox", data: [{ id: "long", body }] });
+      let state = reduce(readyState(), { type: "querySucceeded", generation: 1, screen: "inbox", data: [{ id: "long", body, resource: slackResource }] });
       state = reduce(state, { type: "key", key: "d" });
-      let text = renderScreen(state, size);
+      let text = renderInspectorScreen(state, size);
       expect(text).toContain("PgUp/PgDn scroll");
       expect(text).not.toContain("END-OF-MESSAGE");
       for (let page = 0; page < 30; page++) state = reduce(state, { type: "key", key: "PageDown" });
-      text = renderScreen(state, size);
+      text = renderInspectorScreen(state, size);
       expect(text).toContain("END-OF-MESSAGE");
       expect(text.split("\n").every(line => displayWidth(line) === size.width)).toBe(true);
       expect(text).not.toMatch(/👩(?!‍💻)/u);
       state = reduce(state, { type: "key", key: "Home" });
-      expect(renderScreen(state, size)).toContain("Message:");
+      expect(renderInspectorScreen(state, size)).toContain("Message:");
     }
   });
 
@@ -254,7 +254,7 @@ describe("five-screen operational model", () => {
     state = reduce(state, { type: "switchScreen", screen: "approvals" });
     state = reduce(state, { type: "key", key: "d" });
     for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
-      const text = renderScreen(state, size);
+      const text = renderInspectorScreen(state, size);
       expect(text).toContain("Other intent: UNCERTAIN");
       expect(text).toContain("State: Proposed");
     }
@@ -262,7 +262,7 @@ describe("five-screen operational model", () => {
 
   test("empty list context reports focus 0/0 instead of a phantom first row", () => {
     const state = createInitialState();
-    const text = renderScreen(state, { width: 120, height: 40 });
+    const text = renderInspectorScreen(state, { width: 120, height: 40 });
     expect(text).toContain("focus 0/0");
     expect(text).not.toContain("focus 1/0");
   });
@@ -274,8 +274,8 @@ describe("five-screen operational model", () => {
     state = reduce(state, { type: "querySucceeded", generation: 1, screen: "inbox", data: [fixtures.inbox[0]!] });
     expect(state.focus).toBe(0);
     expect(state.selected.inbox).toBe(0);
-    expect(renderScreen(state, { width: 120, height: 40 })).toContain("> ● slack › work › chat:ops 민수");
-    expect(renderScreen(state, { width: 80, height: 24 })).not.toContain("No selected item");
+    expect(renderInspectorScreen(state, { width: 120, height: 40 })).toContain("> ● slack › work › chat:ops 민수");
+    expect(renderInspectorScreen(state, { width: 80, height: 24 })).not.toContain("No selected item");
     state = reduce(state, { type: "switchScreen", screen: "approvals" });
     state = reduce(state, { type: "querySucceeded", generation: 1, screen: "inbox", data: [] });
     state = reduce(state, { type: "switchScreen", screen: "inbox" });
@@ -285,12 +285,12 @@ describe("five-screen operational model", () => {
   test.each(["inbox", "search", "chat", "approvals"] as const)("keeps focused %s rows visible at both terminal sizes", (screen) => {
     let state = readyState();
     state = reduce(state, { type: "querySucceeded", generation: 1, screen,
-      data: Array.from({ length: 60 }, (_, index) => ({ id: `r${index}`, author: `row-${index}`, state: "Uncertain" })), nextCursor: "more" });
-    state = reduce(state, { type: "switchScreen", screen });
+      data: Array.from({ length: 60 }, (_, index) => ({ resource: slackResource, id: `r${index}`, author: `row-${index}`, state: "Uncertain" })), nextCursor: "more" });
+    state = { ...reduce(state, { type: "switchScreen", screen }), pane: "messages" };
     for (let i = 0; i < 59; i++) state = reduce(state, { type: "key", key: "j" });
     for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
-      const output = renderScreen(state, size);
-      expect(output).toContain("> ○ row-59");
+      const output = renderInspectorScreen(state, size);
+      expect(output).toContain(screen === "approvals" ? "> ● slack › work › chat:ops row-59" : "> ○ slack › work › chat:ops row-59");
       expect(output).toContain("more results [n]");
       expect(output).toContain("Evidence rail:");
       expect(output.split("\n")).toHaveLength(size.height);
@@ -301,7 +301,7 @@ describe("five-screen operational model", () => {
       }
       if (screen === "chat") expect(output).toContain("coverage gap:");
       state = reduce(state, { type: "key", key: "k" });
-      expect(renderScreen(state, size)).toContain("> ○ row-58");
+      expect(renderInspectorScreen(state, size)).toContain(screen === "approvals" ? "> ● slack › work › chat:ops row-58" : "> ○ slack › work › chat:ops row-58");
       state = reduce(state, { type: "key", key: "j" });
     }
   });
@@ -311,21 +311,21 @@ describe("five-screen operational model", () => {
     state = reduce(state, { type: "querySucceeded", generation: 1, screen: "approvals", data: [{ ...fixtures.approvals[0]!, id: "proposed", state: "Proposed" }, ...fixtures.approvals] });
     state = reduce(state, { type: "switchScreen", screen: "approvals" });
     state = reduce(state, { type: "key", key: "a" });
-    let view = renderScreen(state, { width: 80, height: 24 });
+    let view = renderInspectorScreen(state, { width: 80, height: 24 });
     expect(view).toContain("UNCERTAIN — do not resend automatically");
     expect(view).toContain("Approval code [memory-only]");
     state = reduce(state, { type: "key", key: "x" });
     state = reduce(state, { type: "key", key: "Enter" });
     expect(state.notice).toContain("code");
     state = reduce(state, { type: "disconnected", generation: 1 });
-    view = renderScreen(state, { width: 80, height: 24 });
+    view = renderInspectorScreen(state, { width: 80, height: 24 });
     expect(view).toContain("Approve [disabled: disconnected]");
   });
 
   test("exposes doctor encryption, auth, daemon and stale/reconnect handling", () => {
     let state = readyState();
     state = reduce(state, { type: "switchScreen", screen: "doctor" });
-    let view = renderScreen(state, { width: 80, height: 24 });
+    let view = renderInspectorScreen(state, { width: 80, height: 24 });
     expect(view).toContain("Encryption: unknown");
     expect(view).toContain("Authentication: unknown");
     expect(view).toContain("Daemon: connected");
@@ -345,7 +345,7 @@ describe("five-screen operational model", () => {
     expect(state.connection.status).toBe("connected");
     state = reduce(state, { type: "switchScreen", screen: "doctor" });
     state = reduce(state, { type: "disconnected", generation: 2 });
-    expect(renderScreen(state, { width: 80, height: 24 })).toContain("Daemon: stale response retained");
+    expect(renderInspectorScreen(state, { width: 80, height: 24 })).toContain("Daemon: stale response retained");
   });
 
   test("clips CJK by terminal cells without splitting and rejects secret persistence recursively", () => {
@@ -359,7 +359,7 @@ describe("five-screen operational model", () => {
 
   test("constructs an OpenTUI native text renderable without starting an interactive loop", async () => {
     const native = await createNativeScreen(80, 24);
-    expect(native.content).toContain("INBOXD");
+    expect(native.content).toContain("inboxd");
     native.destroy();
   });
 
@@ -388,12 +388,12 @@ describe("five-screen operational model", () => {
 
     await controller.start();
     expect(subscribed).toEqual(["message.upserted", "coverage.changed", "safety.intent.changed", "capability.changed"]);
-    expect(calls.map((call) => call.method)).toEqual(["capability.list", "chat.list", "message.recent", "safety.intent.listPending", "safety.intent.claimApprovalCode", "system.status", "sync.status", "auth.status"]);
+    expect(calls.map((call) => call.method)).toEqual(["account.list", "capability.list", "chat.list", "message.recent", "safety.intent.listPending", "safety.intent.claimApprovalCode", "system.status", "sync.status", "auth.status"]);
     expect(controller.state.connection.status).toBe("connected");
     expect(JSON.stringify(controller.state)).not.toContain("654321");
     await controller.dispatchKey("4");
     expect(controller.currentApprovalCode()).toBe("654321");
-    expect(renderScreen(controller.state, { width: 80, height: 24 }, { approvalCode: controller.currentApprovalCode() })).toContain("654321");
+    expect(renderInspectorScreen(controller.state, { width: 80, height: 24 }, { approvalCode: controller.currentApprovalCode() })).toContain("654321");
     expect(JSON.stringify(controller.state)).not.toContain("654321");
     controller.stop();
     expect(controller.currentApprovalCode()).toBeUndefined();
@@ -455,7 +455,7 @@ describe("five-screen operational model", () => {
     });
     await controller.start();
     await controller.dispatchKey("2");
-    const output = renderScreen(controller.state, { width: 80, height: 24 });
+    const output = renderInspectorScreen(controller.state, { width: 80, height: 24 });
     expect(output).toContain("1700000000");
     expect(output).toContain("partial · 1 chats / 1 gaps / 2 limits");
   });
@@ -471,7 +471,8 @@ describe("five-screen operational model", () => {
     await harness.mockInput.typeText("2");
     await Promise.resolve();
     expect(controller.state.screen).toBe("search");
-    await harness.mockInput.typeText("/alert");
+    harness.mockInput.pressKey("f", { ctrl: true });
+    await harness.mockInput.typeText("alert");
     await Promise.resolve();
     expect(controller.state.searchQuery).toBe("alert");
     expect(controller.state.searchActive).toBe(true);
@@ -520,9 +521,9 @@ describe("five-screen operational model", () => {
     await controller.start();
     controller.setActiveChat(chat);
     controller.setSearch({ chat, interval: { from_ts: 10, to_ts: 20 }, query: "" });
-    await controller.dispatchKey("/");
+    await controller.dispatchKey("MessageSearch");
     for (const key of "alert") await controller.dispatchKey(key);
-    expect(renderScreen(controller.state, { width: 80, height: 24 })).toContain("Search query: alert [memory-only]");
+    expect(renderInspectorScreen(controller.state, { width: 80, height: 24 })).toContain("Search query: alert [memory-only]");
     await controller.dispatchKey("Enter");
 
     expect(calls.filter((call) => call.method === "message.search")).toEqual([
@@ -560,7 +561,7 @@ describe("five-screen operational model", () => {
     await controller.dispatchKey("3");
     await controller.dispatchKey("c");
     for (const key of "deploy tonight") await controller.dispatchKey(key);
-    expect(renderScreen(controller.state, { width: 80, height: 24 })).toContain("Compose text: deploy tonight [memory-only]");
+    expect(renderInspectorScreen(controller.state, { width: 80, height: 24 })).toContain("Compose text: deploy tonight [memory-only]");
     await controller.dispatchKey("Enter");
 
     expect(calls.filter((call) => call.method === "safety.intent.create")).toEqual([
@@ -590,7 +591,7 @@ describe("five-screen operational model", () => {
     });
     controller.setActiveChat(chat);
 
-    await controller.dispatchKey("/");
+    await controller.dispatchKey("MessageSearch");
     await controller.dispatchKey("q");
     await controller.dispatchKey("b");
     expect(controller.state.searchQuery).toBe("qb");
@@ -668,7 +669,7 @@ describe("five-screen operational model", () => {
     await controller.start();
     await controller.dispatchKey("Enter");
     controller.setSearch({ chat, interval: { from_ts: 10, to_ts: 20 }, query: "needle" });
-    await controller.dispatchKey("/");
+    await controller.dispatchKey("MessageSearch");
     for (const key of "needle") await controller.dispatchKey(key);
     await controller.dispatchKey("Enter");
     await controller.dispatchKey("3");
@@ -712,10 +713,10 @@ describe("five-screen operational model", () => {
     } });
     await controller.start();
     controller.setActiveChat({ platform: "slack", account: "me", chat_id: "ops" });
-    await controller.dispatchKey("/");
+    await controller.dispatchKey("MessageSearch");
     await controller.dispatchKey("x");
     const search = controller.dispatchKey("Enter");
-    await controller.dispatchKey("/");
+    await controller.dispatchKey("MessageSearch");
     await controller.dispatchKey("y");
     finish({ messages: [{ msg_id: "obsolete" }], next_cursor: "obsolete-page" });
     await search;
@@ -812,11 +813,11 @@ describe("five-screen operational model", () => {
     } });
     const starting = controller.start();
     for (let i = 0; i < 30 && !calls.includes("chat.list"); i++) await Promise.resolve();
-    expect(calls).toEqual(["capability.list", "chat.list"]);
+    expect(calls).toEqual(["account.list", "capability.list", "chat.list"]);
     controller.disconnected();
     finish({ chats: [] });
     await starting;
-    expect(calls).toEqual(["capability.list", "chat.list"]);
+    expect(calls).toEqual(["account.list", "capability.list", "chat.list"]);
     expect(controller.state.connection.status).toBe("reconnecting");
   });
 
@@ -856,7 +857,7 @@ describe("five-screen operational model", () => {
     let state = readyState();
     state = reduce(state, { type: "querySucceeded", generation: 1, screen: "approvals", data: [], nextCursor: "after-expired" });
     state = reduce(state, { type: "switchScreen", screen: "approvals" });
-    expect(renderScreen(state, { width: 80, height: 24 })).toContain("more results [n]");
+    expect(renderInspectorScreen(state, { width: 80, height: 24 })).toContain("more results [n]");
   });
 
   test("loads pending approval pages without losing earlier approval bindings or codes", async () => {
@@ -927,7 +928,7 @@ describe("five-screen operational model", () => {
 
     await controller.start();
     expect(controller.state.notice).not.toBe("subscribed — re-query required");
-    expect(renderScreen(controller.state, { width: 80, height: 24 })).toContain("more results [n]");
+    expect(renderInspectorScreen(controller.state, { width: 80, height: 24 })).toContain("more results [n]");
 
     for (const screen of ["inbox", "search", "chat"] as const) {
       await controller.dispatchKey(screen === "inbox" ? "1" : screen === "search" ? "2" : "3");

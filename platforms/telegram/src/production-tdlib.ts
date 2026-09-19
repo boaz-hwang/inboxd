@@ -272,6 +272,7 @@ function createAvailablePort(client: TdlClient): TdlibUserClientPort {
 
   return {
     availability: { available: true },
+    async accountQuery(query) { return typedTdlibObject(await invoke(query)); },
 
     async getAuthorizationState(): Promise<TdlibAuthorizationState> {
       return typedTdlibObject(await invoke({ _: "getAuthorizationState" })) as unknown as TdlibAuthorizationState;

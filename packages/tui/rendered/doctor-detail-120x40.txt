@@ -1,4 +1,4 @@
-INBOXD · connected · mixed                                                                                              
+INBOXD · connected · account ?                                                                                          
 1 INBOX | 2 SEARCH | 3 CHAT | 4 APPROVALS | ● DOCTOR                                                                    
 Resource: none                                                                                                          
 READ unknown                                                                                                            
@@ -8,7 +8,7 @@ AUTH unknown reason=capability_unavailable
 LIST 40%                                        │DETAIL 60%                                                             
 Evidence rail: partial · 3 chats / 1 gaps / 1 l…│Context rail: DOCTOR · focus 1/4                                       
 Status rail: connected · generation 1/1         │Detail — Doctor                                                        
-Doctor                                          │Context: 1 of 4 · partial · 3 chats / 1 gaps / 1 limits                
+Doctor · C connect accounts                     │Context: 1 of 4 · partial · 3 chats / 1 gaps / 1 limits                
 > Encryption: SQLCipher ready=true              │ID: encryption                                                         
   Cipher: fixture-version                       │Cipher: fixture-version                                                
   Schema: 2                                     │Schema: 2                                                              

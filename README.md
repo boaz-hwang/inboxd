@@ -9,9 +9,17 @@ A local-first messaging runtime with encrypted search and approval-gated writes.
 
 ## Status
 
-**Experimental — offline-ready, live-blocked.** Local integration tests exercise the encrypted store, real daemon socket, CLI/MCP/TUI flows, and crash recovery. They do not establish current live-account reliability.
+**Experimental — personal self-chat live-tested.** The packaged TUI has been
+used to connect Telegram, Slack and KakaoTalk personal accounts, read their
+self-chat scopes, and send one approval-gated message per platform with matching
+independent readback. This is bounded live evidence, not a guarantee of complete
+history, all conversation types, or long-running session reliability.
 
-Slack has bounded read adapters; Kakao read support is experimental and measurement-gated. Normal Kakao sending is unsupported. Fresh live reads and a separately approved Slack send remain pending. This is a developer build, not a turnkey multi-messenger app.
+Kakao personal account transport is separate from the measurement-gated local
+reader and official template sender. It supports text sends without automatic
+retry, no replies, and a bounded first page of history with explicit coverage
+limits. Existing personal sessions were reused in the recorded live test; fresh
+QR/phone-code authentication is a separate path.
 
 ## Build and test
 
@@ -41,12 +49,53 @@ See the [evidence ledger](docs/07-evidence-ledger.md) for recorded validation an
 
 ## Run
 
-Normal client commands do not auto-start the daemon; `inboxd daemon start` explicitly launches the packaged Rust daemon and waits for a real status response. Startup requires an owner-only JSON configuration with absolute state, database, and socket paths. Live readers additionally require explicit allowlisted scopes and trusted host bindings; configuration does not discover credentials automatically. See the [architecture and startup contract](docs/06-architecture.md) and [launcher implementation](packages/cli/src/daemon-launcher.ts).
+`bun run install:local` installs the packaged application. Run `inboxd` for the
+TUI; first run opens the account connection flow. macOS may ask to allow
+`inboxd-daemon` to read its SQLCipher key from Keychain, including after a daemon
+binary rebuild. Complete that prompt locally; never paste the key or Mac password
+into Inboxd or chat. To add or reconnect accounts,
+press `5` (Doctor), then `C`, or run:
 
 ```sh
-chmod 600 /absolute/path/inboxd-config.json
-bun run daemon -- --config /absolute/path/inboxd-config.json
+inboxd connect
+inboxd connect telegram
+inboxd connect slack
+inboxd connect kakao
 ```
+
+- Telegram: scan the QR in the opened browser with Telegram → Settings → Devices.
+  An already authenticated session resumes without another scan.
+- Slack: select a logged-in workspace and a conversation by name. No token or
+  channel ID entry. Missing/expired sessions use the installed `agent-messenger`
+  login importer, which may request macOS Keychain access.
+- KakaoTalk: resume the personal session, or follow the installed
+  `agent-messenger` secondary-device login and phone-code prompt. Choose a chat
+  by name; the default first choice is the self chat. Device replacement is never
+  forced by Inboxd.
+
+The developer installer supplies Telegram application credentials from local
+configuration. Users do not register Slack/Kakao developer apps. The fallback
+Slack/Kakao login helper currently requires `agent-messenger` on PATH.
+
+Connections are saved one at a time in owner-only configuration; a successful
+change restarts the daemon. Cancelling an unchanged connection menu keeps the
+current daemon. The owner TUI sends personal-account messages directly with Enter;
+agent/MCP proposals retain their separate approval workflow.
+
+The sidebar discovers every chat returned by connected Telegram, Slack and
+KakaoTalk accounts and sorts them by latest message time, using provider titles
+and sender names. `/` or Ctrl+F opens message search across the selected messenger
+filter; Enter on a hit returns to its conversation and highlights the message.
+Ctrl+K finds a conversation by name. Tab cycles filters, rooms and messages;
+left/right selects a messenger while filters are focused. Enter opens a chat,
+Enter again starts composing, and Enter sends. Shift+Enter inserts a newline.
+`b` refreshes chats and messages; `n` continues paginated results. `d` and `5`
+show details and connections. See [workspace design](docs/11-tui-workspace.md)
+and [account adapters](docs/12-account-workspace.md).
+
+Normal data subcommands do not auto-start the daemon. `inboxd daemon start`
+launches it explicitly. See [connection architecture](docs/10-connection-architecture.md)
+and [daemon startup contract](docs/06-architecture.md).
 
 ## Safety boundaries
 
@@ -55,6 +104,8 @@ A transport acknowledgement means **Sent**, not **Verified**. Verification requi
 Approval codes are ephemeral and unavailable to MCP/agent clients. These controls do not protect against an agent with the same user's unrestricted shell, file, or Keychain access.
 
 ## Documentation
+
+- [Interactive architecture map (HTML)](docs/visuals/inboxd-architecture.html)
 
 - [Product and safety contract](docs/03-proposal.md)
 - [Roadmap and remaining live gates](docs/04-roadmap.md)

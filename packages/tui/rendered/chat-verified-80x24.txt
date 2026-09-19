@@ -1,24 +1,24 @@
-INBOXD · connected · mixed                                                      
-1 INBOX | 2 SEARCH | ● CHAT | 4 APPROVALS | 5 DOCTOR                            
-Resource: slack › work › chat:ops                                               
-READ bounded_history max_page=100 pages=1 cursor=opaque                         
-WRITE send content=text reply=yes                                               
-RECEIPT independent_readback                                                    
-AUTH authenticated reason=none observed_at=1726650000                           
-DETAIL (in place)                                                               
-Evidence rail: partial · 3 chats / 1 gaps / 1 limits · connected                
-Chat                                                                            
-── coverage gap: 1 · partial ──                                                 
-Delivery: session observations                                                  
-Verified: destination read-back matched                                         
-> ● slack › work › chat:ops 민수 09:41 재현 가능한 대화 내용                    
- ○ slack › work › chat:ops Ari 09:42 수정됨 (edited)                            
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply a Esc ? q                   
+ inboxd  /  대화                                                                
+ ● 전체   ○ KakaoTalk   ○ Slack   ○ Telegram                                    
+────────────────────────────────────────────────────────────────────────────────
+ 대화 4개  ‹             │ [SL] ops                                             
+                         │                                                      
+› [SL] ops               │  민수  09:41                                         
+   한국어/CJK 경계 텍스… │  재현 가능한 대화 내용                               
+                         │                                                      
+  [TG] 대화 2            │  Ari  09:42 · 수정됨                                 
+   Telegram text/reply c…│  수정됨                                              
+                         │                                                      
+  [KK] room-7            │                                                      
+   read-only measured lo…│                                                      
+                         │                                                      
+  [KK] friend-uuid       │                                                      
+   불러온 메시지 없음    │                                                      
+                         │                                                      
+                         │                                                      
+                         │                                                      
+                         │╭─ 메시지 ───────────────────────────────────────────╮
+                         ││ Enter 답장 작성 · r 인용 답장                      │
+ ↑↓ 선택  Enter 열기     │╰────────────────────────────────────────────────────╯
+✓ Verified · 수신 확인됨                                                        
+ / 검색  Ctrl+K 대화찾기  Tab 영역 이동  ←→ 필터 선택  ? 도움말                 

@@ -22,9 +22,20 @@
     "packages/cli": {
       "name": "@inboxd/cli",
       "version": "0.0.0",
+      "bin": {
+        "inboxd": "src/bin.ts",
+      },
+    },
+    "packages/connect": {
+      "name": "@inboxd/connect",
+      "version": "0.0.0",
     },
     "packages/core": {
       "name": "@inboxd/core",
+      "version": "0.0.0",
+    },
+    "packages/host": {
+      "name": "@inboxd/host",
       "version": "0.0.0",
     },
     "packages/mcp": {
@@ -46,6 +57,9 @@
     "packages/tui": {
       "name": "@inboxd/tui",
       "version": "0.0.0",
+      "bin": {
+        "inboxd-tui": "./src/main.ts",
+      },
       "dependencies": {
         "@opentui/core": "^0.5.11",
       },
@@ -53,15 +67,24 @@
     "platforms/slack": {
       "name": "@inboxd/slack",
       "version": "0.0.0",
+      "bin": {
+        "inboxd-slack-worker": "src/bin.ts",
+      },
     },
     "platforms/telegram": {
       "name": "@inboxd/telegram",
       "version": "0.0.0",
+      "bin": {
+        "inboxd-telegram-worker": "src/worker-entrypoint.ts",
+      },
       "dependencies": {
         "prebuilt-tdlib": "0.1008066.0",
         "tdl": "8.1.0",
       },
     },
+  },
+  "patchedDependencies": {
+    "agent-messenger@2.37.1": "patches/agent-messenger@2.37.1.patch",
   },
   "packages": {
     "@borewit/text-codec": ["@borewit/text-codec@0.2.2", "", {}, "sha512-DDaRehssg1aNrH4+2hnj1B7vnUGEjU6OIlyRdkMd0aUdIUvKXrJfXsy8LVtXAy7DRvYVluWbMspsRhz2lcW0mQ=="],
@@ -134,7 +157,11 @@
 
     "@inboxd/cli": ["@inboxd/cli@workspace:packages/cli"],
 
+    "@inboxd/connect": ["@inboxd/connect@workspace:packages/connect"],
+
     "@inboxd/core": ["@inboxd/core@workspace:packages/core"],
+
+    "@inboxd/host": ["@inboxd/host@workspace:packages/host"],
 
     "@inboxd/kakao": ["@inboxd/kakao@workspace:contrib/kakao"],
 

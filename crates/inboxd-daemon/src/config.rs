@@ -80,6 +80,8 @@ pub(crate) enum ProviderConfig {
         chat_id: String,
         team_id: String,
         bot_token: SecretString,
+        #[serde(default)]
+        session_cookie: Option<SecretString>,
     },
     Telegram {
         binding_id: String,
@@ -88,6 +90,12 @@ pub(crate) enum ProviderConfig {
         self_user_id: String,
         api_id: u32,
         api_hash: SecretString,
+    },
+    KakaoPersonal {
+        binding_id: String,
+        account: String,
+        chat_id: String,
+        credentials: SecretString,
     },
     KakaoLocal {
         binding_id: String,
@@ -158,6 +166,63 @@ pub(crate) struct LoadedConfig {
 }
 
 impl LoadedConfig {
+    pub(crate) fn account_configs(&self) -> Result<Vec<inboxd_daemon::AccountConfig>, String> {
+        let mut configs = std::collections::BTreeMap::new();
+        for provider in &self.providers {
+            let (platform, account, config) = match provider {
+                ProviderConfig::Slack {
+                    account,
+                    bot_token,
+                    session_cookie,
+                    ..
+                } => (
+                    "slack",
+                    account,
+                    json!({"kind":"slack","bot_token":bot_token.expose(),"session_cookie":session_cookie.as_ref().map(SecretString::expose)}),
+                ),
+                ProviderConfig::Telegram {
+                    account,
+                    binding_id,
+                    api_id,
+                    api_hash,
+                    ..
+                } => {
+                    let hash = telegram_binding_hash(binding_id);
+                    let (database, files) = WorkerSupervisor::prepare_telegram_state_directories(
+                        &self.state_dir,
+                        &hash,
+                    )?;
+                    let tdjson = std::env::current_exe()
+                        .map_err(|_| "executable path unavailable")?
+                        .with_file_name("inboxd-telegram-libtdjson.dylib");
+                    (
+                        "telegram",
+                        account,
+                        json!({"kind":"telegram","api_id":api_id,"api_hash":api_hash.expose(),"database_directory":database,"files_directory":files,"tdjson_path":tdjson}),
+                    )
+                }
+                ProviderConfig::KakaoPersonal {
+                    account,
+                    credentials,
+                    ..
+                } => (
+                    "kakao",
+                    account,
+                    json!({"kind":"kakao_personal","credentials":credentials.expose()}),
+                ),
+                _ => continue,
+            };
+            configs
+                .entry((platform.to_owned(), account.clone()))
+                .or_insert(inboxd_daemon::AccountConfig {
+                    platform: platform.to_owned(),
+                    account: account.clone(),
+                    config: Zeroizing::new(config.to_string()),
+                });
+        }
+        Ok(configs.into_values().collect())
+    }
+
     pub(crate) fn take_provider_bindings(&mut self) -> Result<Vec<TrustedBinding>, String> {
         if self.providers.len() > 128 {
             return Err("provider count exceeds the production bound".into());
@@ -179,6 +244,7 @@ impl ProviderConfig {
                 chat_id,
                 team_id,
                 bot_token,
+                session_cookie,
             } => {
                 validate_common(&binding_id, &account)?;
                 validate_ascii_identifier(&chat_id, 128, "slack chat_id")?;
@@ -191,6 +257,7 @@ impl ProviderConfig {
                     allowed_chat_ids_json: serde_json::to_string(&[&chat_id])
                         .map_err(|_| "slack configuration could not be encoded".to_owned())?,
                     bot_token: bot_token.into_inner(),
+                    session_cookie: session_cookie.map(SecretString::into_inner),
                 };
                 (binding_id, claims, worker)
             }
@@ -242,6 +309,29 @@ impl ProviderConfig {
                     api_hash: api_hash.into_inner(),
                     database_directory,
                     files_directory,
+                };
+                (binding_id, claims, worker)
+            }
+            Self::KakaoPersonal {
+                binding_id,
+                account,
+                chat_id,
+                credentials,
+            } => {
+                validate_common(&binding_id, &account)?;
+                validate_value(&chat_id, 128, "kakao chat_id")?;
+                validate_secret(credentials.expose(), 16_384, "kakao credentials")?;
+                if !chat_id.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err("invalid Kakao personal chat".into());
+                }
+                let mut claims = chat_claims("kakao", &account, &chat_id, "bounded_history", true);
+                claims["write"]["reply"] = json!(false);
+                claims["read"]["limits"] =
+                    json!({"max_page_size":100,"max_pages":1,"cursor":"none"});
+                let worker = ProductionWorkerConfig::KakaoPersonal {
+                    account,
+                    chat_id,
+                    credentials_json: credentials.into_inner(),
                 };
                 (binding_id, claims, worker)
             }

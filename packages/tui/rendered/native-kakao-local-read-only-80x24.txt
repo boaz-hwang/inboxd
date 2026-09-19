@@ -1,16 +1,10 @@
-INBOXD · connected · account ?                                                  
-1 INBOX | 2 SEARCH | ● CHAT | 4 APPROVALS | 5 DOCTOR                            
-Resource: kakao › local › chat:room-7                                           
-READ measured_local max_page=100 pages=1 cursor=none                            
-WRITE none content=none reply=no                                                
-RECEIPT none                                                                    
-AUTH authenticated reason=none observed_at=1726650002                           
-DETAIL (in place)                                                               
-Evidence rail: unknown · 0 chats / ? gaps · connected                           
-Chat                                                                            
-── coverage gap: ? · unknown ──                                                 
-> ● kakao › local › chat:room-7 item Native reply parent                        
-! compose disabled — exact resource is read-only                                
+ inboxd  /  대화                                                                
+ ● 전체   ○ KakaoTalk   ○ Slack   ○ Telegram                                    
+────────────────────────────────────────────────────────────────────────────────
+ [KK] room-7                                                                    
+                                                                                
+› 보낸 사람                                                                     
+  Native reply parent                                                           
                                                                                 
                                                                                 
                                                                                 
@@ -21,4 +15,10 @@ Chat
                                                                                 
                                                                                 
                                                                                 
-1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply a Esc ? q                   
+                                                                                
+╭─ 메시지 ─────────────────────────────────────────────────────────────────────╮
+│ 읽기 전용 대화                                                               │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ 일부 기록만 표시 중 · b 불러오기 · d 상세                                      
+ compose disabled — exact resource is read-only                                 
+ / 검색  Ctrl+K 대화찾기  Tab 영역 이동  ←→ 필터 선택  ? 도움말                 

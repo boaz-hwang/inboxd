@@ -1,40 +1,40 @@
-INBOXD · connected · mixed                                                                                              
-1 INBOX | 2 SEARCH | ● CHAT | 4 APPROVALS | 5 DOCTOR                                                                    
-Resource: slack › work › chat:ops                                                                                       
-READ bounded_history max_page=100 pages=1 cursor=opaque                                                                 
-WRITE send content=text reply=yes                                                                                       
-RECEIPT independent_readback                                                                                            
-AUTH authenticated reason=none observed_at=1726650000                                                                   
-LIST 40%                                        │DETAIL 60%                                                             
-Evidence rail: partial · 3 chats / 1 gaps / 1 l…│Context rail: CHAT · focus 1/2                                         
-Status rail: connected · generation 1/1         │Detail — Chat                                                          
-Chat                                            │Context: 1 of 2 · partial · 3 chats / 1 gaps / 1 limits                
-── coverage gap: 1 · partial ──                 │Delivery: session observations                                         
-Delivery: session observations                  │Uncertain: outcome unknown; do not resend                              
-Uncertain: outcome unknown; do not resend       │── coverage gap: 1 · partial ──                                        
-> ● slack › work › chat:ops 민수 09:41 재현 가… │ID: m-chat-1                                                           
- ○ slack › work › chat:ops Ari 09:42 수정됨 (ed…│Resource: slack › work › chat:ops                                      
-                                                │Author: 민수                                                           
-                                                │Time: 09:41                                                            
-                                                │Message: 재현 가능한 대화 내용                                         
-                                                │Back: Esc · PgUp/PgDn scroll · Home top (1–5/5)                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply a Esc ? q                                                           
+ inboxd  /  대화                                                                                                        
+ ● 전체   ○ KakaoTalk   ○ Slack   ○ Telegram                                                                            
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ 대화 4개  ‹                    │ [SL] ops                                                                              
+                                │                                                                                       
+› [SL] ops                      │  민수  09:41                                                                          
+   한국어/CJK 경계 텍스트 가나… │  재현 가능한 대화 내용                                                                
+                                │                                                                                       
+  [TG] 대화 2                   │  Ari  09:42 · 수정됨                                                                  
+   Telegram text/reply capabili…│  수정됨                                                                               
+                                │                                                                                       
+  [KK] room-7                   │                                                                                       
+   read-only measured local his…│                                                                                       
+                                │                                                                                       
+  [KK] friend-uuid              │                                                                                       
+   불러온 메시지 없음           │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │╭─ 메시지 ────────────────────────────────────────────────────────────────────────────╮
+                                ││ Enter 답장 작성 · r 인용 답장                                                       │
+ ↑↓ 선택  Enter 열기            │╰─────────────────────────────────────────────────────────────────────────────────────╯
+! Uncertain · 전송 결과 확인 필요 — 다시 보내지 마세요                                                                  
+ / 검색  Ctrl+K 대화찾기  Tab 영역 이동  ←→ 필터 선택  ? 도움말                                                         

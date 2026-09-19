@@ -1,25 +1,15 @@
-INBOXD · reconnecting · STALE · mixed                                                                                   
-1 INBOX | 2 SEARCH | 3 CHAT | ● APPROVALS | 5 DOCTOR                                                                    
-Resource: slack › work › chat:ops                                                                                       
-READ bounded_history max_page=100 pages=1 cursor=opaque                                                                 
-WRITE send content=text reply=yes                                                                                       
-RECEIPT independent_readback                                                                                            
-AUTH authenticated reason=none observed_at=1726650000                                                                   
-LIST 40%                                        │DETAIL 60%                                                             
-Evidence rail: partial · 3 chats / 1 gaps / 1 l…│Context rail: APPROVALS · focus 1/2                                    
-Status rail: reconnecting · stale retained · ge…│Detail — Approvals                                                     
-Approvals                                       │Context: 1 of 2 · partial · 3 chats / 1 gaps / 1 limits                
-Delivery: session observations                  │Other intent: UNCERTAIN — do not resend automatically                  
-Uncertain: outcome unknown; do not resend       │ID: intent-1                                                           
-> ● slack › work › chat:ops Proposed 10m slack:…│Resource: slack › work › chat:ops                                      
- ○ kakao › official-app › destination:friend-uu…│State: Proposed                                                        
-Queue: UNCERTAIN — do not resend automatically  │Destination: slack:work:ops                                            
-Approve [disabled: disconnected]                │Expires: 10m                                                           
-                                                │Message: 승인 대기 제안                                                
-                                                │Approval code required                                                 
-                                                │Approve [disabled]                                                     
-                                                │Back: Esc · PgUp/PgDn scroll · Home top (1–8/8)                        
-! connection lost — send actions disabled; no action retried                                                            
+ inboxd  /  전송 확인   · 전송 확인 1  · 연결 끊김 — 다시 연결 중                                                       
+ ● 전체   ○ KakaoTalk   ○ Slack   ○ Telegram                                                                            
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+                                                                                                                        
+ Slack · ops                                                                                                            
+ Proposed  · 1 / 2                                                                                                      
+                                                                                                                        
+  승인 대기 제안                                                                                                        
+                                                                                                                        
+ ! 결과 확인이 필요한 다른 전송이 있습니다. · ↑↓ 선택                                                                   
+ 연결 끊김 · 전송할 수 없습니다.                                                                                        
+ 확인 코드를 사용할 수 없습니다. 다시 작성하세요.                                                                       
                                                                                                                         
                                                                                                                         
                                                                                                                         
@@ -37,4 +27,14 @@ Approve [disabled: disconnected]                │Expires: 10m
                                                                                                                         
                                                                                                                         
                                                                                                                         
-1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply a Esc ? q                                                           
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ connection lost — send actions disabled; no action retried                                                             
+ / 검색  Ctrl+K 대화찾기  Tab 영역 이동  ←→ 필터 선택  ? 도움말                                                         

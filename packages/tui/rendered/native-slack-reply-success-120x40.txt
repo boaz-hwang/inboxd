@@ -1,40 +1,40 @@
-INBOXD · connected · account ?                                                                                          
-1 INBOX | 2 SEARCH | ● CHAT | 4 APPROVALS | 5 DOCTOR                                                                    
-Resource: slack › work › chat:ops                                                                                       
-READ bounded_history max_page=100 pages=1 cursor=opaque                                                                 
-WRITE send content=text reply=yes                                                                                       
-RECEIPT independent_readback                                                                                            
-AUTH authenticated reason=none observed_at=1726650000                                                                   
-LIST 40%                                        │DETAIL 60%                                                             
-Evidence rail: unknown · 0 chats / ? gaps       │Context rail: CHAT · focus 1/1                                         
-Status rail: connected · generation 1/1         │Detail — Chat                                                          
-Chat                                            │Context: 1 of 1 · unknown · 0 chats / ? gaps                           
-── coverage gap: ? · unknown ──                 │── coverage gap: ? · unknown ──                                        
-> ● slack › work › chat:ops item Native reply p…│ID: native-parent                                                      
-                                                │Resource: slack › work › chat:ops                                      
-                                                │Message: Native reply parent                                           
-                                                │Back: Esc · PgUp/PgDn scroll · Home top (1–3/3)                        
-! proposal created — approve from Approvals with a code                                                                 
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply a Esc ? q                                                           
+ inboxd  /  대화                                                                                                        
+ ● 전체   ○ KakaoTalk   ○ Slack   ○ Telegram                                                                            
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ 대화 4개                       │ [SL] ops                                                                              
+                                │                                                                                       
+● [SL] ops                      │› 보낸 사람                                                                            
+   불러온 메시지 없음           │  Native reply parent                                                                  
+                                │                                                                                       
+  [TG] 대화 2                   │                                                                                       
+   불러온 메시지 없음           │                                                                                       
+                                │                                                                                       
+  [KK] room-7                   │                                                                                       
+   불러온 메시지 없음           │                                                                                       
+                                │                                                                                       
+  [KK] friend-uuid              │                                                                                       
+   불러온 메시지 없음           │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │                                                                                       
+                                │╭─ 메시지 ────────────────────────────────────────────────────────────────────────────╮
+                                ││ Enter 답장 작성 · r 인용 답장                                                       │
+ ↑↓ 선택  Enter 열기            │╰─────────────────────────────────────────────────────────────────────────────────────╯
+ 일부 기록만 표시 중 · b 불러오기 · d 상세                                                                              
+ proposal created — approve from Approvals with a code                                                                  
+ / 검색  Ctrl+K 대화찾기  Tab 영역 이동  ←→ 필터 선택  ? 도움말                                                         

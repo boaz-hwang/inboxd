@@ -19,7 +19,7 @@ export * from "./daemon-launcher.ts";
 export * from "./handlers.ts";
 export * from "./transport.ts";
 
-export const defaultSocketPath = join(homedir(), ".inboxd", "sock");
+export const defaultSocketPath = join(homedir(), ".inboxd", "state", "sock");
 
 export interface UdsCliOptions extends Omit<CliHandlerOptions, "connect" | "launchDaemon"> {
   readonly socketPath?: string;

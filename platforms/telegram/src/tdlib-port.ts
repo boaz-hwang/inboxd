@@ -54,6 +54,8 @@ export interface TdlibUserClientPort {
   getChatHistory(request: TdlibHistoryRequest): Promise<readonly TdlibMessage[]>;
   sendTextMessage(request: TdlibSendTextRequest): Promise<TdlibMessage>;
   getMessage(chatId: string, messageId: string): Promise<TdlibMessage>;
+  /** Internal account-directory adapter seam; never exposed as a client RPC. */
+  accountQuery?(query: Record<string, unknown>): Promise<Record<string, any>>;
   close?(): Promise<void>;
 }
 

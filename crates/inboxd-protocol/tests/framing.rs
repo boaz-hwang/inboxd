@@ -7,12 +7,21 @@ use serde_json::json;
 #[test]
 fn frozen_method_surface_and_additive_capability_event_are_exact() {
     assert_eq!(LEGACY_REQUEST_METHODS.len(), 21);
-    assert_eq!(REQUEST_METHODS.len(), 22);
+    assert_eq!(REQUEST_METHODS.len(), 26);
     assert_eq!(
         LEGACY_REQUEST_METHODS[18..],
         ["settings.get", "settings.update", "subscribe"]
     );
-    assert_eq!(REQUEST_METHODS.last(), Some(&"capability.list"));
+    assert_eq!(
+        &REQUEST_METHODS[21..],
+        &[
+            "capability.list",
+            "account.list",
+            "account.messages",
+            "account.search",
+            "account.send"
+        ]
+    );
     assert_eq!(
         EVENT_METHODS,
         [
@@ -76,4 +85,14 @@ fn encoded_json_line_limit_includes_newline_escapes_and_multibyte_utf8() {
             "accepted oversized encoded line for {prefix:?}"
         );
     }
+}
+
+#[test]
+fn direct_account_send_is_reserved_for_owner_approver() {
+    use inboxd_protocol::{ClientRole, parse_request};
+    let request = json!({"type":"request","id":"send","method":"account.send","params":{}});
+    for role in [ClientRole::Reader, ClientRole::Agent, ClientRole::Mcp] {
+        assert!(parse_request(&request, Some(role)).is_err());
+    }
+    assert!(parse_request(&request, Some(ClientRole::Approver)).is_ok());
 }

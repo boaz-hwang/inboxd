@@ -43,6 +43,7 @@ fn install_fixed_worker(directory: &Path, name: &str) -> PathBuf {
 
 fn production_config() -> ProductionWorkerConfig {
     ProductionWorkerConfig::Slack {
+        session_cookie: None,
         account: "work".into(),
         team_id: "T0123".into(),
         allowed_chat_ids_json: "[\"C0123\"]".into(),

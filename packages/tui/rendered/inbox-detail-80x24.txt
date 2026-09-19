@@ -1,4 +1,4 @@
-INBOXD · connected · mixed                                                      
+INBOXD · connected · account ?                                                  
 ● INBOX | 2 SEARCH | 3 CHAT | 4 APPROVALS | 5 DOCTOR                            
 Resource: slack › work › chat:ops                                               
 READ bounded_history max_page=100 pages=1 cursor=opaque                         

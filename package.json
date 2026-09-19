@@ -11,6 +11,7 @@
   "scripts": {
     "build:native": "bun scripts/build-native.ts",
     "build:product": "bun scripts/build-product.ts",
+    "install:local": "bun scripts/install-product.ts",
     "daemon": "bun scripts/run-daemon.ts",
     "cli": "bun packages/cli/src/bin.ts",
     "typecheck": "tsc -p tsconfig.base.json --noEmit",
@@ -24,5 +25,8 @@
     "prebuilt-tdlib": "0.1008066.0",
     "qrcode": "1.5.4",
     "typescript": "latest"
+  },
+  "patchedDependencies": {
+    "agent-messenger@2.37.1": "patches/agent-messenger@2.37.1.patch"
   }
 }

@@ -1,22 +1,13 @@
-INBOXD · connected · mixed                                                                                              
-1 INBOX | 2 SEARCH | 3 CHAT | ● APPROVALS | 5 DOCTOR                                                                    
-Resource: slack › work › chat:ops                                                                                       
-READ bounded_history max_page=100 pages=1 cursor=opaque                                                                 
-WRITE send content=text reply=yes                                                                                       
-RECEIPT independent_readback                                                                                            
-AUTH authenticated reason=none observed_at=1726650000                                                                   
-LIST 40%                                        │DETAIL 60%                                                             
-Evidence rail: partial · 3 chats / 1 gaps / 1 l…│Context rail: APPROVALS · focus 1/1                                    
-Status rail: connected · generation 1/1         │Detail — Approvals                                                     
-Approvals                                       │Context: 1 of 1 · partial · 3 chats / 1 gaps / 1 limits                
-Delivery: session observations                  │Selected: UNCERTAIN — do not resend automatically                      
-Uncertain: outcome unknown; do not resend       │ID: outcome-Uncertain                                                  
-> ● slack › work › chat:ops Uncertain slack:wor…│Resource: slack › work › chat:ops                                      
-Queue: UNCERTAIN — do not resend automatically  │State: Uncertain                                                       
-Approve [disabled: Uncertain]                   │Destination: slack:work:ops                                            
-                                                │Message: Operator-reviewed proposal                                    
-                                                │Approve [disabled]                                                     
-                                                │Back: Esc · PgUp/PgDn scroll · Home top (1–6/6)                        
+ inboxd  /  전송 확인                                                                                                   
+ ● 전체   ○ KakaoTalk   ○ Slack   ○ Telegram                                                                            
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+                                                                                                                        
+ Slack · ops                                                                                                            
+ Uncertain  · 1 / 1                                                                                                     
+                                                                                                                        
+  Operator-reviewed proposal                                                                                            
+                                                                                                                        
+ ! 전송 결과 확인 필요 — 다시 보내지 마세요                                                                             
                                                                                                                         
                                                                                                                         
                                                                                                                         
@@ -37,4 +28,13 @@ Approve [disabled: Uncertain]                   │Destination: slack:work:ops
                                                                                                                         
                                                                                                                         
                                                                                                                         
-1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply a Esc ? q                                                           
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ / 검색  Ctrl+K 대화찾기  Tab 영역 이동  ←→ 필터 선택  ? 도움말                                                         
