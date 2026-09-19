@@ -1,8 +1,8 @@
 {
   "schema": "inboxd.tui.capture-manifest.v1",
-  "repository": "/Users/hwang-gyeongchan/sideproject/inboxd",
-  "base": "fe16bded80f663641aaeb7f621c2e27ce8a96ad4",
-  "working_tree_base": "27a934b6ae8af03b33823afc477f3fb0ed1cc3a2",
+  "repository": ".",
+  "base": "ad846e91743ead17c4fd71ee57c0eac48d3f5d91",
+  "working_tree_base": "ad846e91743ead17c4fd71ee57c0eac48d3f5d91",
   "runtime": "1.3.11",
   "source_hashes": {
     "workspace": "52c25828950594464554596783ab5ff512c800451ac1aa31b41a85c2c3394372",
@@ -11,7 +11,7 @@
     "text": "f4656595f50d5da8fb5c0d59520d26b1e549d2673d2ab8b8732a86adf0873078",
     "renderer": "ae5db2a84fa9a636fb93dab796e1dabc49001d93a72fd4b6b5d11a17d753d3e5",
     "runtime": "09685ac6d21016b168d123a3a40d0ba5e31b9329483bcd44c36f28062ba276b4",
-    "generator": "042aff9a30087366a4338bee30566578d9f4ffcd2b44e35eb8ea354da4230f5c"
+    "generator": "561f2f85b1e2d464465ab4acca1cf8705540f47fddf8392052156d172c4c908e"
   },
   "viewports": [
     {

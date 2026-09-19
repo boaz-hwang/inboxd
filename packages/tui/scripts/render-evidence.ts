@@ -319,7 +319,7 @@ const runtimePath = join(repository, "packages/tui/src/runtime.ts");
 const generatorPath = join(repository, "packages/tui/scripts/render-evidence.ts");
 await Bun.write(join(outputDirectory, "manifest.json"), `${JSON.stringify({
   schema: "inboxd.tui.capture-manifest.v1",
-  repository,
+  repository: ".",
   base: runtimeBase,
   working_tree_base: workingTreeBase,
   runtime: Bun.version,
