@@ -190,3 +190,13 @@ Slack. It does not retroactively repair earlier messages whose deletion evidence
 was missed. Telegram/Kakao manual new-message probes have been requested for
 local-only verification; those results remain pending. The prior accepted 9h 27m
 observation predates this build, and P0 overall is not declared passed.
+
+### Telegram/Kakao automatic new-message check
+
+On 2026-09-21 the owner sent `테스트` in both self conversations instead of the
+proposed marker. Local-only search at 21:45 KST found a new exact-body message
+in Telegram (21:44:40) and Kakao (21:44:32). Telegram also had one older exact
+match from September 19; timestamps distinguish it from the new probe, so the
+two hits are not evidence of duplication. Both responses reported `source: local`.
+The verifier made no explicit remote-history or remote-search calls. Manual edits
+to `테스트 수정` have been requested; automatic edit/deletion checks remain pending.
