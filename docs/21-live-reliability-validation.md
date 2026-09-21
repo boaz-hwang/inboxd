@@ -209,3 +209,13 @@ message with body `테스트 수정`, and zero matching messages retaining `테�
 No explicit remote-history or remote-search call was made. Telegram deletion of
 that exact probe has been requested next. Kakao authoritative deletion remains
 unavailable and is not claimed validated by its successful edit check.
+
+### Telegram automatic deletion check
+
+After the owner deleted the edited probe, local-only search at 21:48 KST within
+its original one-second send interval returned zero messages and zero matches
+for the saved probe ID. No remote-history or remote-search call was made. This
+confirms search removal for the newly observed Telegram deletion, following the
+already confirmed automatic creation and edit. Previously missed deletions are
+not retroactively inferred. Kakao deletion support and the other outstanding P0
+scenarios retain their prior status.
