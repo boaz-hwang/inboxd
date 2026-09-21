@@ -189,3 +189,54 @@ fn pages_obey_byte_budget_and_long_queries_use_compact_scope_cursors() {
         "2"
     );
 }
+
+#[test]
+fn authoritative_deletions_are_atomic_scoped_durable_and_prevent_resurrection() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("deletions.db");
+    {
+        let host = NativeHost::open_development(&path, &[44; 32]).unwrap();
+        host.execute("store.migrate", &Value::Null).unwrap();
+        host.execute(
+            "observations.store",
+            &page(
+                2,
+                json!([
+                    message("1", "20", "검색 원본"),
+                    message("1", "30", "검색 다른 방")
+                ]),
+            ),
+        )
+        .unwrap();
+        let deletion = json!({"platform":"test","account":"a","chat_id":"20","deleted_at":20,"ids":["1","unseen"]});
+        assert_eq!(
+            host.execute("observations.delete", &deletion).unwrap()["changed"],
+            2
+        );
+        assert_eq!(
+            host.execute("observations.delete", &deletion).unwrap()["changed"],
+            0
+        );
+        assert!(host.execute("observations.delete", &json!({"platform":"test","account":"a","chat_id":"30","deleted_at":20,"ids":["1",null]})).is_err());
+    }
+    let host = NativeHost::open_development(&path, &[44; 32]).unwrap();
+    host.execute(
+        "observations.store",
+        &page(
+            999,
+            json!([
+                message("1", "20", "검색 부활"),
+                message("unseen", "20", "검색 부활")
+            ]),
+        ),
+    )
+    .unwrap();
+    let found = host
+        .execute(
+            "observations.search",
+            &json!({"platform":"test","account":"a","query":"검색","limit":80}),
+        )
+        .unwrap();
+    assert_eq!(found["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(found["messages"][0]["chat_id"], "30");
+}

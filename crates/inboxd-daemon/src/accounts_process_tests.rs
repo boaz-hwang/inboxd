@@ -51,7 +51,7 @@ async fn service_with_live(platform: &str, live: bool) -> (tempfile::TempDir, Ac
     let events = child
         .stderr
         .take()
-        .map(|stderr| live::read_events(stderr, service.slots[0].schedule.live.clone()));
+        .map(|stderr| live::read_events(stderr, service.slots[0].schedule.live.clone(), None));
     *service.slots[0].schedule.worker.lock().await = Some(WorkerProcess {
         _events: events,
         _child: child,

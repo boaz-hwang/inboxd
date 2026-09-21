@@ -53,7 +53,13 @@ export function createSlackAccount(config: {
       listener.on("disconnected", () => emit({ event: "state", state: "disconnected" }));
       listener.on("error", () => emit({ event: "state", state: "disconnected" }));
       listener.on("slack_event", event => {
-        if (!["user_typing", "presence_change", "pong"].includes(event.type)) emit({ event: "changed" });
+        const value = event as unknown as Record<string, unknown>;
+        if (value.type === "message" && value.subtype === "message_deleted"
+          && typeof value.channel === "string" && typeof value.deleted_ts === "string") {
+          emit({ event: "deleted", chat_id: value.channel, message_id: value.deleted_ts });
+        } else if (!["user_typing", "presence_change", "pong"].includes(event.type)) {
+          emit({ event: "changed", ...(typeof value.channel === "string" ? { chat_id: value.channel } : {}) });
+        }
       });
       stopListening = () => listener.stop();
       // RTM setup cannot block reads/sends; the SDK owns socket heartbeats/reconnect.

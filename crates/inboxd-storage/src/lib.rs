@@ -248,6 +248,9 @@ impl NativeHost {
 
     /// Input and output are core wire values, not unencoded Rust strings.
     pub fn execute(&self, op: &str, input: &Value) -> CoreResult<Value> {
+        if op == "observations.delete" {
+            return observations::delete(&self.connection, input);
+        }
         if op == "observations.store" {
             return observations::observe(&self.connection, input);
         }

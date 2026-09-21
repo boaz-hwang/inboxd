@@ -32,3 +32,17 @@ test("a reconnect coalesced to the same state still requests reconciliation", as
   expect(events).toEqual([{ event: "state", state: "connected" }, { event: "changed" }]);
   emitter.close();
 });
+
+test("deletion identities survive coalescing and overflow reports an evidence gap", async () => {
+  const lines: any[] = [];
+  let resume: (() => void) | undefined;
+  const emitter = liveEmitter(line => { lines.push(JSON.parse(line)); return lines.length !== 1; }, callback => { resume = callback; });
+  emitter.emit({ event: "deleted", chat_id: "room", message_id: "original" });
+  await Bun.sleep(120);
+  for (let i = 0; i < 1100; i++) emitter.emit({ event: "deleted", chat_id: "room", message_id: String(i) });
+  resume!();
+  expect(lines[0]).toEqual({ event: "deleted", chat_id: "room", message_id: "original" });
+  expect(lines.filter(v => v.event === "deleted")).toHaveLength(1025);
+  expect(lines.some(v => v.event === "gap")).toBe(true);
+  emitter.close();
+});

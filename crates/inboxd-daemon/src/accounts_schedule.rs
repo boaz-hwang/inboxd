@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 pub(super) struct Schedule {
+    pub(super) deletion_sink: std::sync::Mutex<Option<super::live::DeletionSink>>,
     pub(super) sends: Mutex<()>,
     pub(super) live: tokio::sync::watch::Sender<super::live::LiveSignal>,
     pub(super) worker: Mutex<Option<WorkerProcess>>,
@@ -19,6 +20,7 @@ pub(super) struct Admission {
 impl Default for Schedule {
     fn default() -> Self {
         Self {
+            deletion_sink: Default::default(),
             live: tokio::sync::watch::channel(Default::default()).0,
             worker: Mutex::new(None),
             sends: Mutex::new(()),

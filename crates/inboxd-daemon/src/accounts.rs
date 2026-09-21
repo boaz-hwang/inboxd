@@ -639,6 +639,7 @@ impl WorkerProcess {
         let events = live::read_events(
             child.stderr.take().ok_or("수신 채널 오류")?,
             schedule.live.clone(),
+            schedule.deletion_sink.lock().unwrap().clone(),
         );
         Ok(Self {
             _events: Some(events),

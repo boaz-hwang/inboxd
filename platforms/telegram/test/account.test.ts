@@ -80,3 +80,17 @@ test("account updates cover new, edited and deleted messages without forwarding 
   stop();
   expect(listener).toBeUndefined();
 });
+
+
+test("only authoritative permanent Telegram deletions create tombstone evidence", async () => {
+  let listener: ((value: Record<string, unknown>) => void) | undefined;
+  const events: unknown[] = [];
+  const adapter = createTelegramAdapter({ onAccountUpdate(callback) { listener=callback; return () => {}; } } as TdlibUserClientPort);
+  await adapter.listen!(event => events.push(event));
+  const base = { "@type": "updateDeleteMessages", chat_id: 42, message_ids: [100,101] };
+  listener!({...base,is_permanent:false,from_cache:false});
+  listener!({...base,is_permanent:true,from_cache:true});
+  expect(events.filter((e:any)=>e.event==="deleted")).toHaveLength(0);
+  listener!({...base,is_permanent:true,from_cache:false});
+  expect(events.slice(-2)).toEqual([{event:"deleted",chat_id:"42",message_id:"100"},{event:"deleted",chat_id:"42",message_id:"101"}]);
+});

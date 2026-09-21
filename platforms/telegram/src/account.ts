@@ -136,7 +136,14 @@ export function createTelegramAdapter(port: TdlibUserClientPort): AccountAdapter
           const auth = update.authorization_state as Record<string, unknown> | undefined;
           if (auth?.["@type"] !== "authorizationStateReady") emit({ event: "state", state: "disconnected" });
         } else if (["updateNewMessage", "updateMessageContent", "updateDeleteMessages", "updateChatLastMessage", "updateChatTitle", "updateChatReadInbox", "updateChatPosition"].includes(String(type))) {
-          emit({ event: "changed" });
+          if (type === "updateDeleteMessages" && update.is_permanent === true && update.from_cache === false
+            && Array.isArray(update.message_ids) && update.chat_id !== undefined) {
+            for (const id of update.message_ids) emit({ event: "deleted", chat_id: String(update.chat_id), message_id: String(id) });
+          } else {
+            const m = update.message as Record<string, unknown> | undefined;
+            const chat = update.chat_id ?? m?.chat_id;
+            emit({ event: "changed", ...(chat !== undefined ? { chat_id: String(chat) } : {}) });
+          }
         }
       });
       return unsubscribe;

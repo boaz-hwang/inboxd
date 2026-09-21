@@ -7,12 +7,16 @@ use tokio::sync::watch;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct LiveSignal {
     pub revision: u64,
+    pub chats: std::collections::BTreeSet<String>,
+    pub gap: bool,
     pub state: String,
 }
 impl Default for LiveSignal {
     fn default() -> Self {
         Self {
             revision: 0,
+            chats: Default::default(),
+            gap: false,
             state: "connecting".into(),
         }
     }
@@ -24,6 +28,22 @@ pub(super) fn accept_event(
 ) -> Result<(), String> {
     let object = value.as_object().ok_or("잘못된 수신 이벤트")?;
     match value["event"].as_str() {
+        Some("gap") if object.len() == 1 => {
+            sender.send_modify(|s| {
+                s.gap = true;
+                s.revision = s.revision.wrapping_add(1);
+            });
+        }
+        Some("changed") if object.len() == 2 && valid_id(&value["chat_id"]) => {
+            sender.send_modify(|s| {
+                if s.chats.len() < 1024 {
+                    s.chats.insert(value["chat_id"].as_str().unwrap().into());
+                } else {
+                    s.gap = true;
+                }
+                s.revision = s.revision.wrapping_add(1);
+            });
+        }
         Some("changed") if object.len() == 1 => {
             sender.send_modify(|s| s.revision = s.revision.wrapping_add(1));
         }
@@ -46,6 +66,44 @@ pub(super) fn accept_event(
     Ok(())
 }
 
+fn valid_id(value: &Value) -> bool {
+    value
+        .as_str()
+        .is_some_and(|s| !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
+}
+
+#[derive(Clone)]
+pub(super) struct DeletionSink {
+    platform: String,
+    account: String,
+    storage: Arc<StorageActor>,
+    events: Arc<EventHub>,
+}
+impl DeletionSink {
+    async fn apply(&self, value: &Value) -> Result<(), String> {
+        if value.as_object().is_none_or(|v| v.len() != 3)
+            || !valid_id(&value["chat_id"])
+            || !valid_id(&value["message_id"])
+            || !matches!(self.platform.as_str(), "slack" | "telegram")
+        {
+            return Err("invalid deletion evidence".into());
+        }
+        let rows = crate::accounts_backend::storage_keys::observations(
+            &self.platform,
+            &[json!({"chat_id":value["chat_id"],"id":value["message_id"]})],
+        );
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "clock error")?
+            .as_secs_f64();
+        let result = self.storage.call_async(StorageOperation::DeleteObservedMessages, json!({"platform":self.platform,"account":self.account,"chat_id":rows[0]["chat_id"],"ids":[rows[0]["id"]],"deleted_at":at})).await.map_err(|_| "deletion persistence failed")?;
+        if result["changed"].as_u64().unwrap_or(0) > 0 {
+            self.events.publish("message.upserted", json!({"platform":self.platform,"account":self.account,"chat_id":value["chat_id"],"deleted":true})).map_err(|_| "event publish failed")?;
+        }
+        Ok(())
+    }
+}
+
 pub(super) struct EventReader(pub tokio::task::JoinHandle<()>, watch::Sender<LiveSignal>);
 impl Drop for EventReader {
     fn drop(&mut self) {
@@ -57,6 +115,7 @@ impl Drop for EventReader {
 pub(super) fn read_events(
     output: tokio::process::ChildStderr,
     sender: watch::Sender<LiveSignal>,
+    sink: Option<DeletionSink>,
 ) -> EventReader {
     let retained = sender.clone();
     EventReader(
@@ -75,6 +134,21 @@ pub(super) fn read_events(
                 let Ok(value) = serde_json::from_slice::<Value>(&line) else {
                     break;
                 };
+                if value["event"] == "deleted" {
+                    if let Some(sink) = &sink {
+                        if sink.apply(&value).await.is_err() {
+                            let _ = accept_event(&sender, &json!({"event":"gap"}));
+                            break;
+                        }
+                    } else {
+                        let _ = accept_event(&sender, &json!({"event":"gap"}));
+                    }
+                    let _ = accept_event(
+                        &sender,
+                        &json!({"event":"changed","chat_id":value["chat_id"]}),
+                    );
+                    continue;
+                }
                 if accept_event(&sender, &value).is_err() {
                     break;
                 }
@@ -89,6 +163,15 @@ impl AccountService {
     pub(crate) fn start_live(self: &Arc<Self>, events: Arc<EventHub>) -> tokio::task::JoinSet<()> {
         let mut tasks = tokio::task::JoinSet::new();
         for index in 0..self.slots.len() {
+            if let Some(storage) = &self.storage {
+                let entry = &self.slots[index];
+                *entry.schedule.deletion_sink.lock().unwrap() = Some(DeletionSink {
+                    platform: entry.config.platform.clone(),
+                    account: entry.config.account.clone(),
+                    storage: Arc::clone(storage),
+                    events: Arc::clone(&events),
+                });
+            }
             let service = Arc::clone(self);
             let events = Arc::clone(&events);
             tasks.spawn(async move {
@@ -116,8 +199,8 @@ impl AccountService {
                 let signal = entry.schedule.live.borrow();
                 let snapshot = entry.snapshot.lock().unwrap();
                 json!({"platform":entry.config.platform,"account":entry.config.account,
-                "state":if !snapshot.errors.is_empty() { "degraded" } else { &signal.state },
-                "revision":signal.revision,"refreshing":snapshot.refreshing,
+                "state":if signal.gap || !snapshot.errors.is_empty() { "degraded" } else { &signal.state },
+                "revision":signal.revision,"deletion_gap":signal.gap,"deletion_evidence":if entry.config.platform=="kakao" {"unavailable"} else {"live_only"},"refreshing":snapshot.refreshing,
                 "snapshot_age_seconds":snapshot.updated.map(|t| t.elapsed().as_secs())})
             })
             .collect();
@@ -200,6 +283,50 @@ mod tests {
         assert_eq!(rx.borrow_and_update().revision, 10001);
         accept_event(&tx, &json!({"event":"state","state":"connected"})).unwrap();
         assert!(!rx.has_changed().unwrap());
+    }
+
+    #[tokio::test]
+    async fn deletion_sink_maps_identity_and_commits_before_notification() {
+        let dir = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let storage = Arc::new(
+            StorageActor::start(inboxd_storage::StorageActorConfig::new(
+                dir.path().join("deletions.db"),
+                [44; 32],
+            ))
+            .unwrap(),
+        );
+        storage
+            .call_async(StorageOperation::Migrate, Value::Null)
+            .await
+            .unwrap();
+        let events = Arc::new(EventHub::default());
+        let sink = DeletionSink {
+            platform: "telegram".into(),
+            account: "owner".into(),
+            storage: Arc::clone(&storage),
+            events,
+        };
+        sink.apply(&json!({"event":"deleted","chat_id":"42","message_id":"100"}))
+            .await
+            .unwrap();
+        storage.call_async(StorageOperation::ObserveMessages,json!({"platform":"telegram","account":"owner","observed_at":999,"messages":[{"chat_id":"telegram:chat:42","id":"telegram:message:42:100","author_id":"7","body":"needle","ts":1}]})).await.unwrap();
+        let result = storage
+            .call_async(
+                StorageOperation::SearchAccountMessages,
+                json!({"platform":"telegram","account":"owner","query":"needle"}),
+            )
+            .await
+            .unwrap();
+        assert!(result["messages"].as_array().unwrap().is_empty());
+        assert!(
+            sink.apply(
+                &json!({"event":"deleted","chat_id":"42","message_id":"100","account":"foreign"})
+            )
+            .await
+            .is_err()
+        );
     }
 
     fn provider<'a>(

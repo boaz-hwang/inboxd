@@ -93,6 +93,43 @@ pub(crate) fn observe(connection: &Connection, input: &Value) -> CoreResult<Valu
     Ok(json!({"stored":rows.len(),"changed":changed}))
 }
 
+/// Only daemon-validated authoritative provider deletions reach this operation.
+/// A tombstone for an unseen ID also prevents a delayed history read resurrecting it.
+pub(crate) fn delete(connection: &Connection, input: &Value) -> CoreResult<Value> {
+    let platform = text(input, "platform")?;
+    let account = text(input, "account")?;
+    let chat = text(input, "chat_id")?;
+    let at = input["deleted_at"]
+        .as_f64()
+        .filter(|n| n.is_finite() && *n > 0.)
+        .ok_or_else(|| error("deletion time required"))?;
+    let ids = input["ids"]
+        .as_array()
+        .filter(|v| !v.is_empty() && v.len() <= 1000)
+        .ok_or_else(|| error("invalid deletion IDs"))?;
+    let tx = connection.unchecked_transaction().map_err(sql_error)?;
+    let mut changed = 0;
+    tx.execute(
+        "INSERT OR IGNORE INTO chats(platform,account,chat_id) VALUES(?,?,?)",
+        params![platform, account, chat],
+    )
+    .map_err(sql_error)?;
+    for id in ids {
+        let id = id
+            .as_str()
+            .filter(|s| !s.is_empty() && s.len() <= 16000)
+            .ok_or_else(|| error("invalid deletion ID"))?;
+        changed += tx.execute("INSERT INTO messages(platform,account,chat_id,msg_id,ts,body,deleted_at,revision_kind,revision_value) VALUES(?,?,?,?,?,NULL,?,'string','unversioned') ON CONFLICT(platform,account,chat_id,msg_id) DO UPDATE SET body=NULL,deleted_at=excluded.deleted_at,attachments_json='[]' WHERE messages.deleted_at IS NULL", params![platform,account,chat,id,at,at]).map_err(sql_error)?;
+        tx.execute(
+            "DELETE FROM messages_fts WHERE platform=? AND account=? AND chat_id=? AND msg_id=?",
+            params![platform, account, chat, id],
+        )
+        .map_err(sql_error)?;
+    }
+    tx.commit().map_err(sql_error)?;
+    Ok(json!({"changed":changed}))
+}
+
 pub(crate) fn search(connection: &Connection, input: &Value) -> CoreResult<Value> {
     let platform = text(input, "platform")?;
     let account = text(input, "account")?;
