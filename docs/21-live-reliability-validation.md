@@ -168,3 +168,25 @@ old-message/unopened-room test fixtures and removed metadata-only render changes
 Bun 696 tests passed with all release integration lanes enabled; Rust workspace
 tests, strict Clippy, TypeScript and import-boundary checks passed. Live-provider
 revalidation is recorded separately from these automated results.
+
+## Post-integration real-account check (2026-09-21)
+
+Installed `6ba030f`; a single controlled daemon restart completed successfully.
+The earlier failed restart remains an unresolved historical observation, not a
+claim that its original cause was fixed.
+
+A new Slack self-DM probe was created, edited and deleted through the provider API.
+The verifier issued only local search requests, with no explicit history/remote
+search calls. Automatic daemon observation produced:
+
+| Step | Local index result | Time to observed result |
+| --- | --- | --- |
+| New message | Exactly one matching message | 8.0 seconds |
+| Edit | Exactly one matching message with edited body | 2.0 seconds |
+| Delete | Zero matching messages | 1.0 seconds |
+
+This revalidates the new live-persistence and authoritative-deletion path for
+Slack. It does not retroactively repair earlier messages whose deletion evidence
+was missed. Telegram/Kakao manual new-message probes have been requested for
+local-only verification; those results remain pending. The prior accepted 9h 27m
+observation predates this build, and P0 overall is not declared passed.
