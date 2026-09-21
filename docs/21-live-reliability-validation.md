@@ -200,3 +200,12 @@ match from September 19; timestamps distinguish it from the new probe, so the
 two hits are not evidence of duplication. Both responses reported `source: local`.
 The verifier made no explicit remote-history or remote-search calls. Manual edits
 to `테스트 수정` have been requested; automatic edit/deletion checks remain pending.
+
+### Telegram/Kakao automatic edit check
+
+After the owner edited both probes, local-only search at 21:46 KST matched each
+probe by its original send timestamp. Each platform returned exactly one matching
+message with body `테스트 수정`, and zero matching messages retaining `테스트`.
+No explicit remote-history or remote-search call was made. Telegram deletion of
+that exact probe has been requested next. Kakao authoritative deletion remains
+unavailable and is not claimed validated by its successful edit check.
