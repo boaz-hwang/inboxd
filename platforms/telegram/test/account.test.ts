@@ -77,6 +77,10 @@ test("account updates cover new, edited and deleted messages without forwarding 
   listener!({ "@type": "updateUserStatus" });
   listener!({ "@type": "updateAuthorizationState", authorization_state: { "@type": "authorizationStateClosed" } });
   expect(events).toEqual([{ event: "state", state: "disconnected" }, { event: "state", state: "connected" }, { event: "changed" }, { event: "changed" }, { event: "changed" }, { event: "state", state: "disconnected" }]);
+  listener!({ "@type": "updateNewMessage", message: { chat_id: 42, id: 100, content: { text: "private" } } });
+  expect(events.at(-1)).toEqual({ event: "changed", chat_id: "42", message_id: "100" });
+  listener!({ "@type": "updateMessageContent", chat_id: 42, message_id: 10, new_content: { text: "private edit" } });
+  expect(events.at(-1)).toEqual({ event: "changed", chat_id: "42", message_id: "10" });
   stop();
   expect(listener).toBeUndefined();
 });

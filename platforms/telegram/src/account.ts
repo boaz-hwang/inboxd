@@ -142,7 +142,8 @@ export function createTelegramAdapter(port: TdlibUserClientPort): AccountAdapter
           } else {
             const m = update.message as Record<string, unknown> | undefined;
             const chat = update.chat_id ?? m?.chat_id;
-            emit({ event: "changed", ...(chat !== undefined ? { chat_id: String(chat) } : {}) });
+            const id = update.message_id ?? m?.id;
+            emit({ event: "changed", ...(chat !== undefined ? { chat_id: String(chat), ...(id !== undefined ? { message_id: String(id) } : {}) } : {}) });
           }
         }
       });

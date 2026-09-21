@@ -10,7 +10,7 @@ export interface AccountAdapter {
 }
 
 export type AccountLiveEvent =
-  | { event: "changed"; chat_id?: string }
+  | { event: "changed"; chat_id?: string; message_id?: string }
   | { event: "deleted"; chat_id: string; message_id: string }
   | { event: "gap" }
   | { event: "state"; state: "connected" | "disconnected" | "unsupported" };

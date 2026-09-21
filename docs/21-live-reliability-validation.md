@@ -115,8 +115,12 @@ The owner selected **1-B / 2-A**:
   instruction. Where evidence is unavailable, expose the uncertainty rather than
   claim deletion synchronization succeeded.
 
-This records the agreed implementation scope; targeted live reconciliation and
-its persistence/deletion path are not implemented by this documentation change.
+The daemon now implements this scope with bounded recent-room sweeps, targeted
+message reads, persistence-before-notification, and authoritative deletion
+tombstones. Offline tests cover unopened rooms, old edit targets, restart
+persistence, coalescing, in-flight hints, failed reads/writes, and missed-push
+recovery. This implementation has not been revalidated against live providers;
+the historical observation above predates it. See [live synchronization](19-live-synchronization.md).
 Provider contract normalization and core separation remain deferred.
 
 ## Content-free observation
@@ -156,3 +160,11 @@ identifiers and probe metadata stay there and must never be committed.
 Validation of the observer: actual-daemon smoke run, TypeScript checking and
 repository import-boundary checks. This instrumentation does not replace the
 provider scenario checks above.
+
+
+Integration review (2026-09-21): retained directory-failure hint recovery, bounded
+queues, fair room sweeps and their failure-path tests. Consolidated duplicate
+old-message/unopened-room test fixtures and removed metadata-only render changes.
+Bun 696 tests passed with all release integration lanes enabled; Rust workspace
+tests, strict Clippy, TypeScript and import-boundary checks passed. Live-provider
+revalidation is recorded separately from these automated results.

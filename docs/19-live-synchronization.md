@@ -1,8 +1,9 @@
 # Account live synchronization
 
 The daemon keeps configured accounts connected even without a TUI. It receives
-provider invalidations, reconciles account snapshots, and publishes
-`account.changed`. TUI, CLI and MCP share the same daemon state; any protocol
+provider hints, reconciles affected messages, persists observations in the shared
+message/search index, and publishes `message.upserted` after commit. Directory
+refreshes separately publish `account.changed`. TUI, CLI and MCP share the same daemon state; any protocol
 client can subscribe to that event and inspect `sync.status`.
 
 ```mermaid
@@ -10,10 +11,13 @@ flowchart LR
   P[Slack RTM / Telegram TDLib / Kakao LOCO] --> A[TS adapter: existing account session]
   A -->|bounded content-free events on stderr| R[Rust account supervisor]
   R -->|coalesced reads through existing scheduler| A
-  R --> C[Invalidate caches and replace directory snapshot]
-  C --> E[account.changed via UDS EventHub]
-  E --> T[TUI: reload directory and current chat]
-  E --> M[CLI / MCP protocol clients]
+  R --> C[Refresh directory and select affected chats]
+  C --> H[Read recent or message-targeted provider page]
+  H --> S[Commit messages and search index]
+  S --> E[message.upserted via UDS EventHub]
+  C --> D[account.changed]
+  E --> T[TUI / CLI / MCP]
+  D --> T
 ```
 
 ## Ownership and transport
@@ -24,11 +28,13 @@ flowchart LR
   No second Telegram database or Kakao device login is opened for receiving.
 - Worker stdout remains serialized request/response JSONL. With
   `INBOXD_ACCOUNT_LIVE=1`, stderr is a separate JSONL invalidation channel:
-  `{"event":"changed"}` or
-  `{"event":"state","state":"connected|disconnected|unsupported"}`.
+  `{"event":"changed"}` (optionally `chat_id` and `message_id`),
+  `{"event":"deleted","chat_id":"…","message_id":"…"}`, `{"event":"gap"}`,
+  or `{"event":"state","state":"connected|disconnected|unsupported"}`.
   It carries no credentials, message bodies or provider-chosen account identity.
 - The emitter coalesces bursts for 100 ms and retains at most one dirty bit and
-  the latest state under pipe backpressure. Rust reads continuously, including
+  the latest state plus at most 1,024 distinct targeted hints under pipe backpressure.
+  Overflow reports an evidence gap instead of silently claiming complete delivery. Rust reads continuously, including
   while stdout is idle or busy with a send. It validates exact fields, limits
   frames to 1 KiB, and coalesces them in a watch channel.
 - Rust owns one reconciliation task per configured account, its scheduling,
@@ -60,20 +66,38 @@ providers must not be represented as a healthy live account.
 
 ## Bounds and limitations
 
-This implementation reconciles the account directory per invalidation rather than
-patching rows from raw provider payloads. Large accounts may need multiple API
-calls and provider rate limits can delay display. The 750 ms window is not an
-end-to-end latency guarantee. Future per-chat reconciliation can reduce that cost
-without moving policy into adapters.
+Targeted pushes reconcile the named chat and, when supplied, the message ID
+(including edits outside the recent page). Startup, reconnect and periodic sweeps
+observe the recent page of **every accessible room**, including unopened rooms.
+Directory changes also enqueue affected rooms. Each pass reads at most eight
+pages through the existing account scheduler; pending batches yield for one
+second plus the coalescing window. Half the batch is reserved for room sweeps so
+message-specific bursts cannot indefinitely starve quiet rooms. Pending work
+survives provider/storage failures and retries with the existing bounded backoff.
+Pushes arriving during a read remain pending for a subsequent pass. Duplicate
+observations do not publish a new message event.
+
+These are bounded recent/context reads (provider page size, capped at 80 returned
+messages), not a full-history crawl. Continuation cursors are not automatically
+traversed. Large bursts, long outages, unavailable old context and provider limits
+can leave unobserved history; partial observations never assert coverage.
+Directory refresh remains account-wide and may be expensive on large accounts.
+The 750 ms coalescing window is not an end-to-end latency guarantee.
+
+`sync.status.accounts` exposes `pending_observation_rooms` and
+`observation_failed`; provider or persistence failure degrades receiving status.
+Authoritative Slack/Telegram deletion evidence is committed as a tombstone before
+notification. Missing messages never imply deletion; deletion evidence gaps and
+Kakao's unavailable authoritative deletion evidence remain explicit.
 
 Kakao's patched `getChats({all:true})` traverses the server directory from zero
 instead of returning the login snapshot, including after a fresh login. This is
 necessary for new rooms and current previews to become visible during a session.
 
-Live directory reconciliation alone does not populate a full-history index.
-Explicit account history/search reads now persist returned messages through the
-[shared search foundation](20-search-foundation.md). Unopened history and offline
-edits/deletions are not guaranteed collected. `sync.status` separates receiving
+Live observation and explicit account history/search reads share the
+[search foundation](20-search-foundation.md). Recent unopened messages are collected
+automatically; full history and offline edits/deletions outside observed pages
+are not guaranteed collected. `sync.status` separates receiving
 state from read/persistence/backfill work status.
 
 Slack RTM availability depends on the existing personal session. Official Slack

@@ -73,9 +73,11 @@ cursor and coverage semantics. `account.search` remains compatible; its returned
 observations also persist. Browsing via `account.messages` persists returned
 pages, with commit notifications only for changed message content.
 
-This stores messages actually returned by explicit reads, not every message from
-internal directory previews. It does not automatically backfill unopened rooms,
-collect all history, or infer deletions from missing search hits. Provider search
+This stores messages actually returned by explicit reads and daemon live
+reconciliation, not messages inferred from directory previews. Live observation
+automatically reads recent pages in unopened rooms and message-specific push
+targets; it does not collect all history or infer deletions from missing search
+hits. See [live synchronization](19-live-synchronization.md) for bounds and recovery. Provider search
 syntax/ranking may differ from local substring matching. Coverage remains unknown
 for partial observations and search results, including zero-hit pages.
 

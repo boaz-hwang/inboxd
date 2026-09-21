@@ -38,6 +38,19 @@ pub(crate) struct EventHub {
 }
 
 impl EventHub {
+    #[cfg(test)]
+    pub(crate) fn test_subscription(&self, topic: &str) -> mpsc::Receiver<Value> {
+        let (tx, rx) = mpsc::channel(128);
+        self.register(
+            uuid::Uuid::new_v4().to_string(),
+            Arc::new(Mutex::new(BTreeSet::from([topic.to_owned()]))),
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Notify::new()),
+        );
+        rx
+    }
+
     fn register(
         &self,
         id: String,

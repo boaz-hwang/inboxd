@@ -46,3 +46,13 @@ test("deletion identities survive coalescing and overflow reports an evidence ga
   expect(lines.some(v => v.event === "gap")).toBe(true);
   emitter.close();
 });
+
+test("targeted message hints survive coalescing without leaking content", async () => {
+  const lines: unknown[] = [];
+  const emitter = liveEmitter(line => { lines.push(JSON.parse(line)); return true; }, () => {});
+  for (let i = 0; i < 1000; i++) emitter.emit({ event: "changed", chat_id: "room", message_id: "old" });
+  emitter.emit({ event: "changed", chat_id: "room", message_id: "new" });
+  await Bun.sleep(120);
+  expect(lines).toEqual([{ event: "changed", chat_id: "room", message_id: "old" }, { event: "changed", chat_id: "room", message_id: "new" }]);
+  emitter.close();
+});

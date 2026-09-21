@@ -56,6 +56,10 @@ test("RTM lifecycle invalidates on edits/deletes and tears down without HTTP pol
   expect(events).toEqual([{ event: "state", state: "connected" }, { event: "changed" }, { event: "changed" }, { event: "state", state: "disconnected" }, { event: "state", state: "connected" }]);
   handlers.get("slack_event")!({ type: "message", subtype: "message_deleted", channel: "self-room", deleted_ts: "42.001", previous_message: {text:"private"} });
   expect(events.at(-1)).toEqual({ event: "deleted", chat_id: "self-room", message_id: "42.001" });
+  handlers.get("slack_event")!({ type: "message", channel: "self-room", ts: "43.001", text: "private" });
+  expect(events.at(-1)).toEqual({ event: "changed", chat_id: "self-room", message_id: "43.001" });
+  handlers.get("slack_event")!({ type: "message", subtype: "message_changed", channel: "self-room", ts: "50.001", message: { ts: "12.001", text: "private edit" } });
+  expect(events.at(-1)).toEqual({ event: "changed", chat_id: "self-room", message_id: "12.001" });
   expect(starts).toBe(1);
   stop();
   expect(stops).toBe(1);

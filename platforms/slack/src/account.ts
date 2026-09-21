@@ -58,7 +58,9 @@ export function createSlackAccount(config: {
           && typeof value.channel === "string" && typeof value.deleted_ts === "string") {
           emit({ event: "deleted", chat_id: value.channel, message_id: value.deleted_ts });
         } else if (!["user_typing", "presence_change", "pong"].includes(event.type)) {
-          emit({ event: "changed", ...(typeof value.channel === "string" ? { chat_id: value.channel } : {}) });
+          const message = value.message as Record<string, unknown> | undefined;
+          const id = message?.ts ?? value.ts;
+          emit({ event: "changed", ...(typeof value.channel === "string" ? { chat_id: value.channel, ...(typeof id === "string" ? { message_id: id } : {}) } : {}) });
         }
       });
       stopListening = () => listener.stop();
