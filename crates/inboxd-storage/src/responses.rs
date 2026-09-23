@@ -8,7 +8,7 @@ use std::{
 };
 use uuid::Uuid;
 
-const PROMPT_VERSION: &str = "reply-v1";
+const PROMPT_VERSION: &str = "reply-v2";
 
 fn fail(message: impl Into<String>) -> CoreError {
     CoreError::new("ResponseStorageError", message)
@@ -273,7 +273,13 @@ pub(crate) fn prepare(connection: &Connection, scope: &Value) -> CoreResult<Valu
     if own.is_none() {
         return Ok(json!({"status":"abstained","reason":"self_identity_unavailable"}));
     }
-    if latest_human_is_self(connection, platform, account, chat_id, own.as_deref().unwrap())? {
+    if latest_human_is_self(
+        connection,
+        platform,
+        account,
+        chat_id,
+        own.as_deref().unwrap(),
+    )? {
         invalidate_after_self(connection, platform, account, chat_id)?;
         return Ok(json!({"status":"abstained","reason":"no_reply_target"}));
     }
@@ -285,7 +291,27 @@ pub(crate) fn prepare(connection: &Connection, scope: &Value) -> CoreResult<Valu
         )
         .map_err(sql)?
         .unwrap_or(0.0);
-    let context: Vec<Value> = rows.iter().map(|(id,author,ts,body,parent)| json!({
+    // Resolve the latest explicit reply chain before inference, within the same
+    // account/chat only. Keep unread accounting on the original recent window.
+    let mut context_rows = rows.clone();
+    let mut parent = rows.last().and_then(|row| row.4.clone());
+    for _ in 0..8 {
+        let Some(id) = parent.take() else { break };
+        if context_rows.iter().any(|row| row.0 == id) {
+            break;
+        }
+        let found = connection.query_row(
+            "SELECT msg_id,author_id,ts,body,parent_msg_id FROM messages WHERE platform=? AND account=? AND chat_id=? AND msg_id=? AND deleted_at IS NULL",
+            params![platform, account, chat_id, id], |r| Ok((
+                r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?,
+                r.get::<_, f64>(2)?, r.get::<_, String>(3)?, r.get::<_, Option<String>>(4)?
+            ))).optional().map_err(sql)?;
+        let Some(found) = found else { break };
+        parent = found.4.clone();
+        context_rows.push(found);
+    }
+    context_rows.sort_by(|a, b| a.2.total_cmp(&b.2).then_with(|| a.0.cmp(&b.0)));
+    let context: Vec<Value> = context_rows.iter().map(|(id,author,ts,body,parent)| json!({
         "message_id":id,"author_role":match (own.as_deref(),author.as_deref()) { (Some(a),Some(b)) if a==b=>"self", (Some(_),Some(_))=>"other", _=>"unknown" },
         "author_id":author,"body":body,"ts":ts,"reply_to":parent
     })).collect();
@@ -401,7 +427,7 @@ pub(crate) fn prepare(connection: &Connection, scope: &Value) -> CoreResult<Valu
         status
     };
     connection.execute("UPDATE reply_suggestions SET status='stale' WHERE platform=? AND account=? AND chat_id=? AND context_version<>? AND status IN ('queued','generating','ready')",params![platform,account,chat_id,context_version]).map_err(sql)?;
-    connection.execute("INSERT OR IGNORE INTO reply_suggestions(suggestion_id,platform,account,chat_id,context_version,source_json,context_json,status,prompt_version,created_at) VALUES(?,?,?,?,?,?,?,?,'reply-v1',?)",
+    connection.execute("INSERT OR IGNORE INTO reply_suggestions(suggestion_id,platform,account,chat_id,context_version,source_json,context_json,status,prompt_version,created_at) VALUES(?,?,?,?,?,?,?,?,'reply-v2',?)",
         params![suggestion_id,platform,account,chat_id,context_version,source_json,context_json,status,now()?]).map_err(sql)?;
     Ok(
         json!({"status":status,"suggestion_id":suggestion_id,"generation_epoch":generation_epoch,"chat":scope,"context_version":context_version,"source_message_ids":sources,"context":context,"prompt_version":PROMPT_VERSION,"unread":unread(connection,&scope)?,"latest_incoming_ts":latest_incoming_ts}),
@@ -841,13 +867,25 @@ fn finish(connection: &Connection, input: &Value) -> CoreResult<Value> {
     let tx = connection.unchecked_transaction().map_err(sql)?;
     let suggestion_row:(String,String,String,String,String)=tx.query_row("SELECT platform,account,chat_id,context_version,context_json FROM reply_suggestions WHERE suggestion_id=?",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).map_err(sql)?;
     if let Some(own) = self_id(&tx, &suggestion_row.0, &suggestion_row.1)? {
-        if latest_human_is_self(&tx, &suggestion_row.0, &suggestion_row.1, &suggestion_row.2, &own)? {
+        if latest_human_is_self(
+            &tx,
+            &suggestion_row.0,
+            &suggestion_row.1,
+            &suggestion_row.2,
+            &own,
+        )? {
             invalidate_after_self(&tx, &suggestion_row.0, &suggestion_row.1, &suggestion_row.2)?;
             tx.commit().map_err(sql)?;
             return suggestion(connection, id);
         }
     }
-    if context_has_new_latest_message(&tx, &suggestion_row.0, &suggestion_row.1, &suggestion_row.2, &suggestion_row.4)? {
+    if context_has_new_latest_message(
+        &tx,
+        &suggestion_row.0,
+        &suggestion_row.1,
+        &suggestion_row.2,
+        &suggestion_row.4,
+    )? {
         invalidate_changed_context(&tx, id)?;
         tx.commit().map_err(sql)?;
         return suggestion(connection, id);
@@ -1461,6 +1499,55 @@ mod tests {
     }
 
     #[test]
+    fn preflight_context_resolves_old_reply_without_crossing_chat_scope() {
+        let connection = database();
+        for i in 0..45 {
+            message(&connection, &format!("m{i}"), i as f64);
+        }
+        connection
+            .execute(
+                "UPDATE messages SET parent_msg_id='m0' WHERE msg_id='m44'",
+                [],
+            )
+            .unwrap();
+        let prepared = prepare(&connection, &scope()).unwrap();
+        let claimed = claim(
+            &connection,
+            &json!({"suggestion_id":prepared["suggestion_id"]}),
+        )
+        .unwrap();
+        let context = claimed["context"].as_array().unwrap();
+        assert_eq!(context.len(), 41);
+        assert_eq!(context.first().unwrap()["message_id"], "m0");
+        assert_eq!(context.last().unwrap()["message_id"], "m44");
+
+        connection
+            .execute(
+                "UPDATE messages SET parent_msg_id='foreign' WHERE msg_id='m44'",
+                [],
+            )
+            .unwrap();
+        connection.execute("INSERT INTO messages VALUES('p','a','elsewhere','foreign','other',0,'private',NULL,NULL)", []).unwrap();
+        let prepared = prepare(&connection, &scope()).unwrap();
+        let claimed = claim(
+            &connection,
+            &json!({"suggestion_id":prepared["suggestion_id"]}),
+        )
+        .unwrap();
+        assert!(
+            !claimed["context"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["message_id"] == "foreign")
+        );
+        assert_eq!(
+            claimed["context"].as_array().unwrap().last().unwrap()["reply_to"],
+            "foreign"
+        );
+    }
+
+    #[test]
     fn telegram_external_read_respects_prefixed_ids_and_new_arrivals() {
         let connection = database();
         connection.execute("INSERT INTO account_self VALUES('telegram','a','{\"status\":\"known\",\"self_id\":\"me\"}',1)",[]).unwrap();
@@ -1537,9 +1624,17 @@ mod tests {
         let id = first["suggestion_id"].as_str().unwrap();
         let claim_value = claim(&connection, &json!({"suggestion_id":id})).unwrap();
         assert!(!claim_value.is_null());
-        assert_eq!(finish(&connection, &generation_payload(id)).unwrap()["status"], "ready");
+        assert_eq!(
+            finish(&connection, &generation_payload(id)).unwrap()["status"],
+            "ready"
+        );
 
-        connection.execute("INSERT INTO messages VALUES('p','a','c','m2','me',2,'sent',NULL,NULL)",[]).unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages VALUES('p','a','c','m2','me',2,'sent',NULL,NULL)",
+                [],
+            )
+            .unwrap();
         let prepared = prepare(&connection, &scope()).unwrap();
         assert_eq!(prepared["reason"], "no_reply_target");
         let previous = suggestion(&connection, id).unwrap();
@@ -1548,12 +1643,23 @@ mod tests {
         assert_eq!(previous["error"], "no_reply_target");
 
         // A system message must not become an incoming reply target.
-        connection.execute("INSERT INTO messages VALUES('p','a','c','m3',NULL,3,'system',NULL,NULL)",[]).unwrap();
-        assert_eq!(prepare(&connection, &scope()).unwrap()["reason"], "no_reply_target");
+        connection
+            .execute(
+                "INSERT INTO messages VALUES('p','a','c','m3',NULL,3,'system',NULL,NULL)",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            prepare(&connection, &scope()).unwrap()["reason"],
+            "no_reply_target"
+        );
         message(&connection, "m4", 4.0);
         let next = prepare(&connection, &scope()).unwrap();
         assert_eq!(next["status"], "queued");
-        assert_eq!(next["context"].as_array().unwrap()[1]["author_role"], "self");
+        assert_eq!(
+            next["context"].as_array().unwrap()[1]["author_role"],
+            "self"
+        );
     }
 
     #[test]
@@ -1562,15 +1668,36 @@ mod tests {
         message(&connection, "m1", 1.0);
         let first = prepare(&connection, &scope()).unwrap();
         let id = first["suggestion_id"].as_str().unwrap();
-        connection.execute("INSERT INTO messages VALUES('p','a','c','m2','me',2,'sent',NULL,NULL)",[]).unwrap();
-        assert!(claim(&connection, &json!({"suggestion_id":id})).unwrap().is_null());
-        assert_eq!(suggestion(&connection, id).unwrap()["error"], "no_reply_target");
+        connection
+            .execute(
+                "INSERT INTO messages VALUES('p','a','c','m2','me',2,'sent',NULL,NULL)",
+                [],
+            )
+            .unwrap();
+        assert!(
+            claim(&connection, &json!({"suggestion_id":id}))
+                .unwrap()
+                .is_null()
+        );
+        assert_eq!(
+            suggestion(&connection, id).unwrap()["error"],
+            "no_reply_target"
+        );
 
         message(&connection, "m3", 3.0);
         let second = prepare(&connection, &scope()).unwrap();
         let second_id = second["suggestion_id"].as_str().unwrap();
-        assert!(!claim(&connection, &json!({"suggestion_id":second_id})).unwrap().is_null());
-        connection.execute("INSERT INTO messages VALUES('p','a','c','m4','me',4,'sent',NULL,NULL)",[]).unwrap();
+        assert!(
+            !claim(&connection, &json!({"suggestion_id":second_id}))
+                .unwrap()
+                .is_null()
+        );
+        connection
+            .execute(
+                "INSERT INTO messages VALUES('p','a','c','m4','me',4,'sent',NULL,NULL)",
+                [],
+            )
+            .unwrap();
         let late = finish(&connection, &generation_payload(second_id)).unwrap();
         assert_eq!(late["status"], "abstained");
         assert_eq!(late["error"], "no_reply_target");
@@ -1581,15 +1708,32 @@ mod tests {
     fn open_and_get_expose_no_reply_target_without_a_queued_suggestion() {
         let connection = database();
         message(&connection, "m1", 1.0);
-        connection.execute("INSERT INTO messages VALUES('p','a','c','m2','me',2,'sent',NULL,NULL)",[]).unwrap();
-        let opened = execute(&connection, "response.open", &json!({"chat":scope(),"runtime_version":"test"})).unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages VALUES('p','a','c','m2','me',2,'sent',NULL,NULL)",
+                [],
+            )
+            .unwrap();
+        let opened = execute(
+            &connection,
+            "response.open",
+            &json!({"chat":scope(),"runtime_version":"test"}),
+        )
+        .unwrap();
         assert_eq!(opened["status"], "abstained");
         assert_eq!(opened["error"], "no_reply_target");
         assert_eq!(opened["suggestion"], Value::Null);
-        let fetched = execute(&connection, "response.get", &json!({"response_session_id":opened["response_session_id"]})).unwrap();
+        let fetched = execute(
+            &connection,
+            "response.get",
+            &json!({"response_session_id":opened["response_session_id"]}),
+        )
+        .unwrap();
         assert_eq!(fetched["error"], "no_reply_target");
         assert_eq!(fetched["suggestion"], Value::Null);
-        let count: i64 = connection.query_row("SELECT count(*) FROM reply_suggestions", [], |r| r.get(0)).unwrap();
+        let count: i64 = connection
+            .query_row("SELECT count(*) FROM reply_suggestions", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(count, 0);
     }
 
@@ -1599,21 +1743,42 @@ mod tests {
         message(&connection, "m1", 1.0);
         let prepared = prepare(&connection, &scope()).unwrap();
         let suggestion_id = prepared["suggestion_id"].as_str().unwrap();
-        assert!(!claim(&connection, &json!({"suggestion_id":suggestion_id})).unwrap().is_null());
+        assert!(
+            !claim(&connection, &json!({"suggestion_id":suggestion_id}))
+                .unwrap()
+                .is_null()
+        );
         let mut failed = generation_payload(suggestion_id);
         failed["status"] = json!("failed");
         failed["text"] = Value::Null;
         failed["error"] = json!("model_failure");
         assert_eq!(finish(&connection, &failed).unwrap()["status"], "failed");
-        let opened = open(&connection, &json!({"chat":scope(),"runtime_version":"legacy"})).unwrap();
+        let opened = open(
+            &connection,
+            &json!({"chat":scope(),"runtime_version":"legacy"}),
+        )
+        .unwrap();
         assert_eq!(opened["status"], "failed");
 
-        connection.execute("INSERT INTO messages VALUES('p','a','c','m2','me',2,'sent',NULL,NULL)",[]).unwrap();
-        let fetched = execute(&connection, "response.get", &json!({"response_session_id":opened["response_session_id"]})).unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages VALUES('p','a','c','m2','me',2,'sent',NULL,NULL)",
+                [],
+            )
+            .unwrap();
+        let fetched = execute(
+            &connection,
+            "response.get",
+            &json!({"response_session_id":opened["response_session_id"]}),
+        )
+        .unwrap();
         assert_eq!(fetched["status"], "abstained");
         assert_eq!(fetched["error"], "no_reply_target");
         assert_eq!(fetched["suggestion"]["status"], "failed");
-        assert_eq!(suggestion(&connection, suggestion_id).unwrap()["error"], "model_failure");
+        assert_eq!(
+            suggestion(&connection, suggestion_id).unwrap()["error"],
+            "model_failure"
+        );
     }
 
     #[test]
@@ -1622,8 +1787,17 @@ mod tests {
         message(&connection, "m1", 1.0);
         let prepared = prepare(&connection, &scope()).unwrap();
         let old_id = prepared["suggestion_id"].as_str().unwrap();
-        assert!(!claim(&connection, &json!({"suggestion_id":old_id})).unwrap().is_null());
-        connection.execute("INSERT INTO messages VALUES('p','a','c','m2','me',2,'sent',NULL,NULL)",[]).unwrap();
+        assert!(
+            !claim(&connection, &json!({"suggestion_id":old_id}))
+                .unwrap()
+                .is_null()
+        );
+        connection
+            .execute(
+                "INSERT INTO messages VALUES('p','a','c','m2','me',2,'sent',NULL,NULL)",
+                [],
+            )
+            .unwrap();
         message(&connection, "m3", 3.0);
         let late = finish(&connection, &generation_payload(old_id)).unwrap();
         assert_eq!(late["status"], "stale");
@@ -1636,9 +1810,20 @@ mod tests {
     fn next_skips_room_with_old_unread_but_latest_self_message() {
         let connection = database();
         message(&connection, "m1", 1.0);
-        connection.execute("INSERT INTO response_unseen VALUES('p','a','c','m1',1)",[]).unwrap();
-        connection.execute("INSERT INTO messages VALUES('p','a','c','m2','me',2,'sent',NULL,NULL)",[]).unwrap();
-        let opened = open(&connection, &json!({"chat":scope(),"runtime_version":"test"})).unwrap();
+        connection
+            .execute("INSERT INTO response_unseen VALUES('p','a','c','m1',1)", [])
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages VALUES('p','a','c','m2','me',2,'sent',NULL,NULL)",
+                [],
+            )
+            .unwrap();
+        let opened = open(
+            &connection,
+            &json!({"chat":scope(),"runtime_version":"test"}),
+        )
+        .unwrap();
         let next_room = next(&connection, &json!({"response_session_id":opened["response_session_id"],"platform":"p","account":"a","runtime_version":"test","accessible_chats":[scope()]})).unwrap();
         assert_eq!(next_room["status"], "done");
         assert_eq!(next_room["chat"], Value::Null);
@@ -2000,7 +2185,7 @@ mod tests {
     }
 
     fn generating_suggestion(connection: &Connection, id: &str, created_at: f64) {
-        connection.execute("INSERT INTO reply_suggestions(suggestion_id,platform,account,chat_id,context_version,source_json,context_json,status,prompt_version,created_at) VALUES(?,'p','a','c',?,'[\"m1\"]','[{\"message_id\":\"m1\"}]','generating','reply-v1',?)",params![id,id,created_at]).unwrap();
+        connection.execute("INSERT INTO reply_suggestions(suggestion_id,platform,account,chat_id,context_version,source_json,context_json,status,prompt_version,created_at) VALUES(?,'p','a','c',?,'[\"m1\"]','[{\"message_id\":\"m1\"}]','generating','reply-v2',?)",params![id,id,created_at]).unwrap();
     }
 
     fn generation_payload(id: &str) -> Value {
@@ -2010,7 +2195,7 @@ mod tests {
             "status":"ready",
             "text":"답변",
             "model_version":"local-test",
-            "prompt_version":"reply-v1",
+            "prompt_version":"reply-v2",
             "personal_adapter_version":"adapter-v1",
             "model_input":[{"role":"user","content":"정확한 입력"}],
             "check_input":{"candidate":"답변"},
@@ -2212,7 +2397,7 @@ mod tests {
             "status":"failed",
             "text":null,
             "error":"invalid_policy_output",
-            "prompt_version":"reply-v1",
+            "prompt_version":"reply-v2",
             "model_version":"local-test",
             "state":{"intent":"unknown","confidence":0.1},
             "model_input":[{"role":"system","content":"system"},{"role":"user","content":"input"}],

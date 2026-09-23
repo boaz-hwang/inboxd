@@ -5,6 +5,11 @@ the product build does not package them. The local evaluator accepts their paths
 explicitly and records source/model/fixture SHA-256 values in each JSONL header.
 No candidate below met the accuracy gate for installation.
 
+`worker-legacy.py` is the frozen pre-v2 production baseline for offline comparison.
+Production now uses preflight + one generation in `../worker.py`, without a checker.
+Run historical checker evaluations with `--worker` pointing to `worker-legacy.py`;
+they do not measure the current production pipeline.
+
 | Candidate | Change from the existing checker | Observed result |
 | --- | --- | --- |
 | Baseline | Production prompt and non-thinking Qwen3.5-9B | [20 cases: 16/20 verdict and reason](../evaluation-results/accuracy-baseline-20260923.jsonl); [new role holdout: 3/6 verdict, 2/6 reason](../evaluation-results/accuracy-baseline-holdout-v2-20260923.jsonl) |

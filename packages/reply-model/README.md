@@ -1,14 +1,23 @@
 # Local reply pipeline
 
-The daemon queues one current context per chat. Persistent MLX workers produce
-typed context decisions; Rust enforces source permissions, retrieval limits and
-message versions. Only the user can accept and send a draft in the TUI.
+The daemon queues one current context per chat. The production path is:
 
-The current decision model is a **local LLM baseline**, not a trained multi-head
-CIM. Its categorical selections are recorded separately from calibrated scores.
-The first retrieval adapter searches already-collected history in the current
-chat. Email, files, calendars and other conversations are not connected sources.
-Missing facts or user intent lead to clarification or abstention.
+1. Prepare the latest 40 messages and resolve the latest message's explicit reply
+   ancestors (at most eight), only within the same account and chat.
+2. Preflight the snapshot: identities, chronology, self/other roles, explicit reply
+   target availability and truncation. Missing target context or unknown target
+   authors produce no suggestion before inference. This checks available inputs;
+   it does not claim to prove semantic sufficiency or unseen external facts.
+3. Call the local model once with role-aligned turns, self style examples, reply
+   metadata and explicit unavailable sources (calendar, URLs, attachments, offline
+   discussions and unexpressed decisions). Return a short reply or abstain.
+4. Check output format in code; expose a draft for user acceptance. There is no
+   route model, query planning, reasoning loop or post-generation LLM checker.
+
+`ready` means a candidate was produced, **not** independently verified grounding.
+Empty output / `<ABSTAIN>` means no suggestion; runtime and malformed-output
+failures remain errors. The user alone accepts, edits and sends. Existing context
+version fences, queue order and protection for manually typed drafts remain.
 
 ## Runtime
 
@@ -62,12 +71,12 @@ drafts are not rejection labels. A user's edit is not automatically a routing
 error. Use `evaluation.py` with reviewed cases to compare policy versions; keep
 held-out cases separate from prompt development and model training.
 
-A generation attempt drafts once and checks once. A rejected draft or runtime
-error remains failed with its diagnostic trajectory; opening the room again does
-not retry the same context. A changed conversation or model runtime creates a new
-version. The decision and grounding stages remain enabled. The summary listing
-omits conversation/model inputs so multiple failure reasons can be inspected
-without exceeding the owner protocol's response size limit.
+A generation attempt makes at most one model call. Reopening an unchanged
+conversation does not retry either an abstention or an error. A conversation or
+runtime change creates a new version. `reply-v2` / `single-generation-v2` separates
+new attempts from historical decision-graph results. Trajectories record the exact
+generation input (including preflight), draft and user actions. Historical route
+and checker traces remain readable. Summary listing omits large inputs.
 
 ## Personal adapter experiments
 
@@ -78,9 +87,7 @@ activate its output automatically. The registry is
 `~/.inboxd/reply-model/active-adapter.json`.
 
 The runtime loads an activated adapter only when its base-model identity,
-completed training manifest and weight digest match. It uses the base model for
-context decisions and grounding checks. An adapter changes phrasing, never
-source permissions or send authority.
+completed training manifest and weight digest match. It does not grant additional context sources or send authority.
 
 Message snapshots and trajectories live in SQLCipher. Experimental adapter and
 training artifacts currently use owner-only filesystem permissions; they are
@@ -96,3 +103,10 @@ python3 -m unittest discover -s packages/reply-model/test
 
 Synthetic model outputs in unit tests test state transitions only. Production
 has no fixed-text recommendation fallback.
+
+## Historical comparison
+
+`evaluation-candidates/worker-legacy.py` preserves the pre-v2 worker for offline
+comparisons. Its checker and decision modules and legacy contract tests are
+evaluation-only; the product packages only the current worker and personalization
+helper. Existing checker evaluation results describe the old pipeline.

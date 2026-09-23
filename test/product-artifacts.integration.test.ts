@@ -33,7 +33,7 @@ const executableNames = [
   "inboxd-kakao-local-worker",
   "inboxd-kakao-message-worker",
 ] as const;
-const replyRuntimeNames = ["inboxd-reply-worker.py", "context_intelligence.py", "policy.py", "evaluation.py", "personalization.py"];
+const replyRuntimeNames = ["inboxd-reply-worker.py", "personalization.py"];
 const expectedSources = new Map<string, string>([
   ["inboxd-daemon", "crates/inboxd-daemon/src/main.rs"],
   ["inboxd-keychain", "crates/inboxd-keychain/src/main.rs"],

@@ -278,3 +278,12 @@ See docs/15-startup-optimization-results.md for measurements and remaining limit
 - 사유 분포: unsupported_fact 9, role_confusion 3, unsupported_commitment 3. 근거 없는 링크 확인/수행 약속 차단과 검증 이유 자체의 오해(잘 마시시고를 완료 행동으로 해석 등)가 혼재한다. 전체 원문 대조 없이 모든 거절을 정당하거나 오탐이라고 단정하지 않는다.
 - TUI는 failed를 원인 구분 없이 추천 생성 실패로 표시한다. storage는 같은 대화/runtime의 terminal failure를 유지하므로 재실행/재입장만으로 없어지지 않는다.
 - 이번 확인은 진단만 수행했다. 모델 계약/검증 정책 변경, 실패 초기화, 재생성, 설치/재시작 및 메시지 전송은 수행하지 않았다.
+
+## 2026-09-23 — 사전 문맥 검증 + 단일 추천 생성
+- 사용자 요청에 따라 기존 변경 전체를 576650a로 main에 먼저 커밋/푸시했다. 이후 production decision graph, retrieval/reasoning loops, post-generation LLM checker를 제거했다.
+- storage는 최근 40개 발언과 최신 발언의 명시적 reply_to 원문을 같은 계정/대화방에서 최대 8개 보충한다. 원래 unread 계산은 그대로 유지한다. compiler는 ID/순서/화자/답장 원문 누락/잘림을 확인하고, 캘린더·링크/첨부 내용·오프라인 대화·미표명 의사결정을 알 수 없음을 생성 입력에 표시한다. 이는 구조적 검증이며 의미상 정보 충분성을 입증하는 모델이 아니다.
+- 한 번의 로컬 생성 호출에 화자별 대화 turn과 metadata를 전달한다. 빈 응답/ABSTAIN은 abstained, 실행/출력 형식 오류는 failed다. 사후 검사는 코드의 형식 검사와 기존 context version fences뿐이다. ready는 독립 검증된 사실성을 뜻하지 않는다. 큐 순서·직접 입력 보호·명시적 수락/전송 경계를 유지한다.
+- reply-v2 / single-generation-v2로 기존 실패/추천과 버전을 분리한다. 기존 worker는 evaluation-candidates/worker-legacy.py에 평가 기준으로 보존하고, product에는 현재 worker와 personalization helper만 패키징한다.
+- 검증: Python 75개(legacy 포함), storage responses 33개, daemon lib 112개, TUI response 38개 통과. TS typecheck/boundary 및 설치 빌드 성공. 원문 인용 복구와 타 방 접근 차단을 회귀 검증했다.
+- 실제 Qwen3.5-9B 합성 실행으로 호출 1회 확인. 프롬프트 보완 중 특정 일정 예시가 무관한 답변을 지배하는 현상을 발견해 해당 예시를 제거했다. 최종 7사례에서는 검토 의향, 일정 미확정, 기존 거절 유지, URL 정보 부족시 abstain을 관찰했지만 피드백 요청의 역할 반전과 선물 감사의 역할 반전이 남았다. 정확도 개선을 달성했다고 주장하지 않는다.
+- 설치 후 실제 trajectory summary에서 새 pipeline과 generate만 있는 실행을 확인했다. 초기 설치와 재시작 사이 구 데몬/신 worker 버전 불일치 실패도 기록됐으며, 새 데몬 실행은 v2로 분리된다. 메시지 전송이나 읽음 조작은 수행하지 않았다.

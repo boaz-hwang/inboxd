@@ -128,7 +128,7 @@ fn worker_script() -> PathBuf {
 
 pub(crate) fn runtime_version() -> String {
     let mut fingerprint = Sha256::new();
-    fingerprint.update(b"decision-graph-v1:source-current-chat-local-v1:venv-launch-v2");
+    fingerprint.update(b"single-generation-v2:preflight-current-chat-v1");
     if let Some(path) = installed_path("INBOXD_REPLY_MODEL", DEFAULT_MODEL, true) {
         fingerprint.update(path.to_string_lossy().as_bytes());
         if let Ok(config) = std::fs::read(path.join("config.json")) {
@@ -162,11 +162,7 @@ pub(crate) fn runtime_version() -> String {
         }
     }
     let script = worker_script();
-    for file in [
-        script.clone(),
-        script.with_file_name("context_intelligence.py"),
-        script.with_file_name("policy.py"),
-    ] {
+    for file in [script.clone(), script.with_file_name("personalization.py")] {
         if let Ok(bytes) = std::fs::read(file) {
             fingerprint.update(bytes);
         }
@@ -636,7 +632,7 @@ impl ReplyService {
             if worker.is_none() {
                 worker = Worker::start().ok();
             }
-            let result=match worker.as_mut(){Some(w)=>crate::reply_pipeline::run(w,&actor,request).await.unwrap_or_else(|error|{worker=None;json!({"id":claim["suggestion_id"],"status":"failed","error":error,"prompt_version":"reply-v1"})}),None=>json!({"id":claim["suggestion_id"],"status":"failed","error":"local_reply_worker_unavailable","prompt_version":"reply-v1"})};
+            let result=match worker.as_mut(){Some(w)=>crate::reply_pipeline::run(w,request).await.unwrap_or_else(|error|{worker=None;json!({"id":claim["suggestion_id"],"status":"failed","error":error,"prompt_version":"reply-v2"})}),None=>json!({"id":claim["suggestion_id"],"status":"failed","error":"local_reply_worker_unavailable","prompt_version":"reply-v2"})};
             if result["id"] != claim["suggestion_id"] || result["reset_worker"] == true {
                 worker = None;
             }

@@ -39,7 +39,7 @@ const workerEntrypoints = [
 ] as const;
 const replyRuntimeFiles = [
   { name: "inboxd-reply-worker.py", source: "packages/reply-model/worker.py" },
-  ...["context_intelligence.py", "policy.py", "evaluation.py", "personalization.py"].map(name => ({ name, source: `packages/reply-model/${name}` })),
+  ...["personalization.py"].map(name => ({ name, source: `packages/reply-model/${name}` })),
 ];
 
 interface ManifestFile {
