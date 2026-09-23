@@ -65,9 +65,9 @@ test("mixed-provider rows keep exact identity and an empty Chat never falls back
   expect(chat).not.toContain("TELEGRAM-ONLY");
 
   state = { ...state, screen: "inbox" };
-  state = reduce(state, { type: "key", key: "d" });
+  state = { ...state, detailOpen: true, selected: { ...state.selected, [state.screen]: state.focus } };
   expect(state.detailOpen).toBe(true);
-  state = reduce(state, { type: "key", key: "Escape" });
+  state = reduce(state, { type: "key", key: "Cancel" });
   state = reduce(state, { type: "key", key: "Enter" });
   expect(state.detailOpen).toBe(false);
   expect(state.selected.inbox).toBe(0);
@@ -164,7 +164,7 @@ test("compose reply and backfill fail closed while capabilities refresh and afte
   expect(mutations).toEqual([]);
 });
 
-test("backfill targets the exact resource displayed in detail when hidden focus moves", async () => {
+test("Shift+R loads the selected resource while b and d are inert", async () => {
   const telegram = {
     ...capabilities[1]!,
     auth: { state: "authenticated" as const, reason: null, observed_at: 1_726_650_002 },
@@ -189,17 +189,11 @@ test("backfill targets the exact resource displayed in detail when hidden focus 
   controller.setActiveResource(capabilities[0]!.resource);
   controller.setSearch({ chat: { platform: "slack", account: "work", chat_id: "ops" }, interval: { from_ts: 10, to_ts: 20 }, query: "" });
   await controller.dispatchKey("d");
-  await controller.dispatchKey("j");
-
-  expect(controller.state.detailOpen).toBe(true);
-  expect(controller.state.selected.inbox).toBe(0);
-  expect(controller.state.focus).toBe(1);
-  const detail = renderInspectorScreen(controller.state, { width: 80, height: 24 });
-  expect(detail).toContain("Detail — Inbox");
-  expect(detail).toContain("Message: slack");
-  expect(detail).not.toContain("Message: telegram");
-
+  expect(controller.state.detailOpen).toBe(false);
   await controller.dispatchKey("b");
+  expect(calls).toEqual([]);
+
+  await controller.dispatchKey("R");
   expect(calls).toEqual([{ platform: "slack", account: "work", chat_id: "ops", from_ts: 10, to_ts: 20 }]);
 });
 

@@ -37,6 +37,10 @@ const workerEntrypoints = [
   { name: "inboxd-kakao-local-worker", source: "contrib/kakao/src/worker-entrypoint.ts" },
   { name: "inboxd-kakao-message-worker", source: "platforms/kakao-message/src/bin.ts" },
 ] as const;
+const replyRuntimeFiles = [
+  { name: "inboxd-reply-worker.py", source: "packages/reply-model/worker.py" },
+  ...["context_intelligence.py", "policy.py", "evaluation.py", "personalization.py"].map(name => ({ name, source: `packages/reply-model/${name}` })),
+];
 
 interface ManifestFile {
   readonly name: string;
@@ -328,6 +332,7 @@ function buildProduct(): void {
     for (const worker of workerEntrypoints) {
       compileWorker(bun, stage, worker.name, worker.source);
     }
+    for (const file of replyRuntimeFiles) copyFileSync(join(root, file.source), join(stage, file.name));
     const telegramTdjsonSource = getTdjson();
     const telegramTdjsonStat = lstatIfPresent(telegramTdjsonSource);
     if (telegramTdjsonStat === undefined || !telegramTdjsonStat.isFile() || telegramTdjsonStat.isSymbolicLink()) {
@@ -405,6 +410,7 @@ function buildProduct(): void {
         uid,
         gid,
       )),
+      ...replyRuntimeFiles.map(file => manifestFile(stage, file.name, "runtime-library", file.source, 0o600, uid, gid)),
       manifestFile(
         stage,
         telegramTdjsonName,

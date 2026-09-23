@@ -6,6 +6,8 @@ mod accounts_backend;
 pub use accounts::AccountConfig;
 mod capability;
 mod direct_send;
+mod reply;
+mod reply_pipeline;
 mod server;
 mod work_status;
 mod worker;
@@ -277,6 +279,7 @@ pub async fn launch(config: DaemonConfig) -> Result<Daemon> {
     fs::set_permissions(&config.socket_path, fs::Permissions::from_mode(0o600))
         .map_err(|error| DaemonError::new(format!("unable to secure daemon socket: {error}")))?;
     let events = Arc::new(EventHub::default());
+    let (reply_service, reply_task) = reply::ReplyService::start(Arc::clone(&actor));
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let owner = Arc::new(ServerOwner { actor, state_lock });
     let server_owner = Arc::clone(&owner);
@@ -288,6 +291,7 @@ pub async fn launch(config: DaemonConfig) -> Result<Daemon> {
     let account_service = Arc::new(
         accounts::AccountService::new(config.accounts)
             .with_storage(Arc::clone(&owner.actor))
+            .with_replies(Arc::clone(&reply_service))
             .with_events(Arc::clone(&events)),
     );
     let server = tokio::spawn(async move {
@@ -297,6 +301,8 @@ pub async fn launch(config: DaemonConfig) -> Result<Daemon> {
             approver_token,
             ServerRuntime {
                 accounts: account_service,
+                replies: reply_service,
+                reply_task: Some(reply_task),
                 events: server_events,
                 capabilities: server_capabilities,
                 connection_tasks: server_connection_tasks,

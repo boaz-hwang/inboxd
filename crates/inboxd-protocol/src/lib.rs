@@ -67,7 +67,7 @@ pub const LEGACY_REQUEST_METHODS: [&str; 21] = [
     "subscribe",
 ];
 
-pub const REQUEST_METHODS: [&str; 23] = [
+pub const REQUEST_METHODS: [&str; 31] = [
     "system.hello",
     "system.ping",
     "system.status",
@@ -91,6 +91,14 @@ pub const REQUEST_METHODS: [&str; 23] = [
     "account.messages",
     "account.search",
     "message.send",
+    "response.open",
+    "response.get",
+    "response.seen",
+    "response.feedback",
+    "response.next",
+    "trajectory.list",
+    "trajectory.delete",
+    "trajectory.settings",
 ];
 
 pub const EVENT_METHODS: [&str; 5] = [

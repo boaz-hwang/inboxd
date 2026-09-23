@@ -4,21 +4,21 @@
  대화 4개  ‹             │ 전체 메시지 · 최근 24h                               
                          │                                                      
 ● [SL] ops               │  [SL] ops · 운영  09:41 · 수정됨                     
-   한국어/CJK 경계 텍스… │  한국어/CJK 경계 텍스트 가나다라마바사아자차카타파   
+   09:41 한국어/CJK 경계…│  한국어/CJK 경계 텍스트 가나다라마바사아자차카타파   
                          │  하漢字かなカナ — whole grapheme clipping evidence   
 › [TG] 대화 2            │                                                      
-   Telegram text/reply c…│  [TG] 대화 2 · 민수  09:39                           
+   09:39 Telegram text/r…│  [TG] 대화 2 · 민수  09:39                           
                          │  Telegram text/reply capability                      
   [KK] room-7            │                                                      
-   read-only measured lo…│  [KK] room-7 · 카카오 로컬  09:38                    
+   09:38 read-only measu…│  [KK] room-7 · 카카오 로컬  09:38                    
                          │  read-only measured local history                    
   [KK] friend-uuid       │                                                      
-   불러온 메시지 없음    │                                                      
+    불러온 메시지 없음   │                                                      
                          │                                                      
                          │                                                      
                          │                                                      
                          │                                                      
                          │                                                      
  ↑↓ 선택  Enter 열기     │                                                      
- 일부 기록만 표시 중 · b 불러오기 · d 상세                                      
- / 검색  Ctrl+K 대화찾기  Tab 영역 이동  ←→ 필터 선택  ? 도움말                 
+ 일부 기록만 표시 중 · Shift+R 불러오기                                         
+ / 검색  Ctrl+K 대화찾기  Shift+Tab 영역 이동  ←→ 필터 선택  ? 도움말           

@@ -8,55 +8,793 @@
 </style>
 </head>
 <body>
-<header><div class="wrap"><div class="logo">inboxd<span> / </span>architecture</div><div class="stamp">IMPLEMENTATION MAP · 2026.09.19</div></div></header>
+<header><div class="wrap"><div class="logo">inboxd<span> / </span>architecture</div><div class="stamp">IMPLEMENTATION MAP · 2026.09.22 · WORKING TREE</div></div></header>
 <main>
-<div class="hero"><div><div class="eyebrow">One inbox. Clear boundaries.</div><h1>여러 메신저를 하나로.<br><em>각 역할은 명확하게.</em></h1><p class="intro">화면은 사용자의 의도를 받고, 데몬은 요청을 관리하고,<br>메신저별 어댑터는 실제 서비스와 대화합니다.</p></div><div class="hero-note">현재 구현 기준의 설계 지도입니다.<br>실제 계정·메시지·인증 정보는<br>이 문서에 포함하지 않았습니다.</div></div>
-<nav class="nav" aria-label="살펴볼 동작"><button data-flow="overview" aria-pressed="true">전체 지도</button><button data-flow="connect" aria-pressed="false">① 계정 연결</button><button data-flow="read" aria-pressed="false">② 메시지 읽기</button><button data-flow="search" aria-pressed="false">③ 통합 검색</button><button data-flow="send" aria-pressed="false">④ 직접 전송</button><button data-flow="agent" aria-pressed="false">⑤ 에이전트 승인</button><button data-flow="boot" aria-pressed="false">⑥ 시작과 암호화</button></nav>
+<div class="hero"><div><div class="eyebrow">One inbox. Clear boundaries.</div><h1>여러 메신저를 하나로.<br><em>각 역할은 명확하게.</em></h1><p class="intro">메신저 수신을 로컬에 저장하고 검색과 답장 추천으로 연결합니다.<br>Rust 데몬이 데이터·권한·작업을 관리하고, 사용자가 전송을 결정합니다.</p></div><div class="hero-note">현재 구현 기준의 설계 지도입니다.<br>실제 계정·메시지·인증 정보는<br>이 문서에 포함하지 않았습니다.</div></div>
+<nav class="nav" aria-label="살펴볼 동작"><button data-flow="overview" aria-pressed="true">전체 지도</button><button data-flow="connect" aria-pressed="false">① 계정 연결</button><button data-flow="read" aria-pressed="false">② 메시지 읽기</button><button data-flow="search" aria-pressed="false">③ 통합 검색</button><button data-flow="send" aria-pressed="false">④ 직접 전송</button><button data-flow="agent" aria-pressed="false">⑤ MCP 권한</button><button data-flow="boot" aria-pressed="false">⑥ 시작과 암호화</button><button data-flow="live" aria-pressed="false">⑦ 실시간 수신</button><button data-flow="reply" aria-pressed="false">⑧ 로컬 추천</button></nav>
 <div class="board"><section class="map-card" aria-label="아키텍처 전체 지도"><div class="map-top"><strong id="map-title">전체 구조</strong><label><input type="checkbox" id="show-code"> 코드 위치 표시</label></div><div class="mobile-hint">작은 화면에서는 지도를 좌우로 밀어 볼 수 있습니다.</div><div class="map-scroll"><div class="stage" id="stage"><div class="boundary"><span>RUST DAEMON · 로컬 작업의 중심</span></div><div class="zone a">01 / 사용자와 도구</div><div class="zone b">02 / 요청과 공통 규칙</div><div class="zone c">03 / 외부 서비스 연결</div><div class="bottom-label">04 / 연결 설정 · 저장 · 암호화 키</div><svg viewBox="0 0 1000 630" aria-hidden="true"><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10" fill="#aebccc"/></marker><marker id="arrow-on" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10" fill="#3066e8"/></marker></defs><g id="edges"></g><text class="edge-label" x="716" y="297">메신저별 API / 세션</text><text class="edge-label" x="722" y="594">키는 시작할 때만 전달</text></svg></div></div><div class="legend"><span><i></i>요청·데이터 흐름</span><span><i class="dashed"></i>설정·시작 시 연결</span><span><i class="blue"></i>선택한 동작의 경로</span><span>↔ 응답은 요청 경로를 따라 돌아옵니다</span></div></section>
 <aside class="detail" aria-live="polite" aria-label="구성 요소 설명"><div class="index" id="detail-tag"></div><h2 id="detail-title"></h2><p id="detail-desc"></p><dl><dt>받는 것</dt><dd id="detail-in"></dd><dt>돌려주는 것</dt><dd id="detail-out"></dd><dt>책임의 경계</dt><dd id="detail-boundary"></dd></dl><div class="files"><span>관련 코드 · 저장소 기준 경로</span><div id="detail-files"></div></div></aside></div>
 <section class="flow" aria-label="동작 단계"><div><div class="count" id="step-count"></div><h3 id="step-title"></h3><div class="dots" id="dots"></div></div><p id="step-desc" aria-live="polite"></p><div class="controls"><button id="prev" aria-label="이전 단계">← 이전</button><button id="next" aria-label="다음 단계">다음 →</button></div></section>
-<div class="section-head"><span class="n">01</span><h2>데이터가 지나가는 두 경로</h2><p>계정 전체 조회와 기존 저장·승인 경로는 함께 존재합니다.</p></div>
-<div class="two"><article class="section-card"><span class="pill">지금의 통합 TUI</span><h3>메신저에서 직접 가져오기</h3><p>개인 계정의 전체 채팅방, 메시지, 검색 결과를 메신저에서 조회합니다. 목록과 조회 결과는 메모리에 유지합니다.</p><div class="pipeline"><span>TUI</span><b>→</b><span>계정 서비스</span><b>→</b><span>계정 워커</span><b>→</b><span>메신저</span></div><p class="fine">account.list · account.messages · account.search · account.send</p></article><article class="section-card"><span class="pill green">기존 수집·에이전트 경로</span><h3>수집한 기록과 승인 이력 다루기</h3><p>등록된 범위의 메시지를 수집하고 암호화 DB에 저장합니다. 수집 범위, 승인 상태, 전송 이력과 감사 기록도 이 경로에서 관리합니다.</p><div class="pipeline"><span>범위별 워커</span><b>→</b><span>동기화·공통 규칙</span><b>→</b><span>SQLCipher</span></div><p class="fine">message.* · sync.* · safety.intent.* · send.status</p></article></div>
-<div class="callout">통합 TUI에서 읽은 모든 메시지가 자동으로 DB에 보관되는 구조는 아닙니다. <strong>서버에서 직접 조회하는 경로</strong>와 <strong>로컬에 수집·저장하는 경로</strong>를 구분해서 이해하면 됩니다.</div>
-<div class="section-head"><span class="n">02</span><h2>연결 방식은 달라도, 화면은 하나</h2><p>메신저 차이는 어댑터 안에서 처리합니다.</p></div>
-<div class="comparison"><table><thead><tr><th>메신저</th><th>계정 연결</th><th>목록·이름</th><th>메시지 검색</th></tr></thead><tbody><tr><td>Telegram</td><td>TDLib QR 로그인<br><small>계정 설정에 따라 2FA·코드 추가</small></td><td>기본·보관 채팅 목록<br>서버의 채팅방·사용자 이름</td><td>Telegram 검색 API</td></tr><tr><td>Slack</td><td>로그인된 데스크톱·브라우저<br>워크스페이스 세션 재사용</td><td>참여 채널·DM·그룹 DM<br>채널명과 프로필 표시 이름</td><td>Slack 검색 API</td></tr><tr><td>KakaoTalk</td><td>개인 계정의 보조 기기 로그인<br>기존 세션 또는 휴대폰 확인</td><td>전체 채팅 목록·방 제목<br>참여자 이름, 본인 프로필 이름</td><td>서버에 남은 기록을<br>페이지별로 읽어 검색</td></tr></tbody></table></div>
-<div class="section-head"><span class="n">03</span><h2>전송 요청의 주체에 따라</h2><p>누가 보내는지와 전송 결과를 구분합니다.</p></div>
-<div class="two"><article class="section-card"><span class="pill">사용자가 직접</span><h3>Enter → 즉시 전송</h3><p>로컬 소유자 인증을 거친 TUI가 정확한 계정·채팅방으로 요청합니다. 승인 코드를 입력하지 않습니다.</p><div class="pipeline"><span>작성</span><b>→</b><span>전송 중</span><b>→</b><span>Sent</span></div><p>전송 중 Enter 중복 입력을 막습니다. 동일 요청 ID의 중복 처리는 현재 데몬이 실행되는 동안 유지합니다.</p></article><article class="section-card"><span class="pill orange">에이전트가 제안</span><h3>제안 → 소유자 승인 → 전송</h3><p>MCP·에이전트는 직접 전송용 account.send를 호출할 수 없습니다. 기존 승인 경로로 제안하고 소유자가 확인합니다.</p><div class="pipeline"><span>Proposed</span><b>→</b><span>Approved</span><b>→</b><span>Sending</span><b>→</b><span>Sent</span></div><p>승인·전송 상태는 기존 저장소에 기록합니다. 코드와 소유자 승인 권한은 에이전트에 제공하지 않습니다.</p></article></div>
-<div class="cards" style="margin-top:16px"><article class="section-card"><span class="pill">Sent</span><h3>서비스가 접수함</h3><p>메신저가 전송을 받아들였습니다. 상대방이 읽었다는 뜻은 아닙니다.</p></article><article class="section-card"><span class="pill green">Verified</span><h3>별도 재조회로 확인함</h3><p>기존 전송 경로의 독립 조회에서 대상과 내용이 일치했습니다. 직접 전송의 접수만으로 이 상태를 만들지 않습니다.</p></article><article class="section-card"><span class="pill orange">Uncertain</span><h3>결과를 확정할 수 없음</h3><p>응답 유실·시간 초과 등으로 결과가 모호합니다. 중복 발송을 피하기 위해 자동 재전송하지 않습니다.</p></article></div>
-<div class="section-head"><span class="n">04</span><h2>무엇을 어디에 두는가</h2><p>메모리, 설정 파일, DB, 키체인은 서로 다른 저장 공간입니다.</p></div>
-<div class="comparison"><table><thead><tr><th>위치</th><th>보관하는 내용</th><th>수명·역할</th></tr></thead><tbody><tr><td>TUI·데몬 메모리</td><td>초안, 검색 결과, 채팅 목록 캐시, 직접 전송 중복 방지 정보</td><td>실행 중에 유지 · 재시작 후 영구 복구를 보장하지 않음</td></tr><tr><td>소유자 전용 설정·세션</td><td>계정 설정, 연결 자격 증명, TDLib 등 서비스 세션</td><td>다음 실행에서 연결 재사용 · 파일 접근 권한 제한<br>전체가 SQLCipher 안에 저장되는 것은 아님</td></tr><tr><td>SQLCipher</td><td>기존 경로의 수집 메시지, 검색 색인, 범위·승인·감사 기록</td><td>암호화된 영구 DB · 데몬의 저장소 액터가 접근 관리</td></tr><tr><td>macOS Keychain</td><td>SQLCipher DB 암호화 키</td><td>고정된 inboxd-keychain 프로그램이 읽어 전용 파이프로 전달</td></tr></tbody></table></div>
-<div class="callout"><strong>비밀번호 창이 반복되지 않도록:</strong> 키체인 접근 프로그램을 별도 Rust 실행 파일로 분리했습니다. 일반 실행에서는 인증 창을 띄우지 않고 저장된 권한을 사용합니다. 최초 권한 등록, 키체인 잠금, 접근 권한 변경은 별도 처리가 필요합니다.</div>
-<div class="section-head"><span class="n">05</span><h2>코드에서 찾아가기</h2><p>항목을 펼치면 수정할 위치를 볼 수 있습니다.</p></div>
-<div class="repo"><details><summary>화면·키보드·검색 이동</summary><p><code>packages/tui/src/</code><br>workspace.ts: 화면 배치<br>workspace-model.ts: 정렬·필터·표시 데이터<br>runtime.ts: 키보드·마우스<br>index.ts: 상태와 RPC 요청 제어</p></details><details><summary>프로토콜·요청 권한</summary><p><code>packages/protocol/src/</code><br><code>crates/inboxd-protocol/src/</code><br>공통 요청 형식, JSON-lines 프레임, 역할별 접근 규칙.</p></details><details><summary>계정 목록·검색·직접 전송</summary><p><code>crates/inboxd-daemon/src/accounts.rs</code><br><code>packages/accounts/src/</code><br>계정별 검증, 캐시, 워커 실행, 공통 어댑터 계약.</p></details><details><summary>메신저별 구현</summary><p><code>platforms/telegram/src/account.ts</code><br><code>platforms/slack/src/account.ts</code><br><code>contrib/kakao/src/account.ts</code><br>조회·검색·전송을 공통 형식으로 변환.</p></details><details><summary>연결 설정·프로세스 시작</summary><p><code>packages/connect/src/</code><br><code>packages/host/src/</code><br>인증 드라이버, 설정 저장, 실행 파일 검증, 데몬 시작·재시작.</p></details><details><summary>공통 규칙·저장·암호화 키</summary><p><code>crates/inboxd-core/</code><br><code>crates/inboxd-storage/</code><br><code>crates/inboxd-keychain/</code><br>도메인·승인 규칙, SQLCipher, 고정 키체인 접근기.</p></details></div>
-<div class="section-head"><span class="n">06</span><h2>확장 방향과 현재의 경계</h2></div>
-<div class="cards"><article class="section-card"><span class="pill green">확장 지점</span><h3>새 메신저 추가</h3><p>연결 드라이버와 계정 어댑터를 구현하고 데몬 설정·워커 등록을 추가합니다. 공통 요청과 메시지 형식을 따르며, UI에는 표시 이름·색상 등을 연결합니다.</p></article><article class="section-card"><span class="pill orange">현재 제한</span><h3>실시간 전체 계정 구독</h3><p>아직 구현하지 않았습니다. 시작 시 또는 b로 목록을 갱신합니다. 통합 첫 화면은 대화별 최신 메시지이며, 모든 과거 메시지를 한꺼번에 펼치는 화면은 아닙니다.</p></article><article class="section-card"><span class="pill orange">현재 제한</span><h3>과거 기록과 검색 범위</h3><p>메신저가 제공하는 기록 범위에 따릅니다. 검색은 계정별 최대 25페이지를 자동으로 잇고, 남은 결과는 n으로 이어 봅니다. TUI 제어 로직의 추가 분리도 개선 지점입니다.</p></article></div>
-<footer><span>현재 구현을 설명하는 독립형 HTML · 외부 라이브러리·네트워크 요청 없음</span><span>근거: <a href="../10-connection-architecture.md">연결 설계</a> · <a href="../12-account-workspace.md">계정 설계</a> · <a href="../06-architecture.md">저장·키체인 설계</a></span></footer>
+<div class="section-head"><span class="n">01</span><h2>수신·조회·검색이 같은 저장소로 모입니다</h2><p>2026-09-22 작업 트리의 구현 기준</p></div>
+<div class="two"><article class="section-card"><span class="pill">계정 전체 경로</span><h3>관측한 메시지를 로컬에 보관</h3><p>사용자 조회, 원격 검색, 데몬의 실시간 재조회가 반환한 메시지를 공통 SQLCipher 메시지·FTS 색인에 저장합니다. TUI 없이도 계정 연결과 수신을 유지합니다.</p><div class="pipeline"><span>SDK push / 조회</span><b>→</b><span>계정 supervisor</span><b>→</b><span>관측 commit</span><b>→</b><span>구독 이벤트</span></div></article><article class="section-card"><span class="pill green">기존 범위 경로도 유지</span><h3>관측과 coverage를 구분</h3><p>기존 message.*·sync.* 경로는 지정된 채팅방·기간의 수집과 근거를 관리합니다. 계정 관측은 같은 DB를 사용하지만 동기화 커서를 전진시키거나 기간 전체의 수집 완료를 선언하지 않습니다.</p><div class="pipeline"><span>범위별 워커</span><b>→</b><span>core 규칙</span><b>→</b><span>공유 SQLCipher</span></div></article></div>
+<div class="callout">실시간 수신은 구현되어 있습니다. 시작·재연결·주기 sweep은 열지 않은 방도 최근 페이지를 읽지만, <strong>전체 과거 기록을 자동 수집하는 것은 아닙니다.</strong> 누락·장기 단절·삭제 근거의 한계는 별도로 표시합니다.</div>
+<div class="section-head"><span class="n">02</span><h2>메신저별 연결과 읽음</h2></div>
+<div class="comparison"><table><thead><tr><th>메신저</th><th>연결·수신</th><th>조회·검색</th><th>구현 경계</th></tr></thead><tbody><tr><td>Telegram</td><td>TDLib 사용자 세션·QR 인증<br>기존 세션의 update callback</td><td>기본·보관 채팅 / 검색 API</td><td>Bot API가 아닌 개인 계정. last_read_inbox_message_id로 다른 기기의 읽음을 반영하고, 명시적 삭제 근거를 tombstone으로 저장.</td></tr><tr><td>Slack</td><td>기존 워크스페이스 로그인 재사용<br>SDK RTM·heartbeat·재연결</td><td>참여 채널·DM / 검색 API</td><td>접근 가능한 대화 범위. 명시적 삭제 근거를 저장.</td></tr><tr><td>KakaoTalk</td><td>보조 기기 인증·LOCO push</td><td>서버 디렉터리·기록 순회 검색<br>mcMetas.name 사용자 지정 이름 우선</td><td>사용자 읽음에서만 SYNCMSG 완료와 LCHATLIST.s 확인. 백그라운드 관측은 읽기 전용. 권위 있는 삭제 근거는 미지원.</td></tr></tbody></table></div>
+<div class="section-head"><span class="n">03</span><h2>검색과 전송의 공통 계약</h2></div>
+<div class="cards"><article class="section-card"><span class="pill">message.search</span><h3>local · remote · refresh</h3><p>local은 암호화 색인, remote는 서비스 조회 후 저장, refresh는 로컬 결과를 먼저 반환하고 작업 ID로 원격 확인을 이어갑니다. TUI와 MCP가 같은 계약을 사용합니다. 출처와 커서를 구분하고 원격 실패 시 로컬 결과를 유지합니다.</p></article><article class="section-card"><span class="pill green">message.send</span><h3>인증 후 한 번 발송</h3><p>소유자 approver 또는 위임 sender가 capability 검사를 거쳐 발송합니다. 요청 ID를 DB에 먼저 예약해 재시작 뒤 중복도 차단합니다. 기본 MCP agent는 조회 전용이며, 명시적으로 sender 토큰을 제공하면 전송할 수 있습니다.</p></article><article class="section-card"><span class="pill orange">send.status</span><h3>접수와 확인을 구분</h3><p>Sent는 서비스 접수, Verified는 별도 확인입니다. Failed와 결과를 확정하지 못한 Uncertain을 구분합니다. 응답 유실 때는 상태를 조회하며 자동 재발송하지 않습니다. Sent는 상대의 읽음이 아닙니다.</p></article></div>
+<div class="callout">현재 공개 전송 경로는 <strong>message.send</strong>입니다. 과거의 account.send 및 제안 생성·승인 코드 수령·승인 RPC 설명은 현재 동작에 해당하지 않습니다. 이전 safety 기록 조회·거절과 도메인 코드는 호환 경로로 남아 있습니다.</div>
+<div class="section-head"><span class="n">04</span><h2>로컬 추천과 안 읽은 대화 처리</h2><p>Rust가 조회 권한을 제한하고 Python이 추론합니다.</p></div>
+<div class="two"><article class="section-card"><span class="pill">구현된 실행 경로</span><h3>문맥 판단 → 필요한 기록 조회 → 생성·검증</h3><p>수신 관측과 방 진입으로 작업을 예약합니다. 최신 실제 발신자가 본인이면 답장 대상이 없어 큐·판단·생성·검증에서 제외합니다. 이전 본인 메시지는 문맥에 남기고, 상대의 후속 메시지가 오면 추천을 재개합니다. Python MLX 상주 워커를 최대 2개 사용해 판단·생성·grounding 검사를 수행하고 Rust가 현재 방의 로컬 history만 조회합니다. 조회는 최대 2 round·3 query이며 버전과 범위를 검사합니다.</p><div class="pipeline"><span>수신 / response.open</span><b>→</b><span>판단·조회</span><b>→</b><span>추천 cache</span><b>→</b><span>TUI</span></div><p>설치 기본 모델 경로는 Qwen3.5-9B-4bit입니다. 추론은 로컬 모델 파일과 offline 설정을 사용합니다. 모델 준비 실패 시에도 직접 작성과 전송은 유지합니다.</p></article><article class="section-card"><span class="pill green">사용자 조작</span><h3>Tab 수락 · Enter 전송</h3><p>준비된 추천은 ghost로 표시하고 Tab으로 초안에 넣습니다. 초안이 없으면 다음 안 읽은 방으로 이동할 수 있습니다. 추천 생성 중에는 대기 안내를 합니다. 방에 들어오면 전체 읽음 처리하며, 보내지 않은 추천은 읽은 뒤 재진입해도 유지합니다. 읽은 방도 최근 대화로 초안을 생성하고, 실패하면 자동 재시도 없이 실패 상태와 원인을 기록합니다. 읽음 상태 변경이나 재진입으로 같은 실패를 재생성하지 않습니다. 빈 기록은 서버에서 조회하며, 끝까지 메시지가 없는 방은 목록에서 제외합니다. Enter로 전송하며 Shift+Tab으로 영역을 이동합니다. Failed·Uncertain에서는 성공처럼 다음 방으로 넘기지 않습니다.</p><p class="fine">response.open/get/seen/feedback/next는 소유자 전용입니다. 방 진입 시 전체 메시지의 seen과 provider unread 근거를 함께 관리하고, 카카오 서버 읽음은 비동기로 확인·복구합니다.</p></article></div>
+<div class="section-head"><span class="n">05</span><h2>저장 위치와 수명</h2></div>
+<div class="comparison"><table><thead><tr><th>위치</th><th>내용</th><th>경계</th></tr></thead><tbody><tr><td>TUI·데몬 메모리</td><td>작성 초안, 화면·목록 cache, 검색 작업과 커서, 생성 대기열</td><td>재시작 후 초안·진행 중 작업 복구를 보장하지 않음</td></tr><tr><td>SQLCipher · schema 6</td><td>공유 메시지·FTS·범위 근거, owner_sends, 읽음·provider_read_sync, response 세션·snapshot·추천 cache·trajectory</td><td>Storage actor가 직렬 접근. 전송 예약은 재시작 후 유지. trajectory 기록·보관 기간·삭제는 소유자 제어.</td></tr><tr><td>소유자 전용 파일</td><td>계정 설정·자격 증명·서비스 세션, 모델 가중치, 실험 LoRA·학습 산출물·adapter registry</td><td>SQLCipher와 별도. 개인 모델 산출물은 파일 권한으로 보호하며 앱 수준 암호화·삭제 연동은 아직 미완성.</td></tr><tr><td>macOS Keychain</td><td>SQLCipher 암호화 키</td><td>고정 inboxd-keychain 실행 파일 → 전용 파이프 → 데몬. 일반 읽기는 인증 창을 띄우지 않는 모드.</td></tr></tbody></table></div>
+<div class="section-head"><span class="n">06</span><h2>코드에서 찾아가기</h2></div>
+<div class="repo"><details><summary>TUI·RPC</summary><p><code>packages/tui/src/index.ts</code><br><code>packages/tui/src/runtime.ts</code><br><code>packages/protocol/src/schema.ts</code><br><code>packages/protocol/src/response.ts</code><br>화면·키보드·추천 조작과 공통 계약.</p></details><details><summary>계정·수신·검색</summary><p><code>crates/inboxd-daemon/src/accounts.rs</code><br><code>crates/inboxd-daemon/src/accounts_live.rs</code><br><code>crates/inboxd-daemon/src/accounts_search.rs</code><br><code>packages/accounts/src/live.ts</code></p></details><details><summary>권한·전송·MCP</summary><p><code>crates/inboxd-daemon/src/capability.rs</code><br><code>crates/inboxd-daemon/src/direct_send.rs</code><br><code>crates/inboxd-storage/src/owner_sends.rs</code><br><code>packages/mcp/src/index.ts</code></p></details><details><summary>로컬 추천·관측·학습 도구</summary><p><code>crates/inboxd-daemon/src/reply.rs</code><br><code>crates/inboxd-daemon/src/reply_pipeline.rs</code><br><code>crates/inboxd-storage/src/responses.rs</code><br><code>packages/reply-model/</code><br>학습·평가·적용·롤백은 검토된 JSONL을 사용하는 수동 도구.</p></details><details><summary>메신저 어댑터·계약</summary><p><code>platforms/telegram/src/account.ts</code><br><code>platforms/slack/src/account.ts</code><br><code>contrib/kakao/src/account.ts</code><br><code>packages/accounts/schema/primitives.json</code><br><code>scripts/generate-account-contract.ts</code><br>TS/Rust 계약 생성과 SDK별 구현.</p></details><details><summary>시작·저장·키</summary><p><code>packages/connect/src/</code><br><code>packages/host/src/</code><br><code>crates/inboxd-core/src/store.rs</code><br><code>crates/inboxd-storage/src/</code><br><code>crates/inboxd-keychain/src/</code><br><code>scripts/build-product.ts</code></p></details></div>
+<div class="section-head"><span class="n">07</span><h2>남은 구현과 검증 범위</h2></div>
+<div class="cards"><article class="section-card"><span class="pill orange">수신·검색</span><h3>관측한 범위만 근거로 사용</h3><p>최근 페이지 sweep은 전체 과거 기록 수집이 아닙니다. 검색 0건·목록 누락을 삭제나 완전한 coverage로 해석하지 않습니다. 실시간 복구와 provider 제한도 구분해 표시합니다.</p></article><article class="section-card"><span class="pill orange">모델·개인화</span><h3>현재는 typed LLM baseline</h3><p>전용 학습 CIM·보정 확률, 다른 대화·메일·파일 connector, trajectory의 자동 학습 데이터 전환과 주기 학습은 남아 있습니다. LoRA는 수동 검토·학습·평가·적용 도구이며 자동 적용하지 않습니다.</p></article><article class="section-card"><span class="pill">검증의 해석</span><h3>코드 구현과 제품 품질은 별개</h3><p>이 지도는 커밋되지 않은 변경을 포함한 현재 코드를 설명합니다. 모델 품질·지연은 별도 평가 기록을 따릅니다. 로컬 추론과 메신저 네트워크 통신, 사용자 선택에 따른 외부 MCP 전달도 구분합니다.</p></article></div>
+<footer><span>독립형 HTML · 외부 라이브러리·네트워크 요청 없음 · 2026-09-23 코드 대조</span><span>관련 문서: <a href="../19-live-synchronization.md">실시간 동기화</a> · <a href="../20-search-foundation.md">공통 검색</a> · <a href="../22-local-first-next-step.md">로컬 추천 범위</a> · <a href="../../packages/reply-model/README.md">모델 실행·개인화</a></span></footer>
 </main>
 <script>
 const nodes={
- tui:{r:[30,70,175,70],name:'TUI',sub:'통합 화면 · 검색 · 답장',tag:'TS',desc:'사람이 사용하는 터미널 화면입니다. 입력과 선택 상태를 관리하고 데몬에 요청합니다.',input:'키보드·마우스 입력, 데몬의 조회 결과',output:'읽기·검색·전송 RPC, 화면 상태',boundary:'메신저 SDK와 SQLCipher에 직접 접근하지 않습니다.',files:['packages/tui/src/index.ts','packages/tui/src/workspace.ts','packages/tui/src/runtime.ts']},
- cli:{r:[30,165,175,70],name:'CLI',sub:'명령 실행 · 앱 진입점',tag:'TS',desc:'명령을 해석하고 TUI, 연결 설정, 데몬 관리 기능을 연결하는 진입점입니다.',input:'inboxd 명령과 옵션',output:'RPC 요청 또는 연결·시작 작업',boundary:'메시지 작업은 RPC를 사용하고, 연결 설정은 connect·host 모듈에 위임합니다.',files:['packages/cli/src/bin.ts','packages/cli/src/application.ts']},
- mcp:{r:[30,260,175,70],name:'MCP · 에이전트',sub:'조회 · 전송 제안',tag:'TS',desc:'AI 도구용 인터페이스입니다. 메시지를 읽고 전송을 제안합니다.',input:'에이전트의 도구 호출',output:'조회 결과와 승인 대기 제안',boundary:'직접 전송과 승인 코드 접근은 허용하지 않습니다.',files:['packages/mcp/src/','packages/protocol/src/schema.ts']},
- rpc:{r:[240,145,75,125],name:'로컬<br>RPC',sub:'JSON-lines<br>Unix socket',desc:'클라이언트와 데몬 사이의 공통 약속입니다. 외부 웹 서버가 아니라 같은 컴퓨터의 로컬 소켓을 사용합니다.',input:'역할과 요청 ID가 있는 구조화된 메시지',output:'요청별 응답, 구독 이벤트',boundary:'역할 검사, 프레임 크기 제한, 연결 세대 관리. 응답이 끊긴 전송을 자동 재시도하지 않습니다.',files:['packages/protocol/src/','crates/inboxd-protocol/src/lib.rs']},
- server:{r:[370,75,275,68],name:'Rust 데몬',sub:'인증 · 요청 라우팅 · 작업 수명',tag:'RUST',desc:'로컬 작업을 관리하는 중심 프로세스입니다. 클라이언트 인증을 확인하고 계정 서비스 또는 기존 저장·승인 경로로 요청을 보냅니다.',input:'로컬 RPC, 계정 설정, DB 암호화 키',output:'조회 결과와 실행 상태',boundary:'상태 디렉터리당 하나의 데몬. 워커를 감독하고 저장소 접근을 소유합니다.',files:['crates/inboxd-daemon/src/main.rs','crates/inboxd-daemon/src/server.rs','crates/inboxd-daemon/src/lib.rs']},
- accounts:{r:[370,188,130,86],name:'계정 서비스',sub:'전체 목록 · 검색<br>직접 전송',desc:'개인 계정 전체의 채팅방과 메시지를 다룹니다. 목록은 메신저별 완료 즉시 반영하며, 계정 검증·불변 페이지·전송 중복 방지를 담당합니다.',input:'account.list / messages / search / send',output:'공통 채팅방·메시지·전송 결과',boundary:'정확한 계정의 발견된 채팅방만 허용합니다. 캐시와 전송 ID 중복 방지는 메모리에 있습니다.',files:['crates/inboxd-daemon/src/accounts.rs','packages/accounts/src/contracts.ts']},
- legacy:{r:[520,188,125,86],name:'수집·승인',sub:'등록 범위 동기화<br>제안·승인·전송',desc:'기존의 범위별 기록 수집과 에이전트 제안·승인 흐름입니다. 저장된 메시지 조회와 승인 상태를 관리합니다.',input:'message.* / sync.* / safety.intent.*',output:'수집 기록, 범위 정보, 승인·전송 상태',boundary:'계정 전체 직접 조회와 별개입니다. 승인과 전송 이력은 DB에 보관합니다.',files:['crates/inboxd-daemon/src/server.rs','crates/inboxd-daemon/src/worker.rs','crates/inboxd-core/src/safety.rs']},
- core:{r:[520,318,125,56],name:'공통 규칙',sub:'Rust core',desc:'메시지 키, 저장·동기화 적용, 승인과 전송 상태 전이 같은 도메인 규칙을 담습니다.',input:'구조화된 도메인 작업',output:'검증 결과와 저장 작업',boundary:'메신저 SDK 호출과 화면 렌더링을 담당하지 않습니다.',files:['crates/inboxd-core/src/lib.rs','crates/inboxd-core/src/domain.rs','crates/inboxd-core/src/store.rs']},
- worker:{r:[715,80,250,78],name:'워커 프로세스',sub:'계정 워커 / 기존 범위별 워커',tag:'BUN',desc:'메신저 접근은 별도 프로세스에서 실행합니다. 계정별 워커와 세션을 유지하며 일괄 조회와 응답 재사용으로 호출 수를 줄입니다. 기존 승인 경로는 범위별 워커를 사용합니다.',input:'데몬이 검증한 작업과 계정 자격 증명',output:'제한된 크기의 구조화된 결과',boundary:'실행 시간·출력 크기를 제한합니다. 원본 인증 정보나 서비스 오류를 그대로 화면에 내보내지 않습니다.',files:['packages/accounts/src/worker.ts','crates/inboxd-daemon/src/accounts.rs','crates/inboxd-daemon/src/worker.rs']},
- telegram:{r:[715,205,77,66],name:'Telegram',sub:'TDLib',desc:'Telegram 개인 계정을 TDLib로 연결합니다. 원래 채팅 제목과 보낸 사람 이름을 공통 메시지 형태로 변환합니다.',input:'목록·히스토리·검색·전송 요청',output:'기본·보관 채팅, 메시지, 접수 결과',boundary:'Bot API가 아닌 사용자 세션입니다. 검색은 서비스 API를 사용합니다.',files:['platforms/telegram/src/account.ts','platforms/telegram/src/production-tdlib.ts']},
- slack:{r:[802,205,77,66],name:'Slack',sub:'Web API',desc:'로그인된 Slack 워크스페이스 세션으로 채널과 DM을 다룹니다.',input:'워크스페이스 세션과 작업',output:'채널·DM, 프로필 표시 이름, 메시지',boundary:'참여한 대화 목록과 API가 허용하는 범위로 제한됩니다.',files:['platforms/slack/src/account.ts','packages/connect/src/drivers/slack.ts']},
- kakao:{r:[889,205,77,66],name:'Kakao',sub:'개인 SDK',desc:'카카오톡 개인 계정의 보조 기기 세션을 사용합니다. 서버의 채팅 제목과 참여자 이름을 가져옵니다.',input:'개인 세션, 채팅방별 작업',output:'채팅 목록, 페이지별 기록, 전송 접수',boundary:'검색은 페이지를 순회합니다. 본인 이름은 나와의 채팅 참여자 정보로 보완합니다.',files:['contrib/kakao/src/account.ts','contrib/kakao/src/personal-session.ts']},
- cloud:{r:[715,325,250,62],name:'메신저 서버',sub:'원본 메시지 · 방 이름 · 사용자 정보',desc:'실제 메시지와 채팅 정보의 원본입니다. 화면의 이름은 여기에서 받은 값을 사용합니다.',input:'각 서비스의 인증된 요청',output:'허용된 기록, 이름, 메시지 접수 결과',boundary:'서비스의 보관 기간과 API 제한을 따릅니다. 접수와 실제 읽음은 다른 상태입니다.',files:['platforms/telegram/src/account.ts','platforms/slack/src/account.ts','contrib/kakao/src/account.ts']},
- setup:{r:[30,475,140,82],name:'연결 설정',sub:'로그인 · 계정 확인',desc:'Telegram QR, Slack 세션 재사용, Kakao 보조 기기 인증을 조율합니다. 연결에 성공한 계정만 저장합니다.',input:'사용자가 선택한 메신저와 인증 결과',output:'검증된 계정 설정',boundary:'설정 중 테스트 메시지를 자동 발송하지 않습니다. 실패·취소 시 기존 연결을 유지합니다.',files:['packages/connect/src/contracts.ts','packages/connect/src/drivers/','packages/connect/src/private-config.ts']},
- host:{r:[195,475,135,82],name:'Host',sub:'데몬 시작 · 재시작',desc:'설치된 실행 파일과 상태 경로를 검증하고 데몬을 시작하거나 재시작합니다.',input:'설치 경로, 설정 경로, 시작 요청',output:'준비된 로컬 데몬과 소켓',boundary:'화면과 메신저 구현을 알지 못합니다. 확인된 소유자 데몬만 종료합니다.',files:['packages/host/src/daemon-launcher.ts','packages/host/src/restart.ts']},
- config:{r:[355,475,120,82],name:'계정 설정',sub:'소유자 전용 파일',desc:'다음 실행에서도 연결을 재사용할 수 있도록 계정 설정과 세션을 보관합니다.',input:'성공한 연결 정보',output:'데몬과 워커가 사용할 설정',boundary:'원자적으로 저장하고 접근 권한을 제한합니다. DB 암호화와 동일한 저장 방식은 아닙니다.',files:['packages/connect/src/private-config.ts','crates/inboxd-daemon/src/config.rs']},
- store:{r:[520,475,145,82],name:'암호화 저장소',sub:'Storage actor<br>SQLCipher',desc:'기존 경로에서 수집한 메시지와 승인·감사 기록의 영구 저장소입니다. 저장소 액터가 접근을 직렬화합니다.',input:'수집 배치, 승인·전송 상태, DB 키',output:'저장된 메시지와 검색 색인, 기록',boundary:'계정 전체 조회 결과를 모두 자동 보관하지 않습니다. 키는 DB와 별도로 둡니다.',files:['crates/inboxd-storage/src/actor.rs','crates/inboxd-core/src/store.rs']},
- helper:{r:[715,475,115,82],name:'고정 접근기',sub:'inboxd-keychain',desc:'DB 암호화 키만 읽는 독립 Rust 실행 파일입니다. 데몬·TUI 수정으로 키체인 접근 프로그램의 신원이 바뀌지 않게 합니다.',input:'키체인 항목의 서비스·계정 이름',output:'데몬 전용 파이프로 전달하는 DB 키',boundary:'일반 읽기에서는 인증 창을 띄우지 않습니다. 키를 새 평문 파일에 저장하지 않습니다.',files:['crates/inboxd-keychain/src/main.rs','crates/inboxd-daemon/src/keychain.rs']},
- keychain:{r:[850,475,115,82],name:'Keychain',sub:'macOS · DB 키',desc:'SQLCipher 암호화 키를 보관하는 운영체제의 키체인입니다.',input:'최초 키 생성과 접근 권한 등록',output:'허용된 고정 접근기에 DB 키 제공',boundary:'처음 등록 시 항상 허용이 필요합니다. 키체인 잠금·권한 변경 시 추가 조치가 필요할 수 있습니다.',files:['crates/inboxd-keychain/src/main.rs']}
+  "tui": {
+    "r": [
+      30,
+      70,
+      175,
+      70
+    ],
+    "name": "TUI",
+    "sub": "안 읽은 대화 · 검색 · 추천",
+    "tag": "TS",
+    "desc": "실시간 목록과 안 읽은 대화를 탐색하는 터미널 화면입니다. 방 진입 시 전체 읽음, 로컬 추천 수락, 직접 작성과 전송을 관리합니다.",
+    "input": "키보드·마우스, 구독 이벤트, response 세션",
+    "output": "조회·읽음·추천 피드백·전송 RPC",
+    "boundary": "메신저 SDK와 SQLCipher에 직접 접근하지 않습니다.",
+    "files": [
+      "packages/tui/src/index.ts",
+      "packages/tui/src/workspace.ts",
+      "packages/tui/src/runtime.ts"
+    ]
+  },
+  "cli": {
+    "r": [
+      30,
+      165,
+      175,
+      70
+    ],
+    "name": "CLI",
+    "sub": "명령 실행 · 앱 진입점",
+    "tag": "TS",
+    "desc": "명령을 해석하고 TUI, 연결 설정, 데몬 관리 기능을 연결하는 진입점입니다.",
+    "input": "inboxd 명령과 옵션",
+    "output": "RPC 요청 또는 연결·시작 작업",
+    "boundary": "메시지 작업은 RPC를 사용하고, 연결 설정은 connect·host 모듈에 위임합니다.",
+    "files": [
+      "packages/cli/src/bin.ts",
+      "packages/cli/src/application.ts"
+    ]
+  },
+  "mcp": {
+    "r": [
+      30,
+      260,
+      175,
+      70
+    ],
+    "name": "MCP · 에이전트",
+    "sub": "공통 조회 · 위임 전송",
+    "tag": "TS",
+    "desc": "inbox_search, inbox_list, inbox_recent, inbox_evidence, message_send, send_status를 제공합니다. 기본 agent 역할은 조회용이고 sender 토큰을 명시적으로 위임하면 전송할 수 있습니다.",
+    "input": "에이전트의 도구 호출",
+    "output": "검색·근거·전송 및 상태 조회",
+    "boundary": "일반 agent는 전송 불가. response·trajectory는 소유자 전용이며 MCP에 노출하지 않습니다.",
+    "files": [
+      "packages/mcp/src/",
+      "packages/protocol/src/schema.ts"
+    ]
+  },
+  "rpc": {
+    "r": [
+      240,
+      145,
+      75,
+      125
+    ],
+    "name": "로컬<br>RPC",
+    "sub": "JSON-lines<br>Unix socket",
+    "desc": "클라이언트와 데몬 사이의 공통 약속입니다. 외부 웹 서버가 아니라 같은 컴퓨터의 로컬 소켓을 사용합니다.",
+    "input": "역할과 요청 ID가 있는 구조화된 메시지",
+    "output": "요청별 응답, 구독 이벤트",
+    "boundary": "역할 검사, 프레임 크기 제한, 연결 세대 관리. 응답이 끊긴 전송을 자동 재시도하지 않습니다.",
+    "files": [
+      "packages/protocol/src/",
+      "crates/inboxd-protocol/src/lib.rs"
+    ]
+  },
+  "server": {
+    "r": [
+      370,
+      75,
+      275,
+      68
+    ],
+    "name": "Rust 데몬",
+    "sub": "인증 · capability · 작업 감독",
+    "tag": "RUST",
+    "desc": "로컬 RPC를 인증하고 계정·검색·전송·추천 작업을 조율합니다. 실시간 수신은 TUI가 없어도 유지합니다.",
+    "input": "로컬 RPC, 계정 설정, DB 암호화 키",
+    "output": "조회 결과와 실행 상태",
+    "boundary": "상태 디렉터리당 하나의 데몬. 워커를 감독하고 저장소 접근을 소유합니다.",
+    "files": [
+      "crates/inboxd-daemon/src/server.rs",
+      "crates/inboxd-daemon/src/lib.rs",
+      "crates/inboxd-daemon/src/capability.rs"
+    ]
+  },
+  "accounts": {
+    "r": [
+      370,
+      188,
+      130,
+      86
+    ],
+    "name": "계정 서비스",
+    "sub": "목록 · 관측 저장<br>실시간 수신 · 검색",
+    "desc": "계정별 디렉터리와 조회를 관리하고 반환된 메시지를 공유 DB에 저장합니다. 실시간 힌트를 병합해 해당 방을 재조회하고 저장 후 이벤트를 발행합니다.",
+    "input": "account.list / messages · message.search · provider hints",
+    "output": "목록, 저장된 관측, 검색 결과, account.changed / message.upserted",
+    "boundary": "최근 페이지 관측은 전체 과거 기록의 수집 완료를 뜻하지 않습니다.",
+    "files": [
+      "crates/inboxd-daemon/src/accounts.rs",
+      "crates/inboxd-daemon/src/accounts_live.rs",
+      "crates/inboxd-daemon/src/accounts_search.rs"
+    ]
+  },
+  "legacy": {
+    "r": [
+      520,
+      188,
+      125,
+      86
+    ],
+    "name": "전송·기능 검증",
+    "sub": "message.send<br>영구 요청 ID 예약",
+    "desc": "소유자 또는 위임 sender의 전송 요청을 정규화하고 대상의 capability를 검사합니다. SQLCipher에 요청 ID를 예약한 뒤 계정 또는 binding 워커로 전달합니다.",
+    "input": "message.send · capability.list · send.status",
+    "output": "Sent / Verified / Failed / Uncertain",
+    "boundary": "재시작 후에도 동일 요청을 다시 발송하지 않습니다. 기존 승인 생성·코드 수령·승인 RPC는 현재 공개 요청에서 제거됐습니다.",
+    "files": [
+      "crates/inboxd-daemon/src/direct_send.rs",
+      "crates/inboxd-daemon/src/capability.rs",
+      "crates/inboxd-storage/src/owner_sends.rs"
+    ]
+  },
+  "core": {
+    "r": [
+      520,
+      318,
+      125,
+      56
+    ],
+    "name": "공통 규칙",
+    "sub": "도메인 · 범위 동기화",
+    "desc": "공통 도메인 규칙과 기존 범위 동기화·저장 명령을 제공합니다. Storage actor가 SQLCipher 접근을 직렬화하며 관측·전송·추천 저장은 storage 모듈에 구현돼 있습니다.",
+    "input": "구조화된 도메인 작업",
+    "output": "검증 결과와 저장 작업",
+    "boundary": "메신저 SDK 호출과 화면 렌더링을 담당하지 않습니다.",
+    "files": [
+      "crates/inboxd-core/src/lib.rs",
+      "crates/inboxd-core/src/domain.rs",
+      "crates/inboxd-core/src/store.rs"
+    ]
+  },
+  "worker": {
+    "r": [
+      715,
+      80,
+      250,
+      78
+    ],
+    "name": "워커 프로세스",
+    "sub": "계정 세션 · 범위 / binding 워커",
+    "tag": "BUN",
+    "desc": "Bun 워커가 메신저 SDK와 연결 세션을 소유합니다. stdout은 요청/응답 JSONL, stderr는 제한된 실시간 변경 힌트 채널입니다.",
+    "input": "데몬이 검증한 작업과 계정 자격 증명",
+    "output": "제한된 크기의 구조화된 결과",
+    "boundary": "힌트에는 본문·자격 증명이 없습니다. 데몬이 계정 신원을 정하고 재조회합니다. 전송 복구로 자동 재발송하지 않습니다.",
+    "files": [
+      "packages/accounts/src/worker.ts",
+      "crates/inboxd-daemon/src/accounts.rs",
+      "crates/inboxd-daemon/src/worker.rs"
+    ]
+  },
+  "telegram": {
+    "r": [
+      715,
+      205,
+      77,
+      66
+    ],
+    "name": "Telegram",
+    "sub": "TDLib",
+    "desc": "Telegram 개인 계정을 TDLib로 연결합니다. 원래 채팅 제목과 보낸 사람 이름을 공통 메시지 형태로 변환합니다.",
+    "input": "목록·히스토리·검색·전송 요청",
+    "output": "기본·보관 채팅, 메시지, 접수 결과",
+    "boundary": "Bot API가 아닌 사용자 세션입니다. 검색은 서비스 API를 사용합니다.",
+    "files": [
+      "platforms/telegram/src/account.ts",
+      "platforms/telegram/src/production-tdlib.ts"
+    ]
+  },
+  "slack": {
+    "r": [
+      802,
+      205,
+      77,
+      66
+    ],
+    "name": "Slack",
+    "sub": "Web API",
+    "desc": "로그인된 Slack 워크스페이스 세션으로 채널과 DM을 다룹니다.",
+    "input": "워크스페이스 세션과 작업",
+    "output": "채널·DM, 프로필 표시 이름, 메시지",
+    "boundary": "참여한 대화 목록과 API가 허용하는 범위로 제한됩니다.",
+    "files": [
+      "platforms/slack/src/account.ts",
+      "packages/connect/src/drivers/slack.ts"
+    ]
+  },
+  "kakao": {
+    "r": [
+      889,
+      205,
+      77,
+      66
+    ],
+    "name": "Kakao",
+    "sub": "개인 SDK",
+    "desc": "보조 기기 세션과 LOCO push를 사용합니다. 서버 디렉터리를 새로 조회하며 사용자 지정 CHATINFO.mcMetas의 name을 방 이름에 우선 적용합니다.",
+    "input": "개인 세션, 채팅방별 작업",
+    "output": "채팅 목록, 페이지별 기록, 전송 접수",
+    "boundary": "백그라운드 관측은 읽기 전용입니다. 사용자 읽음 요청에서만 SYNCMSG 완료와 새 LCHATLIST.s로 서버 읽음을 확인합니다.",
+    "files": [
+      "contrib/kakao/src/account.ts",
+      "contrib/kakao/src/personal-session.ts"
+    ]
+  },
+  "cloud": {
+    "r": [
+      715,
+      325,
+      250,
+      62
+    ],
+    "name": "메신저 서버",
+    "sub": "원본 메시지 · 방 이름 · 사용자 정보",
+    "desc": "실제 메시지와 채팅 정보의 원본입니다. 화면의 이름은 여기에서 받은 값을 사용합니다.",
+    "input": "각 서비스의 인증된 요청",
+    "output": "허용된 기록, 이름, 메시지 접수 결과",
+    "boundary": "서비스의 보관 기간과 API 제한을 따릅니다. 접수와 실제 읽음은 다른 상태입니다.",
+    "files": [
+      "platforms/telegram/src/account.ts",
+      "platforms/slack/src/account.ts",
+      "contrib/kakao/src/account.ts"
+    ]
+  },
+  "setup": {
+    "r": [
+      30,
+      475,
+      140,
+      82
+    ],
+    "name": "연결 설정",
+    "sub": "로그인 · 계정 확인",
+    "desc": "Telegram QR, Slack 세션 재사용, Kakao 보조 기기 인증을 조율합니다. 연결에 성공한 계정만 저장합니다.",
+    "input": "사용자가 선택한 메신저와 인증 결과",
+    "output": "검증된 계정 설정",
+    "boundary": "설정 중 테스트 메시지를 자동 발송하지 않습니다. 실패·취소 시 기존 연결을 유지합니다.",
+    "files": [
+      "packages/connect/src/contracts.ts",
+      "packages/connect/src/drivers/",
+      "packages/connect/src/private-config.ts"
+    ]
+  },
+  "host": {
+    "r": [
+      195,
+      475,
+      135,
+      82
+    ],
+    "name": "Host",
+    "sub": "데몬 시작 · 재시작",
+    "desc": "설치된 실행 파일과 상태 경로를 검증하고 데몬을 시작하거나 재시작합니다.",
+    "input": "설치 경로, 설정 경로, 시작 요청",
+    "output": "준비된 로컬 데몬과 소켓",
+    "boundary": "화면과 메신저 구현을 알지 못합니다. 확인된 소유자 데몬만 종료합니다.",
+    "files": [
+      "packages/host/src/daemon-launcher.ts",
+      "packages/host/src/restart.ts"
+    ]
+  },
+  "config": {
+    "r": [
+      355,
+      475,
+      120,
+      82
+    ],
+    "name": "계정 설정",
+    "sub": "소유자 전용 파일",
+    "desc": "다음 실행에서도 연결을 재사용할 수 있도록 계정 설정과 세션을 보관합니다.",
+    "input": "성공한 연결 정보",
+    "output": "데몬과 워커가 사용할 설정",
+    "boundary": "원자적으로 저장하고 접근 권한을 제한합니다. DB 암호화와 동일한 저장 방식은 아닙니다.",
+    "files": [
+      "packages/connect/src/private-config.ts",
+      "crates/inboxd-daemon/src/config.rs"
+    ]
+  },
+  "store": {
+    "r": [
+      520,
+      475,
+      145,
+      82
+    ],
+    "name": "암호화 저장소",
+    "sub": "SQLCipher · schema 6",
+    "desc": "공유 메시지·FTS 색인, 관측과 범위 근거, 영구 전송 기록, 읽음·응답 세션·추천 cache·trajectory를 저장합니다.",
+    "input": "관측 페이지, 전송 예약·결과, 읽음·추천 상태",
+    "output": "로컬 검색, 전송 복구, 추천 문맥과 관측 기록",
+    "boundary": "부분 관측은 coverage를 보장하지 않습니다. 설정·서비스 세션·모델 파일은 별도 파일입니다.",
+    "files": [
+      "crates/inboxd-storage/src/actor.rs",
+      "crates/inboxd-storage/src/observations.rs",
+      "crates/inboxd-storage/src/responses.rs",
+      "crates/inboxd-core/src/store.rs"
+    ]
+  },
+  "helper": {
+    "r": [
+      715,
+      475,
+      115,
+      82
+    ],
+    "name": "고정 접근기",
+    "sub": "inboxd-keychain",
+    "desc": "DB 암호화 키만 읽는 독립 Rust 실행 파일입니다. 데몬·TUI 수정으로 키체인 접근 프로그램의 신원이 바뀌지 않게 합니다.",
+    "input": "키체인 항목의 서비스·계정 이름",
+    "output": "데몬 전용 파이프로 전달하는 DB 키",
+    "boundary": "일반 읽기에서는 인증 창을 띄우지 않습니다. 키를 새 평문 파일에 저장하지 않습니다.",
+    "files": [
+      "crates/inboxd-keychain/src/main.rs",
+      "crates/inboxd-daemon/src/keychain.rs"
+    ]
+  },
+  "keychain": {
+    "r": [
+      850,
+      475,
+      115,
+      82
+    ],
+    "name": "Keychain",
+    "sub": "macOS · DB 키",
+    "desc": "SQLCipher 암호화 키를 보관하는 운영체제의 키체인입니다.",
+    "input": "최초 키 생성과 접근 권한 등록",
+    "output": "허용된 고정 접근기에 DB 키 제공",
+    "boundary": "처음 등록 시 항상 허용이 필요합니다. 키체인 잠금·권한 변경 시 추가 조치가 필요할 수 있습니다.",
+    "files": [
+      "crates/inboxd-keychain/src/main.rs"
+    ]
+  },
+  "reply": {
+    "r": [
+      365,
+      318,
+      140,
+      80
+    ],
+    "name": "로컬 답장 추천",
+    "sub": "문맥 판단 · 조회 · 검증",
+    "tag": "RUST",
+    "desc": "전체 방의 최신 문맥을 준비하되 최신 실제 발신자가 본인이면 추천 큐와 모델 실행에서 제외합니다. 이전 본인 메시지는 문맥으로 유지하고 상대 후속 메시지에 재개합니다. Rust가 조회 범위·예산·버전을 검증하며 실패는 자동 재시도하지 않습니다.",
+    "input": "response.open/get · 수신 관측 · 로컬 기록",
+    "output": "추천·확인 질문·보류, cache와 trajectory",
+    "boundary": "현재 조회 source는 같은 방의 로컬 과거 기록뿐입니다. 모델은 전송 권한이 없습니다.",
+    "files": [
+      "crates/inboxd-daemon/src/reply.rs",
+      "crates/inboxd-daemon/src/reply_pipeline.rs",
+      "crates/inboxd-storage/src/responses.rs"
+    ]
+  },
+  "model": {
+    "r": [
+      30,
+      350,
+      175,
+      70
+    ],
+    "name": "로컬 MLX 모델",
+    "sub": "Python 상주 워커 · 최대 2개",
+    "tag": "PY",
+    "desc": "로컬 모델 디렉터리에서 판단·생성·grounding 검사를 실행합니다. 설치 기본 경로는 Qwen3.5-9B-4bit이며 환경 변수로 변경할 수 있습니다.",
+    "input": "버전이 고정된 문맥과 허용된 evidence",
+    "output": "typed 판단, 초안, 검증 결과",
+    "boundary": "현재는 로컬 LLM baseline입니다. 모델 미설치·실패 시 직접 작성과 전송을 유지합니다.",
+    "files": [
+      "packages/reply-model/worker.py",
+      "packages/reply-model/README.md"
+    ]
+  }
 };
-const edges=[['tui','rpc','M205 105 H222 V170 H238'],['cli','rpc','M205 200 H238'],['mcp','rpc','M205 295 H222 V245 H238'],['rpc','server','M315 200 H337 V110 H368'],['server','accounts','M425 143 V185'],['server','legacy','M580 143 V185'],['accounts','worker','M500 230 H510 V164 H685 V115 H713'],['legacy','worker','M645 230 H699 V137 H713'],['worker','telegram','M754 158 V203'],['worker','slack','M840 158 V203'],['worker','kakao','M925 158 V203'],['telegram','cloud','M754 271 V323'],['slack','cloud','M840 271 V323'],['kakao','cloud','M925 271 V323'],['legacy','core','M582 274 V316'],['core','store','M582 374 V473'],['setup','config','M100 557 V585 H411 V559',true],['config','server','M410 475 V433 H352 V110 H368',true],['setup','host','M170 517 H193',true],['host','server','M260 475 V416 H325 V110 H368',true],['keychain','helper','M850 517 H832',true],['helper','store','M715 517 H667',true]];
-const steps=(...s)=>s.map(([node,title,desc])=>({node,title,desc}));
-const flows={overview:{title:'전체 구조',active:Object.keys(nodes),steps:steps(['server','세 가지 질문으로 보기','누가 요청하나요? → 누가 공통 규칙을 검사하나요? → 누가 실제 메신저와 통신하나요? 지도에서 구성 요소를 누르면 오른쪽 설명이 바뀝니다.'])},connect:{title:'계정 연결 · 인증은 한 곳에서',active:['cli','setup','host','config','server'],steps:steps(['cli','연결 메뉴 열기','inboxd connect 또는 TUI의 연결 메뉴에서 메신저를 선택합니다.'],['setup','서비스 방식으로 로그인','Telegram은 QR, Slack은 기존 로그인 세션, KakaoTalk은 보조 기기 인증을 사용합니다.'],['config','성공한 계정만 저장','신원을 확인한 연결 정보를 소유자 전용 설정에 원자적으로 기록합니다.'],['host','데몬에 새 설정 적용','호스트 모듈이 확인된 데몬을 재시작합니다.'],['server','새 계정을 사용할 준비','데몬이 설정을 읽고 해당 메신저 어댑터에 계정 작업을 연결합니다.'])},read:{title:'메시지 읽기 · 원본에서 화면까지',active:['tui','rpc','server','accounts','worker','telegram','slack','kakao','cloud'],steps:steps(['tui','목록 또는 채팅방 선택','메신저별 목록을 병렬 조회하고 완료된 계정부터 표시합니다. 특정 채팅방을 선택하면 메시지를 요청합니다.'],['rpc','공통 요청으로 전달','account.list 또는 account.messages 요청을 로컬 소켓으로 보냅니다.'],['accounts','계정과 채팅방 확인','설정된 계정의 채팅방인지 확인하고 목록 페이지·캐시를 관리합니다.'],['worker','해당 메신저에서 조회','워커가 어댑터를 통해 방 이름, 보낸 사람 이름, 메시지를 조회합니다.'],['tui','한 화면에 정리','응답이 역순으로 돌아옵니다. 채팅방은 최신 활동순으로, 메시지는 원래 이름과 함께 표시합니다.'])},search:{title:'통합 검색 · 결과에서 원래 대화로',active:['tui','rpc','server','accounts','worker','telegram','slack','kakao','cloud'],steps:steps(['tui','검색창에 입력','/ 또는 Ctrl+F로 검색창을 열고 검색어를 입력합니다. 선택한 메신저 필터를 적용합니다.'],['accounts','계정별로 검색 요청','account.search를 계정별로 병렬 실행합니다. 페이지별 결과는 점진적으로 표시합니다.'],['worker','서비스에 맞게 찾기','Telegram·Slack은 검색 API를 큰 페이지로 조회하고, KakaoTalk은 최대 8개 방 기록을 한 API 요청으로 묶습니다.'],['tui','검색 결과 쌓기','계정·채팅방·메시지 ID로 중복을 제거합니다. 계정별 최대 25페이지 이후는 n으로 이어 봅니다.'],['tui','결과 선택 → 대화로 복귀','원래 채팅방을 열고 해당 메시지 ID의 주변 기록을 불러와 검색한 메시지에 포커스를 둡니다.'])},send:{title:'직접 전송 · 소유자의 Enter',active:['tui','rpc','server','accounts','worker','telegram','slack','kakao','cloud'],steps:steps(['tui','작성하고 Enter','소유자 TUI에서는 승인 코드 입력 없이 전송합니다. 전송 중 Enter 중복 입력을 막습니다.'],['server','소유자 권한 확인','로컬 소유자 토큰을 포함한 approver 인증을 확인합니다. 에이전트·reader는 이 요청을 사용할 수 없습니다.'],['accounts','정확한 대상·요청 ID 확인','해당 계정의 발견된 채팅방과 전송 권한을 검증하고 요청 ID를 먼저 예약합니다.'],['worker','한 번 전송','어댑터가 메신저로 요청합니다. 실패나 시간 초과 때 자동으로 다시 보내지 않습니다.'],['tui','접수 또는 불확실 표시','서비스 접수는 Sent입니다. 결과를 확정하지 못하면 Uncertain으로 안내합니다.'])},agent:{title:'에이전트 전송 · 제안과 실행 사이의 승인',active:['mcp','tui','rpc','server','legacy','core','store','worker','telegram','slack','kakao','cloud'],steps:steps(['mcp','전송을 제안','에이전트는 기존 승인 경로로 내용을 제안합니다. account.send 직접 호출은 거부됩니다.'],['legacy','제안과 승인 상태 관리','대상·내용을 승인 요청에 묶고 상태를 암호화 저장소에 보관합니다.'],['tui','소유자가 확인·승인','별도 승인 UI에서 소유자가 승인합니다. 승인 코드는 에이전트에 전달되지 않습니다.'],['core','전송 전 규칙 재검사','승인 대상, 만료, 허용 정책과 전송 한도를 확인하고 전송 상태를 전이합니다.'],['worker','범위별 워커로 실행','기존 승인 경로의 워커와 지원 기능에 따라 전송합니다. 범위를 계정 전체로 자동 확대하지 않습니다.'],['store','결과를 기록','Sent와 독립 재조회에 의한 Verified를 구분합니다. 불확실한 전송은 자동 재시도하지 않습니다.'])},boot:{title:'시작과 암호화 · 키와 DB를 분리',active:['host','config','server','store','helper','keychain'],steps:steps(['host','설치된 데몬 시작','소유권과 실행 파일·상태 경로를 확인합니다. 상태 디렉터리당 하나의 데몬을 유지합니다.'],['config','계정 설정 로드','설정과 세션을 읽고 사용할 계정·워커를 구성합니다.'],['keychain','저장된 암호화 키 사용','DB 키는 macOS 키체인에 있습니다. Mac 로그인 비밀번호를 앱 파일에 저장하지 않습니다.'],['helper','고정 접근기가 키 전달','일반 읽기에서는 인증 창을 띄우지 않습니다. 허용된 키를 전용 파이프로 데몬에 전달합니다.'],['store','데몬이 DB 열기','전달받은 키로 저장소 액터가 SQLCipher를 엽니다. 그림의 키 연결선은 데몬을 통한 전달을 요약한 것입니다.'],['server','로컬 요청 받기','데몬이 소켓을 열고 TUI·CLI·MCP 요청을 처리합니다.'])}};
+const edges=[["tui", "rpc", "M205 105 H222 V170 H238"], ["cli", "rpc", "M205 200 H238"], ["mcp", "rpc", "M205 295 H222 V245 H238"], ["rpc", "server", "M315 200 H337 V110 H368"], ["server", "accounts", "M425 143 V185"], ["server", "legacy", "M580 143 V185"], ["accounts", "worker", "M500 230 H510 V164 H685 V115 H713"], ["legacy", "worker", "M645 230 H699 V137 H713"], ["worker", "telegram", "M754 158 V203"], ["worker", "slack", "M840 158 V203"], ["worker", "kakao", "M925 158 V203"], ["telegram", "cloud", "M754 271 V323"], ["slack", "cloud", "M840 271 V323"], ["kakao", "cloud", "M925 271 V323"], ["legacy", "core", "M582 274 V316"], ["core", "store", "M582 374 V473"], ["setup", "config", "M100 557 V585 H411 V559", true], ["config", "server", "M410 475 V433 H352 V110 H368", true], ["setup", "host", "M170 517 H193", true], ["host", "server", "M260 475 V416 H325 V110 H368", true], ["keychain", "helper", "M850 517 H832", true], ["helper", "store", "M715 517 H667", true], ["accounts", "store", "M435 274 V420 H545 V473"], ["server", "reply", "M370 110 H350 V358 H363"], ["reply", "model", "M365 355 H225 V385 H207"], ["reply", "store", "M435 398 V445 H560 V473"]];
+const flows={
+  "overview": {
+    "title": "전체 구조",
+    "active": [
+      "tui",
+      "cli",
+      "mcp",
+      "rpc",
+      "server",
+      "accounts",
+      "legacy",
+      "core",
+      "worker",
+      "telegram",
+      "slack",
+      "kakao",
+      "cloud",
+      "setup",
+      "host",
+      "config",
+      "store",
+      "helper",
+      "keychain",
+      "reply",
+      "model"
+    ],
+    "steps": [
+      {
+        "node": "server",
+        "title": "세 가지 질문으로 보기",
+        "desc": "누가 요청하나요? → 누가 공통 규칙을 검사하나요? → 누가 실제 메신저와 통신하나요? 지도에서 구성 요소를 누르면 오른쪽 설명이 바뀝니다."
+      }
+    ]
+  },
+  "connect": {
+    "title": "계정 연결 · 인증은 한 곳에서",
+    "active": [
+      "cli",
+      "setup",
+      "host",
+      "config",
+      "server"
+    ],
+    "steps": [
+      {
+        "node": "cli",
+        "title": "연결 메뉴 열기",
+        "desc": "inboxd connect 또는 TUI의 연결 메뉴에서 메신저를 선택합니다."
+      },
+      {
+        "node": "setup",
+        "title": "서비스 방식으로 로그인",
+        "desc": "Telegram은 QR, Slack은 기존 로그인 세션, KakaoTalk은 보조 기기 인증을 사용합니다."
+      },
+      {
+        "node": "config",
+        "title": "성공한 계정만 저장",
+        "desc": "신원을 확인한 연결 정보를 소유자 전용 설정에 원자적으로 기록합니다."
+      },
+      {
+        "node": "host",
+        "title": "데몬에 새 설정 적용",
+        "desc": "호스트 모듈이 확인된 데몬을 재시작합니다."
+      },
+      {
+        "node": "server",
+        "title": "새 계정을 사용할 준비",
+        "desc": "데몬이 설정을 읽고 해당 메신저 어댑터에 계정 작업을 연결합니다."
+      }
+    ]
+  },
+  "read": {
+    "title": "메시지 읽기 · 관측을 공유 DB에 저장",
+    "active": [
+      "tui",
+      "rpc",
+      "server",
+      "accounts",
+      "worker",
+      "telegram",
+      "slack",
+      "kakao",
+      "cloud",
+      "store"
+    ],
+    "steps": [
+      {
+        "node": "tui",
+        "title": "채팅방을 선택",
+        "desc": "account.list로 목록을 받고 account.messages로 해당 방의 기록을 요청합니다."
+      },
+      {
+        "node": "accounts",
+        "title": "계정·페이지 권한 확인",
+        "desc": "발견된 방과 페이지 범위를 확인하고 기존 계정 스케줄러로 조회합니다."
+      },
+      {
+        "node": "worker",
+        "title": "원본 페이지 조회",
+        "desc": "메신저별 어댑터가 이름·메시지·읽음 근거를 공통 형식으로 반환합니다."
+      },
+      {
+        "node": "store",
+        "title": "관측을 원자적으로 저장",
+        "desc": "반환된 페이지를 공유 메시지·검색 색인에 저장합니다. 오래된 관측이 최신 값을 덮지 않게 순서를 관리합니다."
+      },
+      {
+        "node": "tui",
+        "title": "화면과 읽음 반영",
+        "desc": "방에 들어오면 response.seen(all)로 전체 메시지를 읽음 처리합니다. 내부 revision 알림은 수집·저장·검색·안 읽음 대상에서 제외합니다. 카카오는 사용자 읽음 경계에서 서버 읽음을 비동기 동기화하고 실패 시 복구합니다."
+      }
+    ]
+  },
+  "search": {
+    "title": "공통 검색 · local / remote / refresh",
+    "active": [
+      "tui",
+      "mcp",
+      "rpc",
+      "server",
+      "accounts",
+      "store",
+      "worker",
+      "telegram",
+      "slack",
+      "kakao",
+      "cloud"
+    ],
+    "steps": [
+      {
+        "node": "tui",
+        "title": "공통 message.search",
+        "desc": "계정·검색어와 local, remote, refresh 모드를 지정합니다. MCP도 같은 API를 사용합니다."
+      },
+      {
+        "node": "store",
+        "title": "local: 저장된 색인 먼저",
+        "desc": "공유 SQLCipher에서 검색합니다. 3자 이상은 trigram FTS, 짧은 검색어는 LIKE를 사용합니다."
+      },
+      {
+        "node": "accounts",
+        "title": "remote: 서비스에서 확인",
+        "desc": "서비스 검색 페이지를 새로 조회하고 반환된 메시지를 저장합니다. 서비스 검색과 로컬 부분 문자열 검색은 의미가 다를 수 있습니다."
+      },
+      {
+        "node": "accounts",
+        "title": "refresh: 로컬 반환 후 갱신",
+        "desc": "로컬 결과와 작업 ID를 즉시 반환하고 refresh_id로 완료 여부를 확인합니다. TUI는 로컬 표시 후 원격 페이지를 확인하고 합칩니다."
+      },
+      {
+        "node": "tui",
+        "title": "출처·실패·범위를 표시",
+        "desc": "로컬/원격 커서를 분리합니다. 원격 실패에도 로컬 결과를 보존하며, 검색 결과가 0개여도 전체 기록이 없다고 단정하지 않습니다."
+      }
+    ]
+  },
+  "send": {
+    "title": "전송 · 권한 검사와 영구 중복 방지",
+    "active": [
+      "tui",
+      "rpc",
+      "server",
+      "legacy",
+      "worker",
+      "accounts",
+      "store",
+      "telegram",
+      "slack",
+      "kakao",
+      "cloud"
+    ],
+    "steps": [
+      {
+        "node": "tui",
+        "title": "작성 후 Enter",
+        "desc": "message.send에 고유 request_id와 정확한 대상을 담습니다. 추천 수락은 전송과 별개입니다."
+      },
+      {
+        "node": "server",
+        "title": "인증과 capability 확인",
+        "desc": "trusted approver 또는 sender만 허용합니다. 대상과 현재 기능·인증 상태를 검사합니다."
+      },
+      {
+        "node": "store",
+        "title": "발송 전에 요청 예약",
+        "desc": "owner_sends에 요청 ID와 대상·내용을 영구 예약합니다. 같은 ID의 요청은 재시작 후에도 재발송하지 않습니다."
+      },
+      {
+        "node": "worker",
+        "title": "지원하는 워커로 발송",
+        "desc": "계정 전송 또는 binding 워커로 한 번 실행합니다. 응답 유실은 Uncertain으로 남깁니다."
+      },
+      {
+        "node": "tui",
+        "title": "결과 확인과 다음 대화",
+        "desc": "Sent/Verified와 Failed/Uncertain을 구분합니다. 불확실할 때 send.status로 확인하며 자동 재전송하지 않습니다."
+      }
+    ]
+  },
+  "agent": {
+    "title": "MCP · 조회와 명시적 sender 위임",
+    "active": [
+      "mcp",
+      "rpc",
+      "server",
+      "legacy",
+      "accounts",
+      "store",
+      "worker"
+    ],
+    "steps": [
+      {
+        "node": "mcp",
+        "title": "기본은 agent 조회",
+        "desc": "검색·최근 메시지·근거를 읽습니다. 기본 agent 역할에는 전송 권한이 없습니다."
+      },
+      {
+        "node": "server",
+        "title": "sender 토큰으로 위임",
+        "desc": "명시적인 sender 자격 증명이 있으면 message_send 도구가 공통 message.send를 호출할 수 있습니다."
+      },
+      {
+        "node": "legacy",
+        "title": "동일 전송 검증 경로",
+        "desc": "TUI와 같은 capability 검사와 영구 요청 예약을 적용합니다. 별도의 제안→승인 코드 생성 경로가 아닙니다."
+      },
+      {
+        "node": "store",
+        "title": "상태 조회",
+        "desc": "send_status로 결과를 확인합니다. 추천 세션과 trajectory는 소유자 전용이며 MCP에는 제공하지 않습니다."
+      }
+    ]
+  },
+  "boot": {
+    "title": "시작과 암호화 · 키와 DB를 분리",
+    "active": [
+      "host",
+      "config",
+      "server",
+      "store",
+      "helper",
+      "keychain"
+    ],
+    "steps": [
+      {
+        "node": "host",
+        "title": "설치된 데몬 시작",
+        "desc": "소유권과 실행 파일·상태 경로를 확인합니다. 상태 디렉터리당 하나의 데몬을 유지합니다."
+      },
+      {
+        "node": "config",
+        "title": "계정 설정 로드",
+        "desc": "설정과 세션을 읽고 사용할 계정·워커를 구성합니다."
+      },
+      {
+        "node": "keychain",
+        "title": "저장된 암호화 키 사용",
+        "desc": "DB 키는 macOS 키체인에 있습니다. Mac 로그인 비밀번호를 앱 파일에 저장하지 않습니다."
+      },
+      {
+        "node": "helper",
+        "title": "고정 접근기가 키 전달",
+        "desc": "일반 읽기에서는 인증 창을 띄우지 않습니다. 허용된 키를 전용 파이프로 데몬에 전달합니다."
+      },
+      {
+        "node": "store",
+        "title": "데몬이 DB 열기",
+        "desc": "전달받은 키로 저장소 액터가 SQLCipher를 엽니다. 그림의 키 연결선은 데몬을 통한 전달을 요약한 것입니다."
+      },
+      {
+        "node": "server",
+        "title": "로컬 요청 받기",
+        "desc": "데몬이 소켓을 열고 TUI·CLI·MCP 요청을 처리합니다."
+      }
+    ]
+  },
+  "live": {
+    "title": "실시간 수신 · TUI 없이도 동작",
+    "active": [
+      "worker",
+      "telegram",
+      "slack",
+      "kakao",
+      "accounts",
+      "store",
+      "server",
+      "rpc",
+      "tui",
+      "reply"
+    ],
+    "steps": [
+      {
+        "node": "worker",
+        "title": "기존 세션에서 push 수신",
+        "desc": "Slack RTM, Telegram TDLib, Kakao LOCO 이벤트를 제한된 stderr 힌트로 보냅니다."
+      },
+      {
+        "node": "accounts",
+        "title": "힌트 병합과 재조회",
+        "desc": "계정별 supervisor가 해당 방·메시지를 재조회합니다. 시작·재연결·주기 sweep은 열지 않은 방의 최근 페이지도 읽습니다."
+      },
+      {
+        "node": "store",
+        "title": "저장 후 알림",
+        "desc": "관측 commit 후 message.upserted를 발행합니다. 목록 변경은 account.changed로 구분합니다."
+      },
+      {
+        "node": "reply",
+        "title": "안 읽은 방 추천 준비",
+        "desc": "로컬 관측을 이용해 추천 작업을 예약합니다. 백그라운드 읽기는 사용자의 읽음 처리와 구분합니다."
+      },
+      {
+        "node": "tui",
+        "title": "구독으로 갱신",
+        "desc": "목록·활성 대화를 갱신하면서 초안을 보존합니다. 실패·연결 단절·미처리 방은 sync.status로 드러냅니다."
+      }
+    ]
+  },
+  "reply": {
+    "title": "로컬 추천 · 준비 → Tab 수락 → Enter 전송",
+    "active": [
+      "tui",
+      "rpc",
+      "server",
+      "reply",
+      "model",
+      "store",
+      "legacy"
+    ],
+    "steps": [
+      {
+        "node": "reply",
+        "title": "문맥과 작업 준비",
+        "desc": "수신 관측으로 사전 생성하고 response.open으로 방 진입 세션을 엽니다. 최신 실제 발신자가 본인이면 답장 대상이 없어 큐·판단·생성·검증을 건너뜁니다. 이전 본인 메시지는 문맥에 남고 상대 후속 메시지부터 재개합니다. 대상이 있는 방은 안 읽은 방과 최신 수신 순서로 처리합니다."
+      },
+      {
+        "node": "model",
+        "title": "필요한 문맥 판단",
+        "desc": "로컬 LLM이 typed action을 제안합니다. 전용 학습 CIM이나 보정된 확률 모델은 아직 아닙니다."
+      },
+      {
+        "node": "reply",
+        "title": "허용된 과거 기록만 조회",
+        "desc": "현재 방의 로컬 history만 허용합니다. 최대 2회 retrieval round·3회 query로 제한하고 반복·버전 불일치를 검사합니다."
+      },
+      {
+        "node": "model",
+        "title": "생성과 검증",
+        "desc": "근거를 바탕으로 초안을 만들고 grounding을 확인합니다. 정보가 부족하면 확인 질문이나 보류로 돌립니다."
+      },
+      {
+        "node": "store",
+        "title": "cache와 trajectory 보관",
+        "desc": "snapshot·판단·조회·근거·추천·사용자 행동·전송 결과를 연결합니다. 기록 설정과 보관 기간·삭제는 소유자가 제어합니다."
+      },
+      {
+        "node": "tui",
+        "title": "사용자가 수락하고 전송",
+        "desc": "Tab은 준비된 추천을 초안에 넣고, 초안이 비어 있으면 다음 안 읽은 방 이동을 요청합니다. 생성 중에는 대기 안내를 하고, 아직 보지 않은 메시지가 있으면 먼저 보여줍니다. Enter가 전송하며 Shift+Tab은 영역 이동입니다."
+      }
+    ]
+  }
+};
 const stage=document.getElementById('stage'), edgeRoot=document.getElementById('edges');
 for(const [id,n] of Object.entries(nodes)){const b=document.createElement('button');b.className='node';b.dataset.id=id;b.setAttribute('aria-pressed','false');b.setAttribute('aria-label',n.name.replace(/<br>/g,' ')+' 설명');const[x,y,w,h]=n.r;Object.assign(b.style,{left:x/10+'%',top:y/6.3+'%',width:w/10+'%',height:h/6.3+'%'});b.innerHTML=`${n.tag?`<span class="tag">${n.tag}</span>`:''}<strong>${n.name}</strong><small>${n.sub}</small><code>${n.files[0]}</code>`;b.onclick=()=>selectNode(id);stage.append(b)}
 for(const[a,b,d,side]of edges){const p=document.createElementNS('http://www.w3.org/2000/svg','path');p.setAttribute('d',d);p.setAttribute('class','edge'+(side?' side':''));p.dataset.from=a;p.dataset.to=b;edgeRoot.append(p)}

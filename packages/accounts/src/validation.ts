@@ -2,7 +2,7 @@ import schema from "../schema/primitives.json";
 import type { AccountRequest, PrimitiveRequest, ResultFor } from "./generated.ts";
 type Shape = string | { fields: Record<string, Shape> } | { optional: Shape } | { array: Shape } | { enum: string[] } | { union: Shape[] };
 const definitions = schema as unknown as {types: Record<string, Shape>; operations: Record<string, {request: Shape; result: Shape}>};
-const writes = new Set(["kakao_send", "telegram_send", "slack.chat.postMessage", "slack_send_file", "kakao_send_file", "telegram_send_file"]);
+const writes = new Set(["kakao_send", "kakao_mark_read", "telegram_send", "slack.chat.postMessage", "slack_send_file", "kakao_send_file", "telegram_send_file"]);
 function check(shape: Shape, value: unknown, strict: boolean): void {
   if (typeof shape === "string") {
     if (shape in definitions.types) return check(definitions.types[shape]!, value, strict);

@@ -4,6 +4,7 @@
 mod actor;
 mod observations;
 mod owner_sends;
+mod responses;
 mod serialization;
 
 pub use actor::{StorageActor, StorageActorConfig, StorageOperation};
@@ -248,6 +249,9 @@ impl NativeHost {
 
     /// Input and output are core wire values, not unencoded Rust strings.
     pub fn execute(&self, op: &str, input: &Value) -> CoreResult<Value> {
+        if op == "response.recover" {
+            observations::repair_internal_feeds(&self.connection)?;
+        }
         if op == "observations.delete" {
             return observations::delete(&self.connection, input);
         }
@@ -261,6 +265,9 @@ impl NativeHost {
         // legacy UTF-16 core wire operations. Keep exact owner request identity.
         if op.starts_with("ownerSend.") {
             return owner_sends::execute(&self.connection, op, input);
+        }
+        if op.starts_with("response.") {
+            return responses::execute(&self.connection, op, input);
         }
         let mut result = inboxd_core::call(op, input, self)?;
         if op == "store.diagnose" {

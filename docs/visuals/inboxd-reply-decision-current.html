@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Inboxd 추천 메시지: 대화 준비와 답장 방향 판단</title>
+  <style>
+    :root{color-scheme:light;--bg:#f4f6fa;--ink:#17263a;--muted:#53657d;--line:#d9e1eb;--blue:#eaf2ff;--violet:#f0ebff;--green:#e7f5eb;--amber:#fff4db;--red:#fff0ef}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.65,-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic",sans-serif}
+    main{max-width:1060px;margin:auto;padding:48px 24px 80px}h1{font-size:clamp(30px,4vw,48px);line-height:1.25;letter-spacing:-.045em;margin:12px 0}h2{font-size:26px;letter-spacing:-.03em;margin:0 0 18px}h3{font-size:18px;margin:0 0 8px}
+    p{margin:8px 0 0}.eyebrow{color:#416db2;font:700 12px/1.4 ui-monospace,monospace;letter-spacing:.12em}.lead{font-size:18px;color:var(--muted);max-width:760px}.meta{font-size:13px;color:var(--muted);margin-top:18px}
+    section{margin-top:34px;background:#fff;border:1px solid var(--line);border-radius:16px;padding:28px}.callout{border-left:4px solid #5178c3;background:var(--blue);padding:17px 20px;border-radius:6px;margin:20px 0}.callout.warn{border-color:#c58d2c;background:var(--amber)}
+    .metrics,.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:20px 0}.metric,.card{border:1px solid var(--line);border-radius:11px;padding:17px;background:#fff}.metric strong{display:block;font-size:29px;line-height:1.25;color:#285da8}.metric span{font-size:13px;color:var(--muted)}.card.blue{background:var(--blue)}.card.violet{background:var(--violet)}.card.green{background:var(--green)}
+    .flow{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:22px 0}.step{padding:14px;background:var(--blue);border:1px solid #c8d9f1;border-radius:10px;font-size:14px}.step b{display:block;margin-bottom:7px}.step:nth-child(2){background:var(--violet)}.step:nth-child(3){background:var(--amber)}.step:nth-child(4){background:var(--violet)}.step:nth-child(5){background:var(--green)}
+    .branch{display:grid;grid-template-columns:175px 1fr;gap:15px;padding:15px 0;border-top:1px solid var(--line)}.branch b{color:#285da8}.branch p{margin:0}.small{font-size:14px;color:var(--muted)}
+    table{border-collapse:collapse;width:100%;margin-top:16px;font-size:14px}th,td{padding:12px 14px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}th{background:#eef2f7}code{font:13px ui-monospace,SFMono-Regular,monospace;background:#edf1f6;padding:2px 5px;border-radius:4px}a{color:#275eae;text-underline-offset:3px}.sources{font-size:13px;color:var(--muted);margin-top:20px}.sources a{margin-right:12px}footer{margin-top:30px;color:var(--muted);font-size:12px}@media(max-width:760px){.metrics,.cards,.flow{grid-template-columns:1fr}.branch{grid-template-columns:1fr;gap:4px}section{padding:22px}}
+  </style>
+</head>
+<body><main>
+  <header>
+    <div class="eyebrow">INBOXD · CURRENT WORKTREE</div>
+    <h1>추천 메시지는 어떤 대화를 보고<br>어떻게 답장 방향을 정할까?</h1>
+    <p class="lead">현재 코드의 대화 준비와 판단·검색 경로를 설명합니다. 이 페이지의 숫자는 작업 트리의 구현값이며 품질 최적값이라는 뜻은 아닙니다.</p>
+    <p class="meta">확인일: 2026-09-23 · 설명 범위: 최근 대화 선택 → 판단 → 검색·재판단 → 초안 방향</p>
+  </header>
+
+  <section id="context">
+    <h2>1. 왜 최근 40개인가?</h2>
+    <div class="metrics">
+      <div class="metric"><strong>40개</strong><span>한 방에서 가져오는 최근 메시지 수의 상한. 나와 상대의 메시지를 합산합니다.</span></div>
+      <div class="metric"><strong>32,000자</strong><span>판단용 본문 예산. 긴 대화에서는 40개를 모두 담지 못할 수 있습니다.</span></div>
+      <div class="metric"><strong>0건</strong><span>40이라는 값의 선택 근거로 코드에 기록된 실험·측정 결과.</span></div>
+    </div>
+    <div class="callout"><strong>정확한 해석</strong><br>40은 저장소 조회문의 고정 상한입니다. “40개가 가장 정확하고 빠르다”는 검증 결과는 코드에서 확인되지 않습니다. 오래된 합의가 이 범위 밖에 있으면 뒤의 검색 경로에 의존합니다.</div>
+    <p>판단용 상태는 새로 들어온 메시지의 본문을 우선 담고, 남은 공간을 최근 대화로 채웁니다. 초안 작성에는 별도의 길이 제한이 적용되어 판단과 작성이 보는 본문 범위가 달라질 수 있습니다.</p>
+    <p class="small">마지막 실제 발신자가 나이면 추천을 준비하지 않습니다. 상대가 마지막으로 말했으면 이미 읽은 방도 추천 대상이 될 수 있습니다.</p>
+    <p class="sources">코드: <a href="../../crates/inboxd-storage/src/responses.rs">대화 조회·대상 판별</a><a href="../../packages/reply-model/context_intelligence.py">판단 입력 구성</a><a href="../../packages/reply-model/worker.py">작성 입력 제한</a></p>
+  </section>
+
+  <section id="decision">
+    <h2>2. 답장 방향은 어떻게 결정하나?</h2>
+    <div class="flow" aria-label="판단 흐름">
+      <div class="step"><b>① 상태 구성</b>최근 대화, 발신자, 새 메시지 ID, 기존 근거와 검색 출처를 묶습니다.</div>
+      <div class="step"><b>② 모델 분류</b>답장 필요성, 정보 충분성, 부족한 정보, 위험, 다음 행동을 JSON으로 고릅니다.</div>
+      <div class="step"><b>③ 정책 검사</b>코드가 출력 형식과 허용 범위, 사용자 결정·불확실성 규칙을 확인합니다.</div>
+      <div class="step"><b>④ 검색·재판단</b>필요하면 같은 방의 이전 기록을 찾고 근거를 더해 다시 분류합니다.</div>
+      <div class="step"><b>⑤ 방향 확정</b><code>reply</code> 또는 <code>clarify</code>를 초안 작성기로 전달합니다.</div>
+    </div>
+    <h3>모델은 답장 문장보다 먼저 이 항목을 고릅니다</h3>
+    <table><thead><tr><th>항목</th><th>선택 예시</th><th>의미</th></tr></thead><tbody>
+      <tr><td>답장 필요성</td><td><code>respond</code> · <code>no_reply</code> · <code>uncertain</code></td><td>답할 상황인지</td></tr>
+      <tr><td>정보 충분성</td><td><code>sufficient</code> · <code>insufficient</code> · <code>unknown</code></td><td>지금 가진 근거로 답할 수 있는지</td></tr>
+      <tr><td>부족한 정보</td><td>이전 합의 · 일정 · 프로젝트 상태 · 내 결정</td><td>무엇을 확인해야 하는지</td></tr>
+      <tr><td>위험</td><td>근거 없는 확정 · 근거 충돌</td><td>그대로 답하면 사실이나 의사를 잘못 단정할지</td></tr>
+      <tr><td>다음 행동</td><td>직접 답장 · 검색 · 재판단 · 확인 질문 · 보류</td><td>코드에 제안하는 다음 단계</td></tr>
+    </tbody></table>
+    <p class="sources">코드: <a href="../../packages/reply-model/context_intelligence.py">분류 항목·프롬프트·출력 검증</a><a href="../../packages/reply-model/worker.py">로컬 모델 호출</a></p>
+  </section>
+
+  <section id="policy">
+    <h2>3. 모델의 제안을 코드가 어떻게 처리하나?</h2>
+    <div class="branch"><b>내 새 결정이 필요함</b><p>계약 승낙이나 내 일정 가능 여부를 과거 기록으로 대신 확정하지 않습니다. <code>clarify</code>를 선택합니다.</p></div>
+    <div class="branch"><b>불확실하거나 모순됨</b><p>같은 상태를 한 번 더 판단합니다. 해결되지 않으면 확인 질문이나 보류 방향으로 갑니다.</p></div>
+    <div class="branch"><b>이전 정보가 필요함</b><p>현재 방의 저장 메시지만 검색합니다. 최대 2라운드, 총 3회 질의 후 검색 결과를 근거에 추가해 다시 판단합니다.</p></div>
+    <div class="branch"><b>지금 정보로 충분함</b><p>근거 없는 확정 위험이 없으면 <code>reply</code>, 위험이 있으면 <code>clarify</code>를 선택합니다.</p></div>
+    <div class="callout warn"><strong><code>no_reply</code>의 현재 동작</strong><br>마지막 발신자가 상대여서 여기까지 온 경우, 모델의 최종 <code>no_reply</code>는 초안 작성 전에 <code>reply</code>로, <code>defer</code>는 <code>clarify</code>로 전환됩니다. 마지막 발신자가 나인 경우는 대화 준비에서 이미 중단됩니다.</div>
+    <p class="sources">코드: <a href="../../packages/reply-model/policy.py">정책 분기</a><a href="../../crates/inboxd-daemon/src/reply_pipeline.rs">검색·반복·최종 전환</a></p>
+  </section>
+
+  <section id="examples">
+    <h2>4. 세 가지 상황으로 보기</h2>
+    <div class="cards">
+      <article class="card blue"><h3>“자료 감사합니다.”</h3><p>현재 대화로 답할 수 있다고 판단하면 <code>reply</code>로 갑니다.</p></article>
+      <article class="card violet"><h3>“지난번 조건으로 할까요?”</h3><p>이전 합의가 필요하면 같은 방의 과거 기록을 검색하고 다시 판단합니다.</p></article>
+      <article class="card green"><h3>“내일 3시 가능하세요?”</h3><p>내 일정·결정의 근거가 없으면 가능하다고 확정하지 않는 <code>clarify</code>로 갑니다.</p></article>
+    </div>
+    <p class="small">예시는 처리 경로를 설명하기 위한 가상 대화입니다. 실제 모델 출력이나 생성 문구를 보장하지 않습니다. 초안은 별도 근거 검사를 통과해야 추천으로 표시됩니다.</p>
+  </section>
+  <footer>Inboxd 추천 메시지 생성 로직 · 현재 작업 트리 기준 · 외부 리소스 없이 열리는 단일 HTML</footer>
+</main></body></html>

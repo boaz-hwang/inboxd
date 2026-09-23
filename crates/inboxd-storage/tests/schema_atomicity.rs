@@ -121,7 +121,7 @@ fn assert_v3_rejected_without_mutation(host: &NativeHost, label: &str) {
     );
     let error = host.execute("store.migrate", &Value::Null).unwrap_err();
     assert_eq!(error.name, "StoreSchemaError", "{label}");
-    assert_eq!(error.message, "Store schema 4 failed validation", "{label}");
+    assert_eq!(error.message, "Store schema 6 failed validation", "{label}");
     assert_eq!(complete_shape(host), before, "{label} was mutated");
 }
 
@@ -135,15 +135,15 @@ fn exact_pre_r1_schema_v3_migrates_additively_and_material_definition_drift_is_r
     install_v3(&canonical, PRE_R1_SCHEMA_V3);
     let canonical_complete = complete_shape(&canonical);
     let canonical_material = material_shape(&canonical);
-    assert_eq!(canonical.execute("store.migrate", &Value::Null).unwrap(), 4);
+    assert_eq!(canonical.execute("store.migrate", &Value::Null).unwrap(), 6);
     assert_eq!(material_shape(&canonical), canonical_material);
     let migrated_complete = complete_shape(&canonical);
-    assert_eq!(migrated_complete.len(), canonical_complete.len() + 1);
+    assert_eq!(migrated_complete.len(), canonical_complete.len() + 15);
     assert_eq!(
         SqlHost::new(&canonical)
             .get("PRAGMA user_version", &[])
             .unwrap()["user_version"],
-        4
+        6
     );
     assert_eq!(
         canonical.execute("store.diagnose", &Value::Null).unwrap()["ready"],
@@ -151,10 +151,10 @@ fn exact_pre_r1_schema_v3_migrates_additively_and_material_definition_drift_is_r
     );
 
     let fresh = NativeHost::open_production(&directory.path().join("fresh.db"), &key).unwrap();
-    assert_eq!(fresh.execute("store.migrate", &Value::Null).unwrap(), 4);
+    assert_eq!(fresh.execute("store.migrate", &Value::Null).unwrap(), 6);
     assert_eq!(material_shape(&fresh), canonical_material);
     assert_eq!(complete_shape(&fresh), migrated_complete);
-    assert_eq!(fresh.execute("store.migrate", &Value::Null).unwrap(), 4);
+    assert_eq!(fresh.execute("store.migrate", &Value::Null).unwrap(), 6);
     assert_eq!(complete_shape(&fresh), migrated_complete);
 
     let drifts = [
@@ -219,9 +219,95 @@ fn exact_pre_r1_schema_v3_migrates_additively_and_material_definition_drift_is_r
             "{label} was accepted"
         );
         let error = host.execute("store.migrate", &Value::Null).unwrap_err();
-        assert_eq!(error.message, "Store schema 4 failed validation", "{label}");
+        assert_eq!(error.message, "Store schema 6 failed validation", "{label}");
         assert_eq!(complete_shape(&host), before, "{label} was mutated");
     }
+}
+
+#[test]
+fn exact_v5_migrates_to_v6_without_changing_existing_response_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let key = [0x68; 32];
+    let host = NativeHost::open_production(&directory.path().join("v5.db"), &key).unwrap();
+    assert_eq!(host.execute("store.migrate", &Value::Null).unwrap(), 6);
+    let sql = SqlHost::new(&host);
+    sql.run("INSERT INTO response_seen(platform,account,chat_id,msg_id,seen_at) VALUES('kakao','owner','room','42',1)",&[]).unwrap();
+    sql.run("DROP TABLE provider_read_sync", &[]).unwrap();
+    sql.run("PRAGMA user_version = 5", &[]).unwrap();
+    assert_eq!(host.execute("store.migrate", &Value::Null).unwrap(), 6);
+    assert_eq!(
+        sql.get(
+            "SELECT count(*) AS count FROM response_seen WHERE msg_id='42'",
+            &[]
+        )
+        .unwrap()["count"],
+        1
+    );
+    assert_eq!(sql.get("SELECT count(*) AS count FROM sqlite_master WHERE type='table' AND name='provider_read_sync'",&[]).unwrap()["count"],1);
+    assert_eq!(
+        host.execute("store.diagnose", &Value::Null).unwrap()["ready"],
+        true
+    );
+}
+
+#[test]
+fn exact_schema_v4_migrates_without_recreating_or_losing_owner_sends() {
+    let directory = tempfile::tempdir().unwrap();
+    let host = NativeHost::open_production(&directory.path().join("v4.db"), &[0x74; 32]).unwrap();
+    install_v3(&host, PRE_R1_SCHEMA_V3);
+    let sql = SqlHost::new(&host);
+    sql.exec(inboxd_core::OWNER_SEND_SCHEMA).unwrap();
+    sql.run(
+        "INSERT INTO owner_sends(request_id,platform,account,chat_id,body,envelope_json,state,outcome_json) VALUES('request-1','test','a','c','body','{}','Sent','{}')",
+        &[],
+    )
+    .unwrap();
+    sql.run("INSERT INTO messages(platform,account,chat_id,msg_id,author_id,ts,body,revision_kind,revision_value) VALUES('test','a','c','old','other',1,'history','number','1')", &[]).unwrap();
+    sql.run(
+        "INSERT INTO account_self VALUES('test','a','{\"status\":\"known\",\"self_id\":\"me\"}',1)",
+        &[],
+    )
+    .unwrap();
+    sql.run("PRAGMA user_version = 4", &[]).unwrap();
+    let before = complete_shape(&host);
+
+    assert_eq!(host.execute("store.migrate", &Value::Null).unwrap(), 6);
+    assert_eq!(complete_shape(&host).len(), before.len() + 14);
+    assert_eq!(
+        host.execute(
+            "response.unread",
+            &json!({"platform":"test","account":"a","chat_id":"c"})
+        )
+        .unwrap()["status"],
+        "unknown"
+    );
+    sql.run("INSERT INTO messages(platform,account,chat_id,msg_id,author_id,ts,body,revision_kind,revision_value) VALUES('test','a','c','new','other',2,'incoming','number','2')", &[]).unwrap();
+    host.execute(
+        "response.observe",
+        &json!({"platform":"test","account":"a","chat_id":"c","message_ids":["new"]}),
+    )
+    .unwrap();
+    let unread = host
+        .execute(
+            "response.unread",
+            &json!({"platform":"test","account":"a","chat_id":"c"}),
+        )
+        .unwrap();
+    assert_eq!(unread["count"], 1);
+    assert_eq!(unread["status"], "at_least");
+    assert_eq!(
+        SqlHost::new(&host)
+            .get(
+                "SELECT request_id,state FROM owner_sends WHERE request_id='request-1'",
+                &[],
+            )
+            .unwrap(),
+        json!({"request_id":"request-1","state":"Sent"})
+    );
+    assert_eq!(
+        host.execute("store.diagnose", &Value::Null).unwrap()["ready"],
+        true
+    );
 }
 
 #[test]
@@ -300,7 +386,7 @@ fn version_three_is_not_ready_without_the_complete_schema() {
         false
     );
     let error = host.execute("store.migrate", &Value::Null).unwrap_err();
-    assert_eq!(error.message, "Store schema 4 failed validation");
+    assert_eq!(error.message, "Store schema 6 failed validation");
     assert_eq!(
         SqlHost::new(&host).get("PRAGMA user_version", &[]).unwrap()["user_version"],
         3
@@ -322,7 +408,7 @@ fn incompatible_schema_migration_rolls_back_every_partial_object() {
         .unwrap();
 
     let error = host.execute("store.migrate", &Value::Null).unwrap_err();
-    assert_eq!(error.message, "Store schema 4 failed validation");
+    assert_eq!(error.message, "Store schema 6 failed validation");
     assert_eq!(
         sql.all(
             "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",

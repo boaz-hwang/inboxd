@@ -107,7 +107,7 @@ function evidenceState(screen: Screen): TuiState {
 }
 
 function activatedDetailState(screen: Screen): TuiState {
-  return reduce(evidenceState(screen), { type: "key", key: "d" });
+  return { ...evidenceState(screen), detailOpen: true };
 }
 
 function focusBeforeSelectionState(): TuiState {
@@ -290,7 +290,7 @@ for (const size of sizes) {
   await capture("inbox-empty", reduce(evidenceState("inbox"), { type: "querySucceeded", generation: 1, screen: "inbox", data: [] }), size);
   await capture("chat-empty", emptyChatState(), size);
   let long = reduce(evidenceState("inbox"), { type: "querySucceeded", generation: 1, screen: "inbox", data: [{ id: "long", author: "민수", body: "한글 👩‍💻 é message ".repeat(200) + "\nEND-OF-MESSAGE" }] });
-  long = reduce(long, { type: "key", key: "d" });
+  long = { ...long, detailOpen: true, selected: { ...long.selected, [long.screen]: long.focus } };
   await capture("inbox-long-detail", long, size);
   for (let i = 0; i < 40; i++) long = reduce(long, { type: "key", key: "PageDown" });
   await capture("inbox-long-detail-scrolled", long, size);

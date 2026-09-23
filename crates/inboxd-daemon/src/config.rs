@@ -174,11 +174,12 @@ impl LoadedConfig {
                     account,
                     bot_token,
                     session_cookie,
+                    team_id,
                     ..
                 } => (
                     "slack",
                     account,
-                    json!({"kind":"slack","bot_token":bot_token.expose(),"session_cookie":session_cookie.as_ref().map(SecretString::expose)}),
+                    json!({"kind":"slack","team_id":team_id,"bot_token":bot_token.expose(),"session_cookie":session_cookie.as_ref().map(SecretString::expose)}),
                 ),
                 ProviderConfig::Telegram {
                     account,

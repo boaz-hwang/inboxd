@@ -35,7 +35,7 @@ test("render evidence is deterministic, cell-exact and labels unknown and refuse
     expect(first[`approvals-completion-lost-${dimensions}.txt`]).toContain("연결 끊김");
     expect(first[`doctor-${dimensions}.txt`]).toContain("계정 추가 / 다시 연결");
     expect(first[`doctor-detail-${dimensions}.txt`]).toContain("SQLCipher ready=true");
-    expect(first[`chat-active-compose-${dimensions}.txt`]).toContain("Enter send · Esc cancel");
+    expect(first[`chat-active-compose-${dimensions}.txt`]).toContain("Enter send · Ctrl+C cancel");
     expect(first[`chat-empty-${dimensions}.txt`]).toContain("아직 불러온 메시지가 없습니다");
     expect(first[`chat-read-only-${dimensions}.txt`]).toContain("읽기 전용 대화");
     expect(first[`inbox-long-detail-scrolled-${dimensions}.txt`]).toContain("END-OF-MESSAGE");

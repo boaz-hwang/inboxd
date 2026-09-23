@@ -23,7 +23,7 @@ for (const [op, def] of Object.entries(schema.operations)) {
 }
 out += `export interface PrimitiveResults {\n${Object.keys(schema.operations).map(op => `  ${JSON.stringify(op)}: ${pascal(op)}Result;`).join("\n")}\n}\n`;
 out += `export type PrimitiveRequest = ${Object.keys(schema.operations).map(op => pascal(op)+"Request").join(" | ")};\n`;
-out += 'export type ReadRequest = Exclude<PrimitiveRequest, { op: "kakao_send" | "telegram_send" | "slack.chat.postMessage" | "slack_send_file" | "kakao_send_file" | "telegram_send_file" }>;\n';
+out += 'export type ReadRequest = Exclude<PrimitiveRequest, { op: "kakao_send" | "kakao_mark_read" | "telegram_send" | "slack.chat.postMessage" | "slack_send_file" | "kakao_send_file" | "telegram_send_file" }>;\n';
 out += 'export type AccountRequest = PrimitiveRequest | { op: "batch"; requests: ReadRequest[] };\n';
 out += 'export type AccountResult = PrimitiveResults[keyof PrimitiveResults] | { results: PrimitiveResults[ReadRequest["op"]][] };\n';
 out += 'export type ResultFor<R extends AccountRequest> = R extends { op: "batch" } ? { results: PrimitiveResults[ReadRequest["op"]][] } : R extends PrimitiveRequest ? PrimitiveResults[R["op"]] : never;\n';

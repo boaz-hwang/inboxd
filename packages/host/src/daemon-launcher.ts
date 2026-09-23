@@ -9,7 +9,7 @@ const DEFAULT_READINESS_TIMEOUT_MS = 60_000;
 const STATUS_PROBE_TIMEOUT_MS = 200;
 const POLL_INTERVAL_MS = 25;
 const TERMINATION_GRACE_MS = 250;
-const SAFE_ENV_KEYS = ["HOME", "PATH", "TMPDIR", "USER", "LOGNAME", "LANG", "LC_ALL", "XDG_RUNTIME_DIR"] as const;
+const SAFE_ENV_KEYS = ["HOME", "PATH", "TMPDIR", "USER", "LOGNAME", "LANG", "LC_ALL", "XDG_RUNTIME_DIR", "INBOXD_REPLY_MODEL", "INBOXD_REPLY_PYTHON", "INBOXD_REPLY_WORKERS"] as const;
 
 export const defaultDaemonBinary = fileURLToPath(
   new URL("../../../target/inboxd-product/release/inboxd-daemon", import.meta.url),

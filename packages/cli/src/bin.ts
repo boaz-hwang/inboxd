@@ -13,7 +13,7 @@ import { ensureInstalledConfiguration, connectInstalledAccounts } from "./setup-
 
 const argv = process.argv.slice(2);
 if (argv.includes("--help")) {
-  console.log("usage: inboxd\n       inboxd connect [telegram|slack|kakao]\n       inboxd mcp\n       inboxd [--approver] <daemon|chat|message|sync|auth|send|doctor|safety> <action> [json]");
+  console.log("usage: inboxd\n       inboxd connect [telegram|slack|kakao]\n       inboxd mcp\n       inboxd [--approver] <daemon|chat|message|sync|auth|send|doctor|safety|trajectory> <action> [json]");
   process.exit(0);
 }
 const approverIndex = argv.indexOf("--approver");
@@ -62,7 +62,7 @@ try {
         process.once("SIGINT", close);
         return;
       }
-      const commandRole = command[0] === "message" && command[1] === "send" ? "sender" : role;
+      const commandRole = command[0] === "trajectory" || command[0] === "message" && command[1] === "send" ? "sender" : role;
       handlers = createUdsCliHandlers({ role: commandRole, daemonBinary, configPath: config, socketPath: socket });
       await runCli(command, { handlers });
     },

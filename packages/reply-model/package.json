@@ -1,0 +1,6 @@
+{
+  "name": "@inboxd/reply-model",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": { "test": "python3 -m unittest discover -s test" }
+}

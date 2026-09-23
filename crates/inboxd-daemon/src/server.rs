@@ -112,19 +112,43 @@ impl EventHub {
 
 pub(crate) struct ServerRuntime {
     pub(crate) accounts: Arc<crate::accounts::AccountService>,
+    pub(crate) replies: Arc<crate::reply::ReplyService>,
+    pub(crate) reply_task: Option<tokio::task::JoinHandle<()>>,
     pub(crate) events: Arc<EventHub>,
     pub(crate) capabilities: Arc<CapabilityRegistry>,
     pub(crate) connection_tasks: Arc<AtomicUsize>,
     pub(crate) max_queued_events: usize,
 }
 
+impl Drop for ServerRuntime {
+    fn drop(&mut self) {
+        if let Some(task) = self.reply_task.take() {
+            task.abort();
+        }
+    }
+}
+
 pub(crate) async fn run_server(
     listener: UnixListener,
     owner: Arc<ServerOwner>,
     approver_token: Arc<Zeroizing<String>>,
-    runtime: ServerRuntime,
+    mut runtime: ServerRuntime,
     mut shutdown: oneshot::Receiver<()>,
 ) -> Arc<ServerOwner> {
+    if let Ok(pending) = owner
+        .actor
+        .call_async(StorageOperation::ResponseReadSyncPending, json!({}))
+        .await
+    {
+        for task in pending["tasks"].as_array().cloned().unwrap_or_default() {
+            let mut outcome = task;
+            outcome["success"] = json!(false);
+            let _ = owner
+                .actor
+                .call_async(StorageOperation::ResponseReadSyncFinish, outcome)
+                .await;
+        }
+    }
     let mut live = runtime.accounts.start_live(Arc::clone(&runtime.events));
     let mut connections = JoinSet::new();
     loop {
@@ -139,6 +163,7 @@ pub(crate) async fn run_server(
                     let events = Arc::clone(&runtime.events);
                     let capabilities = Arc::clone(&runtime.capabilities);
                     let accounts = Arc::clone(&runtime.accounts);
+                    let replies = Arc::clone(&runtime.replies);
                     let max_queued_events = runtime.max_queued_events;
                     connections.spawn(async move {
                         handle_connection(
@@ -149,6 +174,7 @@ pub(crate) async fn run_server(
                             capabilities,
                             max_queued_events,
                             accounts,
+                            replies,
                         )
                         .await;
                     });
@@ -164,8 +190,51 @@ pub(crate) async fn run_server(
     connections.abort_all();
     while connections.join_next().await.is_some() {}
     runtime.accounts.stop_live().await;
+    if let Some(task) = runtime.reply_task.take() {
+        task.abort();
+        let _ = task.await;
+    }
     runtime.connection_tasks.store(0, Ordering::Release);
     owner
+}
+
+fn spawn_read_sync(
+    actor: Arc<StorageActor>,
+    accounts: Arc<crate::accounts::AccountService>,
+    events: Arc<EventHub>,
+    task: Value,
+) {
+    tokio::spawn(async move {
+        let _serial = accounts.read_sync.lock().await;
+        let current = actor
+            .call_async(StorageOperation::ResponseReadSyncPending, json!({}))
+            .await
+            .ok();
+        let active = current
+            .as_ref()
+            .and_then(|v| v["tasks"].as_array())
+            .is_some_and(|tasks| {
+                tasks
+                    .iter()
+                    .any(|candidate| candidate["operation_id"] == task["operation_id"])
+            });
+        if !active {
+            return;
+        }
+        let success = accounts.mark_read(&task).await.is_ok();
+        let mut completion = task.clone();
+        completion["success"] = json!(success);
+        let Ok(result) = actor
+            .call_async(StorageOperation::ResponseReadSyncFinish, completion)
+            .await
+        else {
+            return;
+        };
+        if result["applied"] != true && !success {
+            return;
+        }
+        let _=events.publish("account.changed",json!({"phase":"read_sync","platform":task["platform"],"account":task["account"],"chat_id":task["chat_id"],"read_sync":{"operation_id":task["operation_id"],"status":if success{"synced"}else{"failed"}},"unread":result["unread"]}));
+    });
 }
 
 #[derive(Clone)]
@@ -185,6 +254,7 @@ async fn handle_connection(
     capabilities: Arc<CapabilityRegistry>,
     max_queued_events: usize,
     accounts: Arc<crate::accounts::AccountService>,
+    replies: Arc<crate::reply::ReplyService>,
 ) {
     let mut decoder = match JsonLinesDecoder::new(MAX_CLIENT_FRAME_BYTES) {
         Ok(decoder) => decoder,
@@ -290,6 +360,7 @@ async fn handle_connection(
                         &events,
                         &capabilities,
                         &accounts,
+                        &replies,
                         &request,
                     )
                     .await
@@ -616,11 +687,12 @@ impl BackfillPagePlan {
 
 async fn dispatch(
     session: &mut Session,
-    actor: &StorageActor,
+    actor: &Arc<StorageActor>,
     approver_token: &str,
-    events: &EventHub,
+    events: &Arc<EventHub>,
     capabilities: &CapabilityRegistry,
-    accounts: &crate::accounts::AccountService,
+    accounts: &Arc<crate::accounts::AccountService>,
+    replies: &crate::reply::ReplyService,
     request: &ProtocolRequest,
 ) -> RpcResult {
     if request.method == "system.hello" {
@@ -679,7 +751,121 @@ async fn dispatch(
                     "authenticated local sender authorization is required",
                 ));
             }
-            crate::direct_send::execute(actor, capabilities, accounts, &Value::Object(request.params.clone()), json!({"role":role_value(session.role),"session_id":session.id,"authority":"local-owner-token","method":request.method})).await.map_err(RpcError::unsupported)
+            let mut send_params = Value::Object(request.params.clone());
+            let response_session_id = send_params
+                .as_object_mut()
+                .and_then(|p| p.remove("response_session_id"));
+            let response_scope = if let Some(id) =
+                response_session_id.as_ref().and_then(Value::as_str)
+            {
+                let current = actor_call(
+                    actor,
+                    StorageOperation::ResponseGet,
+                    json!({"response_session_id":id}),
+                    false,
+                )
+                .await?;
+                let destination = send_params
+                    .get("chat")
+                    .cloned()
+                    .unwrap_or_else(|| send_params["envelope"]["destination"].clone());
+                let destination = crate::reply::storage_chat(
+                    json!({"platform":destination["platform"],"account":destination["account"],"chat_id":destination["chat_id"]}),
+                );
+                if destination != current["chat"] {
+                    return Err(RpcError::bad_request(
+                        "response session chat does not match send destination",
+                    ));
+                }
+                Some((id.to_owned(), current["chat"].clone()))
+            } else {
+                None
+            };
+            let outcome=crate::direct_send::execute(actor, capabilities, accounts, &send_params, json!({"role":role_value(session.role),"session_id":session.id,"authority":"local-owner-token","method":request.method})).await.map_err(RpcError::unsupported)?;
+            if let Some((response_id, scope)) = response_scope {
+                let request_id = send_params["request_id"].clone();
+                let _=actor.call_async(StorageOperation::ResponseSendComplete,json!({"response_session_id":response_id,"platform":scope["platform"],"account":scope["account"],"chat_id":scope["chat_id"],"request_id":request_id,"outcome":outcome.clone()})).await;
+            }
+            Ok(outcome)
+        }
+        "response.open"
+        | "response.get"
+        | "response.seen"
+        | "response.feedback"
+        | "response.next"
+        | "trajectory.list"
+        | "trajectory.delete"
+        | "trajectory.settings" => {
+            if !session.trusted_sender && !session.trusted_approver {
+                return Err(RpcError::unsupported(
+                    "authenticated local owner authorization is required",
+                ));
+            }
+            let mut input = Value::Object(request.params.clone());
+            let operation = match request.method.as_str() {
+                "response.open" => {
+                    input["chat"] = crate::reply::storage_chat(input["chat"].clone());
+                    input["runtime_version"] = json!(crate::reply::runtime_version());
+                    StorageOperation::ResponseOpen
+                }
+                "response.get" => StorageOperation::ResponseGet,
+                "response.feedback" => StorageOperation::ResponseFeedback,
+                "response.next" => {
+                    input["accessible_chats"] = json!(accounts.accessible_chats().await);
+                    input["runtime_version"] = json!(crate::reply::runtime_version());
+                    StorageOperation::ResponseNext
+                }
+                "trajectory.list" => StorageOperation::ResponseTrajectoryList,
+                "trajectory.delete" => StorageOperation::ResponseTrajectoryDelete,
+                "trajectory.settings" => StorageOperation::ResponseSettings,
+                "response.seen" => {
+                    let current = actor_call(
+                        actor,
+                        StorageOperation::ResponseGet,
+                        json!({"response_session_id":input["response_session_id"]}),
+                        false,
+                    )
+                    .await?;
+                    if current["chat"]["platform"] == "telegram" {
+                        if let Some(chat) = current["chat"]["chat_id"]
+                            .as_str()
+                            .and_then(|s| s.strip_prefix("telegram:chat:"))
+                        {
+                            let prefix = format!("telegram:message:{chat}:");
+                            if let Some(ids) = input["message_ids"].as_array_mut() {
+                                for id in ids {
+                                    if let Some(raw) =
+                                        id.as_str().filter(|s| !s.starts_with("telegram:message:"))
+                                    {
+                                        *id = json!(format!("{prefix}{raw}"));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    StorageOperation::ResponseSeen
+                }
+                _ => unreachable!(),
+            };
+            let mut result = actor_call(actor, operation, input, false).await?;
+            if request.method == "response.seen" {
+                let task = result
+                    .as_object_mut()
+                    .and_then(|result| result.remove("_read_sync_task"))
+                    .unwrap_or(Value::Null);
+                if !task.is_null() {
+                    spawn_read_sync(
+                        Arc::clone(actor),
+                        Arc::clone(accounts),
+                        Arc::clone(events),
+                        task,
+                    );
+                }
+            }
+            if request.method == "response.open" {
+                replies.enqueue_session(&result).await;
+            }
+            Ok(crate::reply::public_result(result))
         }
         "account.messages" | "account.search" => {
             let op = request.method.strip_prefix("account.").unwrap();
@@ -1211,6 +1397,7 @@ mod common_search_wire_tests {
             }])
             .with_storage(Arc::clone(&actor)),
         );
+        let (replies, reply_task) = crate::reply::ReplyService::start(Arc::clone(&actor));
         for role in ["reader", "agent"] {
             let (client, server) = UnixStream::pair().unwrap();
             let task = tokio::spawn(handle_connection(
@@ -1221,6 +1408,7 @@ mod common_search_wire_tests {
                 Arc::new(CapabilityRegistry::new(vec![]).unwrap()),
                 32,
                 Arc::clone(&accounts),
+                Arc::clone(&replies),
             ));
             let mut stream = BufReader::new(client);
             assert_eq!(
@@ -1254,5 +1442,6 @@ mod common_search_wire_tests {
             drop(stream);
             task.await.unwrap();
         }
+        reply_task.abort();
     }
 }

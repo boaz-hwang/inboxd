@@ -6,6 +6,8 @@ import { packagedTdlibRuntime } from "./worker-entrypoint.ts";
 import { createProductionTdlibPort } from "./production-tdlib.ts";
 import type { AccountAdapter } from "../../../packages/accounts/src/contracts.ts";
 import type { TdlibUserClientPort } from "./tdlib-port.ts";
+export const telegramAuthRequired = () => Object.assign(new Error("Telegram 세션이 해제되었습니다. inboxd connect telegram으로 다시 연결하세요."), { code: "telegram_auth_required" });
+
 export async function createTelegramAccount(config: {
   api_id: number;
   api_hash: string;
@@ -32,7 +34,7 @@ export async function createTelegramAccount(config: {
       ].includes(state["@type"])
     ) {
       await port.close?.();
-      throw new Error("Telegram 세션 확인 필요");
+      throw telegramAuthRequired();
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
@@ -42,7 +44,7 @@ export async function createTelegramAccount(config: {
 /** Provider operations only; traversal, caching and result paging belong to Rust. */
 export function createTelegramAdapter(port: TdlibUserClientPort): AccountAdapter {
   const query = async (q: Record<string, unknown>) => {
-    if (!port.accountQuery) throw new Error("Telegram 세션 확인 필요");
+    if (!port.accountQuery) throw telegramAuthRequired();
     return port.accountQuery(q);
   };
   const message = (m: any) => ({
@@ -76,7 +78,8 @@ export function createTelegramAdapter(port: TdlibUserClientPort): AccountAdapter
           latest_ts: c.last_message?.date ?? 0,
           preview: c.last_message?.content?.text?.text ?? c.last_message?.content?.caption?.text ?? "",
           can_send: c.permissions?.can_send_basic_messages ?? c.permissions?.can_send_messages ?? true,
-          unread: c.unread_count }] };
+          unread: c.unread_count,
+          read_through: c.last_read_inbox_message_id == null ? null : String(c.last_read_inbox_message_id) }] };
       }
       case "telegram_sender": {
         const sender = await query(req.params?.kind === "user"
@@ -123,7 +126,20 @@ export function createTelegramAdapter(port: TdlibUserClientPort): AccountAdapter
     }
   };
   return {
-    run, close: () => port.close?.(),
+    async run(req) {
+      try { return await run(req); }
+      catch (error) {
+        if ((error as { code?: number }).code !== 401) throw error;
+        // TDLib manages its own persistent MTProto session. A read can resume
+        // once it is ready again; revoked sessions require the login flow.
+        const mutation = req.op === "telegram_send" || req.op === "telegram_send_file";
+        if (!mutation && (await port.getAuthorizationState())["@type"] === "authorizationStateReady") {
+          try { return await run(req); }
+          catch (retryError) { if ((retryError as { code?: number }).code !== 401) throw retryError; }
+        }
+        throw telegramAuthRequired();
+      }
+    }, close: () => port.close?.(),
     async listen(emit) {
       if (!port.onAccountUpdate) { emit({ event: "state", state: "unsupported" }); return () => {}; }
       emit({ event: "state", state: "disconnected" });

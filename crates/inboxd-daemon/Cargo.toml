@@ -11,6 +11,7 @@ test-key-provider = []
 test-worker = []
 
 [dependencies]
+inboxd-core = { path = "../inboxd-core" }
 getrandom.workspace = true
 inboxd-protocol = { path = "../inboxd-protocol" }
 inboxd-storage = { path = "../inboxd-storage" }
@@ -29,7 +30,6 @@ zeroize.workspace = true
 calcifer-macos-acl.workspace = true
 
 [dev-dependencies]
-inboxd-core = { path = "../inboxd-core" }
 tempfile = "=3.19.1"
 
 [[bin]]

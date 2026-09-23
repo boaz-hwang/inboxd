@@ -40,6 +40,7 @@ writeFileSync(config.record_path, JSON.stringify({
   argv,
   envKeys: Object.keys(process.env).sort(),
   leaked: process.env.INBOXD_LAUNCHER_SECRET ?? null,
+  replyWorkers: process.env.INBOXD_REPLY_WORKERS ?? null,
   stdinClosed: stdinContents.length === 0,
 }), { mode: 0o600 });
 rmSync(config.socket_path, { force: true });
@@ -91,7 +92,9 @@ async function stopFixture(fixture: Fixture): Promise<void> {
 test("launches the fixed executable with only --config and waits for protocol readiness", async () => {
   const fixture = createReadyFixture();
   const previousSecret = process.env.INBOXD_LAUNCHER_SECRET;
+  const previousReplyWorkers = process.env.INBOXD_REPLY_WORKERS;
   process.env.INBOXD_LAUNCHER_SECRET = "must-not-cross";
+  process.env.INBOXD_REPLY_WORKERS = "1";
   try {
     const result = await launchPackagedDaemon({
       daemonBinary: fixture.binary,
@@ -104,6 +107,7 @@ test("launches the fixed executable with only --config and waits for protocol re
     expect(launched.argv).toEqual(["--config", fixture.configPath]);
     expect(launched.stdinClosed).toBe(true);
     expect(launched.leaked).toBeNull();
+    expect(launched.replyWorkers).toBe("1");
     expect(launched.envKeys).toEqual(expect.arrayContaining(["HOME", "PATH"]));
   } catch (error) {
     const errorPath = join(fixture.root, "fixture.err");
@@ -112,6 +116,8 @@ test("launches the fixed executable with only --config and waits for protocol re
   } finally {
     if (previousSecret === undefined) delete process.env.INBOXD_LAUNCHER_SECRET;
     else process.env.INBOXD_LAUNCHER_SECRET = previousSecret;
+    if (previousReplyWorkers === undefined) delete process.env.INBOXD_REPLY_WORKERS;
+    else process.env.INBOXD_REPLY_WORKERS = previousReplyWorkers;
     await stopFixture(fixture);
   }
 });

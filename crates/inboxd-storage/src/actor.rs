@@ -121,6 +121,23 @@ pub enum StorageOperation {
     SafetyListPendingPage,
     SafetyGetIntent,
     SafetyReject,
+    ResponsePrepare,
+    ResponseUnread,
+    ResponseOpen,
+    ResponseGet,
+    ResponseSeen,
+    ResponseReadSyncPending,
+    ResponseReadSyncFinish,
+    ResponseFeedback,
+    ResponseNext,
+    ResponseSendComplete,
+    ResponseGenerationClaim,
+    ResponseGenerationFinish,
+    ResponseTrajectoryList,
+    ResponseTrajectoryDelete,
+    ResponseSettings,
+    ResponseEvidence,
+    ResponseObserve,
 }
 
 impl StorageOperation {
@@ -153,6 +170,23 @@ impl StorageOperation {
             Self::SafetyListPendingPage => "safety.listPendingPage",
             Self::SafetyGetIntent => "safety.getIntent",
             Self::SafetyReject => "safety.reject",
+            Self::ResponsePrepare => "response.prepare",
+            Self::ResponseUnread => "response.unread",
+            Self::ResponseOpen => "response.open",
+            Self::ResponseGet => "response.get",
+            Self::ResponseSeen => "response.seen",
+            Self::ResponseReadSyncPending => "response.readSync.pending",
+            Self::ResponseReadSyncFinish => "response.readSync.finish",
+            Self::ResponseFeedback => "response.feedback",
+            Self::ResponseNext => "response.next",
+            Self::ResponseSendComplete => "response.sendComplete",
+            Self::ResponseGenerationClaim => "response.generationClaim",
+            Self::ResponseGenerationFinish => "response.generationFinish",
+            Self::ResponseTrajectoryList => "response.trajectory.list",
+            Self::ResponseTrajectoryDelete => "response.trajectory.delete",
+            Self::ResponseSettings => "response.settings",
+            Self::ResponseEvidence => "response.evidence",
+            Self::ResponseObserve => "response.observe",
         }
     }
 }
@@ -279,6 +313,7 @@ impl StorageActor {
             .host
             .execute("daemon.recoverInterruptedSends", &Value::Null)?;
         owner.host.execute("ownerSend.recover", &Value::Null)?;
+        owner.host.execute("response.recover", &Value::Null)?;
         owner.host.execute("store.diagnose", &Value::Null)?;
         if startup_started.elapsed() > startup_timeout {
             return Err(CoreError::new(

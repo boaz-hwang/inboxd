@@ -1,0 +1,52 @@
+{
+  "evaluated_at": "2026-09-23T10:15:00+09:00",
+  "environment": {
+    "machine": "Apple M4 Pro, 48 GiB",
+    "os": "macOS 26.6.2",
+    "mlx": "0.32.2",
+    "mlx_lm": "0.31.3",
+    "model": "Qwen3.5-9B-4bit",
+    "production_reply_worker_running": true,
+    "note": "The live worker was not stopped, so its changing GPU workload is an uncontrolled realistic-contention factor. All benchmark inputs were synthetic."
+  },
+  "generation_only_equal_40_job_load": {
+    "one_worker": {
+      "wall_seconds": 116.69,
+      "throughput_jobs_per_second": 0.343,
+      "per_job_p50_seconds": 2.52,
+      "per_job_p95_seconds": 5.729,
+      "mlx_peak_gb": 5.724
+    },
+    "two_workers": {
+      "wall_seconds": 75.68,
+      "throughput_jobs_per_second": 0.529,
+      "throughput_change_percent": 54.2,
+      "per_job_p50_seconds": 3.447,
+      "per_job_p95_seconds": 5.072,
+      "per_worker_peak_footprint_gb": [
+        6.086,
+        6.086
+      ]
+    }
+  },
+  "current_generate_and_grounding_check_equal_6_job_load": {
+    "one_worker": {
+      "wall_seconds": 66.15,
+      "throughput_jobs_per_second": 0.091,
+      "mean_step_duration_seconds": 11.001,
+      "peak_footprint_gb": 6.715
+    },
+    "two_workers": {
+      "wall_seconds": 54.67,
+      "throughput_jobs_per_second": 0.11,
+      "throughput_change_percent": 21.0,
+      "mean_step_duration_seconds": 17.063,
+      "per_worker_peak_footprint_gb": [
+        6.856,
+        6.675
+      ]
+    },
+    "scope": "Draft generation and grounding check only; excludes route/retrieval, queue wait, and UI delivery."
+  },
+  "conclusion": "Two 9B workers are memory-feasible and drain a backlog faster, but shared-GPU contention increases individual latency. Use an adaptive pool capped at two: one worker for a lone ready job and start the second only when at least two jobs are ready."
+}

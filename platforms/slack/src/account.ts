@@ -1,3 +1,4 @@
+import { SlackAuthStore, slackAuthErrors, slackAuthRequired, type SlackCredentials } from "./auth-store.ts";
 import { SlackClient, SlackListener } from "agent-messenger/slack";
 import { readSelectedAttachment } from "../../../packages/host/src/attachments.ts";
 import { readBounded } from "../../../packages/accounts/src/io.ts";
@@ -11,9 +12,15 @@ const methods = new Set([
 export function createSlackAccount(config: {
   bot_token: string;
   session_cookie?: string;
-}, fetcher: typeof fetch = fetch, makeListener: (client: SlackClient) => Pick<SlackListener, "on" | "start" | "stop"> = client => new SlackListener(client)): AccountAdapter {
+  team_id?: string;
+}, fetcher: typeof fetch = fetch, makeListener: (client: SlackClient) => Pick<SlackListener, "on" | "start" | "stop"> = client => new SlackListener(client), auth: Pick<SlackAuthStore, "recover" | "remember"> & Partial<Pick<SlackAuthStore, "current" | "reject">> = new SlackAuthStore(fetcher)): AccountAdapter {
+  let credentials: SlackCredentials = auth.current?.(config) ?? { ...config };
+  let recovery: Promise<void> | undefined;
+  let remembered = false;
+  let relisten: (() => Promise<void>) | undefined;
+  let stopped = false;
   let stopListening: (() => void) | undefined;
-  async function call(
+  async function once(
     method: string,
     body: Record<string, unknown> = {},
   ): Promise<any> {
@@ -22,10 +29,10 @@ export function createSlackAccount(config: {
       redirect: "error",
       signal: AbortSignal.timeout(15000),
       headers: {
-        authorization: `Bearer ${config.bot_token}`,
+        authorization: `Bearer ${credentials.bot_token}`,
         "content-type": "application/x-www-form-urlencoded",
-        ...(config.session_cookie
-          ? { cookie: `d=${config.session_cookie}` }
+        ...(credentials.session_cookie
+          ? { cookie: `d=${credentials.session_cookie}` }
           : {}),
       },
       body: new URLSearchParams(
@@ -40,14 +47,40 @@ export function createSlackAccount(config: {
     if (!response.body) throw new Error("Slack 응답 없음");
     const text = await readBounded(response.body, 4_000_000);
     const result = JSON.parse(text);
+    if (result.ok === false && slackAuthErrors.has(result.error)) throw slackAuthRequired();
     if (!response.ok || !result.ok) throw new Error("Slack 조회 실패");
     return result;
   }
-  return {
-    close() { stopListening?.(); },
+  async function call(method: string, body: Record<string, unknown> = {}): Promise<any> {
+    const read = methods.has(method) && method !== "chat.postMessage";
+    if (read && recovery) await recovery;
+    const failed = credentials;
+    try {
+      const result = await once(method, body);
+      if (read && !remembered) { remembered = true; await auth.remember(credentials).catch(() => {}); }
+      return result;
+    } catch (error) {
+      if (!read || (error as { code?: string }).code !== "slack_auth_required") throw error;
+      if (credentials === failed && !recovery) recovery = (async () => {
+        credentials = await auth.recover(failed);
+        if (!stopped) await relisten?.();
+      })().finally(() => { recovery = undefined; });
+      await recovery;
+      try { return await once(method, body); }
+      catch (retryError) {
+        if ((retryError as { code?: string }).code === "slack_auth_required") await auth.reject?.(credentials);
+        throw retryError;
+      }
+    }
+  }
+  const adapter: AccountAdapter = {
+    close() { stopped = true; relisten = undefined; stopListening?.(); },
     async listen(emit) {
-      if (!config.session_cookie) { emit({ event: "state", state: "unsupported" }); return () => {}; }
-      const client = await new SlackClient().login({ token: config.bot_token, cookie: config.session_cookie });
+      if (stopped) return () => {};
+      relisten = async () => { stopListening?.(); await adapter.listen?.(emit); };
+      if (!credentials.session_cookie) { emit({ event: "state", state: "unsupported" }); return () => {}; }
+      const client = await new SlackClient().login({ token: credentials.bot_token, cookie: credentials.session_cookie });
+      if (stopped) return () => {};
       const listener = makeListener(client);
       listener.on("connected", () => emit({ event: "state", state: "connected" }));
       listener.on("disconnected", () => emit({ event: "state", state: "disconnected" }));
@@ -89,4 +122,5 @@ export function createSlackAccount(config: {
       return { data: await call(method, "params" in req ? req.params : {}) };
     },
   };
+  return adapter;
 }

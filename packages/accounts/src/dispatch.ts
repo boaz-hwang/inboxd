@@ -1,3 +1,4 @@
+import { AUTH_ERROR_CODES } from "./errors.ts";
 import type { AccountAdapter, AccountRequest, AccountResult, ResultFor } from "./contracts.ts";
 import { parseRequest, parseResult } from "./validation.ts";
 
@@ -11,6 +12,11 @@ export async function dispatchWire(adapter: AccountAdapter, input: unknown): Pro
   if (request.op !== "batch") return parseResult(request,await adapter.run(request));
   // Await every started read before returning failure or closing the SDK session.
   const settled = await Promise.allSettled(request.requests.map(async r => parseResult(r,await adapter.run(r))));
-  if (settled.some(r => r.status === "rejected")) throw new Error("provider batch failed");
+  const failure = settled.find(r => r.status === "rejected");
+  if (failure?.status === "rejected") {
+    const error = new Error("provider batch failed");
+    if (AUTH_ERROR_CODES.has(failure.reason?.code)) Object.assign(error, { code: failure.reason.code });
+    throw error;
+  }
   return { results: settled.map(r => { if (r.status === "rejected") throw r.reason; return r.value; }) };
 }

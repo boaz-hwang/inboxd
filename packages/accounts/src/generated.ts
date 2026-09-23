@@ -10,7 +10,7 @@ export type SlackMetadata = { next_cursor?: (string) | null };
 export type SlackPagination = { page_count: number };
 export type SlackMatches = { matches: Array<SlackMessage>; pagination?: (SlackPagination) | null };
 export type KakaoLatest = { sent_at?: (number) | null; message?: (string) | null };
-export type KakaoRoom = { chat_id: string; type?: (string) | null; title?: (string) | null; display_name?: (string) | null; last_message?: (KakaoLatest) | null; unread_count?: (number) | null };
+export type KakaoRoom = { chat_id: string; type?: (string | number) | null; open_link_id?: (string) | null; title?: (string) | null; display_name?: (string) | null; last_message?: (KakaoLatest) | null; unread_count?: (number) | null };
 export type KakaoMember = { user_id: string; nickname?: (string) | null };
 export type AccountMessage = { id: string; chat_id: string; author_id: string; author_name: string; ts: number; body: string; author_kind?: ("user" | "chat") | null };
 export type AccountChat = { chat_id: string; title: string; latest_ts: number; preview: string; can_send: boolean; unread?: (number) | null };
@@ -47,6 +47,8 @@ export type KakaoSelfMembersRequest = { op: "kakao_self_members" } & { chat_id: 
 export type KakaoSelfMembersResult = { data: Array<KakaoMember> };
 export type KakaoSendRequest = { op: "kakao_send" } & { chat_id: string; body: string };
 export type KakaoSendResult = { state: "Sent"; receipt: string };
+export type KakaoMarkReadRequest = { op: "kakao_mark_read" } & { chat_id: string; message_id: string };
+export type KakaoMarkReadResult = { state: "Marked"; message_id: string };
 export type TelegramLoadDirectoryRequest = { op: "telegram_load_directory" } & { params: { list: "main" | "archive" }; limit: number };
 export type TelegramLoadDirectoryResult = { complete: boolean };
 export type TelegramListDirectoryRequest = { op: "telegram_list_directory" } & { params: { list: "main" | "archive" }; limit: number };
@@ -83,6 +85,7 @@ export interface PrimitiveResults {
   "kakao_members": KakaoMembersResult;
   "kakao_self_members": KakaoSelfMembersResult;
   "kakao_send": KakaoSendResult;
+  "kakao_mark_read": KakaoMarkReadResult;
   "telegram_load_directory": TelegramLoadDirectoryResult;
   "telegram_list_directory": TelegramListDirectoryResult;
   "telegram_chat": TelegramChatResult;
@@ -94,8 +97,8 @@ export interface PrimitiveResults {
   "kakao_send_file": KakaoSendFileResult;
   "telegram_send_file": TelegramSendFileResult;
 }
-export type PrimitiveRequest = SlackUsersListRequest | SlackUsersInfoRequest | SlackClientCountsRequest | SlackConversationsListRequest | SlackConversationsMembersRequest | SlackConversationsHistoryRequest | SlackSearchMessagesRequest | SlackChatPostMessageRequest | KakaoMetadataRequest | KakaoRoomsRequest | KakaoDetailRequest | KakaoPageRequest | KakaoMembersRequest | KakaoSelfMembersRequest | KakaoSendRequest | TelegramLoadDirectoryRequest | TelegramListDirectoryRequest | TelegramChatRequest | TelegramSenderRequest | TelegramHistoryRequest | TelegramSearchRequest | TelegramSendRequest | SlackSendFileRequest | KakaoSendFileRequest | TelegramSendFileRequest;
-export type ReadRequest = Exclude<PrimitiveRequest, { op: "kakao_send" | "telegram_send" | "slack.chat.postMessage" | "slack_send_file" | "kakao_send_file" | "telegram_send_file" }>;
+export type PrimitiveRequest = SlackUsersListRequest | SlackUsersInfoRequest | SlackClientCountsRequest | SlackConversationsListRequest | SlackConversationsMembersRequest | SlackConversationsHistoryRequest | SlackSearchMessagesRequest | SlackChatPostMessageRequest | KakaoMetadataRequest | KakaoRoomsRequest | KakaoDetailRequest | KakaoPageRequest | KakaoMembersRequest | KakaoSelfMembersRequest | KakaoSendRequest | KakaoMarkReadRequest | TelegramLoadDirectoryRequest | TelegramListDirectoryRequest | TelegramChatRequest | TelegramSenderRequest | TelegramHistoryRequest | TelegramSearchRequest | TelegramSendRequest | SlackSendFileRequest | KakaoSendFileRequest | TelegramSendFileRequest;
+export type ReadRequest = Exclude<PrimitiveRequest, { op: "kakao_send" | "kakao_mark_read" | "telegram_send" | "slack.chat.postMessage" | "slack_send_file" | "kakao_send_file" | "telegram_send_file" }>;
 export type AccountRequest = PrimitiveRequest | { op: "batch"; requests: ReadRequest[] };
 export type AccountResult = PrimitiveResults[keyof PrimitiveResults] | { results: PrimitiveResults[ReadRequest["op"]][] };
 export type ResultFor<R extends AccountRequest> = R extends { op: "batch" } ? { results: PrimitiveResults[ReadRequest["op"]][] } : R extends PrimitiveRequest ? PrimitiveResults[R["op"]] : never;

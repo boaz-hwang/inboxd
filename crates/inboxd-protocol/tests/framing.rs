@@ -7,7 +7,7 @@ use serde_json::json;
 #[test]
 fn frozen_method_surface_and_additive_capability_event_are_exact() {
     assert_eq!(LEGACY_REQUEST_METHODS.len(), 21);
-    assert_eq!(REQUEST_METHODS.len(), 23);
+    assert_eq!(REQUEST_METHODS.len(), 31);
     assert_eq!(
         LEGACY_REQUEST_METHODS[18..],
         ["settings.get", "settings.update", "subscribe"]
@@ -19,7 +19,15 @@ fn frozen_method_surface_and_additive_capability_event_are_exact() {
             "account.list",
             "account.messages",
             "account.search",
-            "message.send"
+            "message.send",
+            "response.open",
+            "response.get",
+            "response.seen",
+            "response.feedback",
+            "response.next",
+            "trajectory.list",
+            "trajectory.delete",
+            "trajectory.settings"
         ]
     );
     assert_eq!(

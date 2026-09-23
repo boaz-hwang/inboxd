@@ -83,12 +83,12 @@ describe("operational controller and explicit evidence inspector", () => {
     expect(state.selected.inbox).toBe(1);
     state = reduce(state, { type: "key", key: "?" });
     expect(state.helpOpen).toBe(true);
-    state = reduce(state, { type: "key", key: "Escape" });
+    state = reduce(state, { type: "key", key: "Cancel" });
     expect(state.helpOpen).toBe(false);
     const help = renderInspectorScreen(state, { width: 80, height: 24 });
-    expect(help).toContain("1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply s-status Esc ? q");
+    expect(help).toContain("1–5 j/k ↑↓ Enter-open / Shift+R c r-reply s-status Ctrl+C ?");
     state = { ...state, draft: "memory-only reply" };
-    state = reduce(state, { type: "key", key: "q" });
+    state = reduce(state, { type: "key", key: "Quit" });
     expect(state.draft).toBe("");
     expect(state.notice).toContain("drafts cleared");
   });
@@ -139,21 +139,21 @@ describe("operational controller and explicit evidence inspector", () => {
     expect(wide).toContain("Detail — Inbox");
     expect(wide).toContain("Message: 긴 한국어 메시지와 ASCII text");
 
-    state = reduce(state, { type: "key", key: "d" });
+    state = { ...state, detailOpen: true, selected: { ...state.selected, [state.screen]: state.focus } };
     const narrow = renderInspectorScreen(state, { width: 80, height: 24 });
     expect(narrow).toContain("Detail — Inbox");
-    expect(narrow).toContain("Back: Esc");
+    expect(narrow).toContain("Back: Ctrl+C");
     expect(narrow).toContain("Message: 긴 한국어 메시지와 ASCII text");
   });
 
   test("retains Chat coverage and Approval uncertainty in activated narrow details", () => {
     let state = readyState();
     state = reduce(state, { type: "switchScreen", screen: "chat" });
-    state = reduce(state, { type: "key", key: "d" });
+    state = { ...state, detailOpen: true, selected: { ...state.selected, [state.screen]: state.focus } };
     expect(renderInspectorScreen(state, { width: 80, height: 24 })).toContain("── coverage gap: 1 · partial ──");
 
     state = reduce(state, { type: "switchScreen", screen: "approvals" });
-    state = reduce(state, { type: "key", key: "d" });
+    state = { ...state, detailOpen: true, selected: { ...state.selected, [state.screen]: state.focus } };
     expect(renderInspectorScreen(state, { width: 80, height: 24 })).toContain("UNCERTAIN — do not resend automatically");
   });
 
@@ -197,7 +197,7 @@ describe("operational controller and explicit evidence inspector", () => {
     for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
       const text = renderInspectorScreen(state, size);
       expect(text).toContain("Compose text:");
-      expect(text).toContain("Enter send · Esc cancel");
+      expect(text).toContain("Enter send · Ctrl+C cancel");
       expect(text).toContain("[memory-only]");
     }
   });
@@ -207,7 +207,7 @@ describe("operational controller and explicit evidence inspector", () => {
     const body = "가👩‍💻é ".repeat(600) + "END-OF-MESSAGE";
     for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
       let state = reduce(readyState(), { type: "querySucceeded", generation: 1, screen: "inbox", data: [{ id: "long", body, resource: slackResource }] });
-      state = reduce(state, { type: "key", key: "d" });
+      state = { ...state, detailOpen: true, selected: { ...state.selected, [state.screen]: state.focus } };
       let text = renderInspectorScreen(state, size);
       expect(text).toContain("PgUp/PgDn scroll");
       expect(text).not.toContain("END-OF-MESSAGE");
@@ -224,7 +224,7 @@ describe("operational controller and explicit evidence inspector", () => {
   test("qualifies other-intent uncertainty without mislabeling the selected proposal", () => {
     let state = reduce(readyState(), { type: "querySucceeded", generation: 1, screen: "approvals", data: [{ id: "p", state: "Proposed" }, ...fixtures.approvals] });
     state = reduce(state, { type: "switchScreen", screen: "approvals" });
-    state = reduce(state, { type: "key", key: "d" });
+    state = { ...state, detailOpen: true, selected: { ...state.selected, [state.screen]: state.focus } };
     for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
       const text = renderInspectorScreen(state, size);
       expect(text).toContain("Other intent: UNCERTAIN");
@@ -263,7 +263,7 @@ describe("operational controller and explicit evidence inspector", () => {
     for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
       const output = renderInspectorScreen(state, size);
       expect(output).toContain(screen === "approvals" ? "> ● slack › work › chat:ops row-59" : "> ○ slack › work › chat:ops row-59");
-      expect(output).toContain("more results [n]");
+      expect(output).toContain("scroll for more results");
       expect(output).toContain("Evidence rail:");
       expect(output.split("\n")).toHaveLength(size.height);
       expect(output.split("\n").every((line) => displayWidth(line) === size.width)).toBe(true);
@@ -434,7 +434,7 @@ describe("operational controller and explicit evidence inspector", () => {
     harness.renderer.destroy();
   });
 
-  test("activates Inbox detail before opening its chat", async () => {
+  test("removed detail key leaves the room list ready to open a chat", async () => {
     let initialState = readyState();
     initialState = reduce(initialState, {
       type: "querySucceeded",
@@ -449,7 +449,7 @@ describe("operational controller and explicit evidence inspector", () => {
 
     await controller.dispatchKey("d");
     expect(controller.state.screen).toBe("inbox");
-    expect(controller.state.detailOpen).toBe(true);
+    expect(controller.state.detailOpen).toBe(false);
     await controller.dispatchKey("Enter");
     expect(controller.state.screen).toBe("chat");
   });
@@ -550,7 +550,7 @@ describe("operational controller and explicit evidence inspector", () => {
     expect(controller.state.searchQuery).toBe("qb");
     expect(controller.state.searchActive).toBe(true);
 
-    await controller.dispatchKey("Escape");
+    await controller.dispatchKey("Cancel");
     await controller.dispatchKey("3");
     await controller.dispatchKey("c");
     await controller.dispatchKey("q");
@@ -558,13 +558,13 @@ describe("operational controller and explicit evidence inspector", () => {
     expect(controller.state.draft).toBe("qb");
     expect(controller.state.composeActive).toBe(true);
 
-    await controller.dispatchKey("Escape");
+    await controller.dispatchKey("Cancel");
     await controller.dispatchKey("4");
     await controller.dispatchKey("a");
     expect(calls).toEqual([]);
   });
 
-  test("submits the current chat interval through sync.backfill with b", async () => {
+  test("submits the current chat interval through sync.backfill with Shift+R", async () => {
     const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
     const chat = { platform: "slack", account: "me", chat_id: "ops" };
     const controller = createTuiController({
@@ -586,7 +586,7 @@ describe("operational controller and explicit evidence inspector", () => {
     controller.setActiveChat(chat);
     controller.setSearch({ chat, interval: { from_ts: 10, to_ts: 20 }, query: "" });
     await controller.dispatchKey("3");
-    await controller.dispatchKey("b");
+    await controller.dispatchKey("R");
 
     expect(calls.filter((call) => call.method === "sync.backfill")).toEqual([
       { method: "sync.backfill", params: { platform: "slack", account: "me", chat_id: "ops", from_ts: 10, to_ts: 20 } },
@@ -626,7 +626,7 @@ describe("operational controller and explicit evidence inspector", () => {
     await controller.dispatchKey("c");
     for (const key of "deploy") await controller.dispatchKey(key);
     await controller.dispatchKey("Enter");
-    await controller.dispatchKey("b");
+    await controller.dispatchKey("R");
 
     expect(calls.filter((call) => call.method === "message.inbox")).toEqual([
       { method: "message.inbox", params: { chat } },
@@ -674,7 +674,7 @@ describe("operational controller and explicit evidence inspector", () => {
     expect(controller.state.views.search.data).toEqual([]);
     expect(controller.state.views.search.nextCursor).toBeUndefined();
     expect(controller.state.searchQuery).toBe("y");
-    await controller.dispatchKey("Escape");
+    await controller.dispatchKey("Cancel");
     await controller.receiveEvent("message.upserted");
     expect(searchCalls).toBe(1);
   });
@@ -694,7 +694,7 @@ describe("operational controller and explicit evidence inspector", () => {
     controller.setSearch({ chat, interval: { from_ts: 0, to_ts: 10 }, query: "old" });
     await controller.start();
     await controller.dispatchKey(screen === "search" ? "2" : "3");
-    const page = controller.dispatchKey("n");
+    const page = controller.dispatchKey(controller.state.screen === "chat" ? "PageUp" : "PageDown");
     if (screen === "search") controller.setSearch({ chat, interval: { from_ts: 0, to_ts: 10 }, query: "new" });
     else controller.setActiveChat({ ...chat, chat_id: "new" });
     const changed = controller.state.views[screen];
@@ -787,7 +787,7 @@ describe("operational controller and explicit evidence inspector", () => {
     } });
     await controller.start();
     defer = true;
-    const page = controller.dispatchKey("n");
+    const page = controller.dispatchKey(controller.state.screen === "chat" ? "PageUp" : "PageDown");
     const refresh = controller.receiveEvent("message.upserted");
     for (let i = 0; i < 30 && pending.length < 2; i++) await Promise.resolve();
     pending[1]!({ messages: [{ platform: "slack", account: "me", chat_id: "ops", msg_id: "replacement" }], next_cursor: "new-page" });
@@ -796,7 +796,7 @@ describe("operational controller and explicit evidence inspector", () => {
     await page;
     expect(controller.state.views.inbox.data.map((row) => row.id)).toEqual(["replacement"]);
     const nextRefresh = controller.receiveEvent("message.upserted");
-    const more = controller.dispatchKey("n");
+    const more = controller.dispatchKey(controller.state.screen === "chat" ? "PageUp" : "PageDown");
     for (let i = 0; i < 30 && pending.length < 3; i++) await Promise.resolve();
     expect(cursors).toEqual([undefined, "old-page", undefined, undefined]);
     pending[2]!({ messages: [] });
@@ -807,7 +807,7 @@ describe("operational controller and explicit evidence inspector", () => {
     let state = readyState();
     state = reduce(state, { type: "querySucceeded", generation: 1, screen: "approvals", data: [], nextCursor: "after-expired" });
     state = reduce(state, { type: "switchScreen", screen: "approvals" });
-    expect(renderInspectorScreen(state, { width: 80, height: 24 })).toContain("more results [n]");
+    expect(renderInspectorScreen(state, { width: 80, height: 24 })).toContain("scroll for more results");
   });
 
   test("loads historical approval pages without enabling their old codes", async () => {
@@ -827,7 +827,7 @@ describe("operational controller and explicit evidence inspector", () => {
     await controller.start();
     await controller.dispatchKey("4");
     expect(controller.state.views.approvals.nextCursor).toBe("approval-next");
-    await Promise.all([controller.dispatchKey("n"), controller.dispatchKey("n")]);
+    await Promise.all([controller.dispatchKey(controller.state.screen === "chat" ? "PageUp" : "PageDown"), controller.dispatchKey(controller.state.screen === "chat" ? "PageUp" : "PageDown")]);
     expect(controller.state.views.approvals.data.map((row) => row.id)).toEqual(["first", "second"]);
     expect(controller.state.views.approvals.nextCursor).toBeUndefined();
     await controller.dispatchKey("j");
@@ -873,12 +873,12 @@ describe("operational controller and explicit evidence inspector", () => {
 
     await controller.start();
     expect(controller.state.notice).not.toBe("subscribed — re-query required");
-    expect(renderInspectorScreen(controller.state, { width: 80, height: 24 })).toContain("more results [n]");
+    expect(renderInspectorScreen(controller.state, { width: 80, height: 24 })).toContain("scroll for more results");
 
     for (const screen of ["inbox", "search", "chat"] as const) {
       await controller.dispatchKey(screen === "inbox" ? "1" : screen === "search" ? "2" : "3");
-      if (screen === "inbox") await Promise.all([controller.dispatchKey("n"), controller.dispatchKey("n")]);
-      else await controller.dispatchKey("n");
+      if (screen === "inbox") await Promise.all([controller.dispatchKey(controller.state.screen === "chat" ? "PageUp" : "PageDown"), controller.dispatchKey(controller.state.screen === "chat" ? "PageUp" : "PageDown")]);
+      else await controller.dispatchKey(controller.state.screen === "chat" ? "PageUp" : "PageDown");
       expect(controller.state.views[screen].data).toHaveLength(2);
       expect(controller.state.views[screen].nextCursor).toBeUndefined();
     }

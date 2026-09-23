@@ -138,7 +138,7 @@ test("Inbox discovers explicit chats before recent retrieval and preserves its o
   expect(calls.slice(0, 5).map(call => call.method)).toEqual(["account.list", "capability.list", "chat.list", "chat.list", "message.recent"]);
   expect(controller.state.views.inbox.data.find(row => row.id === "first")).toMatchObject({ chat: slack, body: "recent body", edited: false, deleted: false });
   expect(controller.state.views.inbox.nextCursor).toBe("aggregate:opaque+/=");
-  await Promise.all([controller.dispatchKey("n"), controller.dispatchKey("n")]);
+  await Promise.all([controller.dispatchKey(controller.state.screen === "chat" ? "PageUp" : "PageDown"), controller.dispatchKey(controller.state.screen === "chat" ? "PageUp" : "PageDown")]);
   const pages = calls.filter(call => call.method === "message.recent");
   expect(pages).toHaveLength(2);
   expect(pages[1]!.params).toEqual({ ...first!.params, cursor: "aggregate:opaque+/=" });
@@ -179,7 +179,7 @@ test("Inbox fails closed above 100 discovered chats without oversized RPC or sta
     expect(text).not.toContain("retry query");
     expect(text).not.toContain("previous scope");
   }
-  await controller.dispatchKey("n");
+  await controller.dispatchKey(controller.state.screen === "chat" ? "PageUp" : "PageDown");
   expect(calls.filter(call => call.method === "message.recent")).toHaveLength(1);
   controller.stop();
 });
@@ -242,7 +242,7 @@ test("Inbox retains per-chat coverage and sourced unread evidence including conf
   await controller.dispatchKey("j");
   await controller.dispatchKey("d");
   for (const size of [{ width: 80, height: 24 }, { width: 120, height: 40 }]) {
-    const text = renderInspectorScreen(controller.state, size);
+    const text = renderInspectorScreen({ ...controller.state, detailOpen: true, detailRow: controller.state.views.inbox.data.find(row => row.chat?.chat_id === empty.chat_id) }, size);
     expect(text).toContain("Unread: ? (unknown)");
     expect(text).toContain("unobserved");
     expect(text).toContain("uncollected");

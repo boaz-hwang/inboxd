@@ -1,8 +1,11 @@
+import { editDraft } from "./editor.ts";
+import { messageDisplayBody } from "./text.ts";
 import { pickAttachment } from "../../host/src/attachments.ts";
 import type { LocalAttachment } from "../../protocol/src/schema.ts";
 import { displayWidth, truncateCells, wrapCells, fit } from "./text.ts";
 export { displayWidth, truncateCells, wrapCells } from "./text.ts";
-import { renderWorkspace } from "./workspace.ts";
+import { chatScrollMetrics, renderWorkspace } from "./workspace.ts";
+import { RoomDrafts } from "./room-drafts.ts";
 import { conversationRows, filteredMessages, sameResource, platformOptions, isArchivedResource } from "./workspace-model.ts";
 import type {
   ClientRole,
@@ -36,6 +39,7 @@ export interface Row {
   title?: string;
   canSend?: boolean;
   previewOnly?: boolean;
+  previewSuppressed?: boolean;
   authorName?: string;
   author?: string;
   ts?: string;
@@ -47,6 +51,8 @@ export interface Row {
   expires?: string;
   evidenceOnly?: boolean;
   unread?: string;
+  unreadEvidence?: { count?: number; source: string; status: string; observed_at?: number };
+  suggestionStatus?: string;
   evidenceLines?: string[];
 }
 
@@ -72,7 +78,16 @@ interface CapabilityView {
   error?: string;
 }
 
+export interface ResponseSession {
+  id: string; chat: ChatRef; status: string; incomingVersion?: string; sourceIds: string[];
+  suggestion?: { id: string; text: string; contextVersion?: string };
+  error?: string;
+  hidden: boolean; inserted: boolean; firstInput: boolean; sendState?: string; readSyncFailed?: boolean; allReadOperationId?: string;
+}
+
 export interface TuiState {
+  response?: ResponseSession;
+  responseFocus?: boolean;
   screen: Screen;
   /** Workspace navigation is separate from message selection. */
   pane?: "filters" | "rooms" | "messages";
@@ -116,6 +131,7 @@ export interface TuiState {
   platform?: string;
   period?: string;
   quitRequested: boolean;
+  chatScrollOffset?: number;
   activeChat?: ChatRef;
   activeResource?: ResourceRefV1;
 }
@@ -219,7 +235,7 @@ function templateArgumentsObject(value: string): JsonObject | undefined {
   }
 }
 
-const nonTextKeys = new Set(["Enter", "Escape", "Backspace", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", "Tab", "ArrowLeft", "ArrowRight", "Delete", "ShiftEnter", "Find", "MessageSearch"]);
+const nonTextKeys = new Set(["Enter", "Escape", "Cancel", "Quit", "WordLeft", "WordRight", "DeleteWordLeft", "DeleteWordRight", "KillLineLeft", "KillLineRight", "BufferHome", "BufferEnd", "Backspace", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", "Tab", "ShiftTab", "ArrowLeft", "ArrowRight", "Delete", "ShiftEnter", "Find", "MessageSearch"]);
 
 function printableInput(key: string): string | undefined {
   return key.length > 0 && !nonTextKeys.has(key) && !/[\u0000-\u001f\u007f-\u009f]/u.test(key) ? key : undefined;
@@ -343,7 +359,8 @@ export function reduce(state: TuiState, action: TuiAction): TuiState {
     };
   }
 
-  if (action.key === "Escape") {
+  if (action.key === "Escape") return state;
+  if (action.key === "Cancel") {
     if (state.finderActive || state.finderQuery) return { ...state, finderActive: false, finderQuery: "", roomFocus: 0, notice: undefined };
     if (state.searchActive) return { ...state, searchActive: false, searchQuery: "", notice: "search query cleared from memory" };
     if (state.composeActive) return { ...state, composeActive: false, composeMode: undefined, replyTo: undefined, templateStep: undefined, templateId: "", templateArguments: "", draft: "", notice: "compose draft cleared from memory" };
@@ -369,18 +386,26 @@ export function reduce(state: TuiState, action: TuiAction): TuiState {
     if (input !== undefined) return { ...state, searchQuery: state.searchQuery + input };
     return state;
   }
+  if ((state.screen === "inbox" || state.screen === "chat") && !state.detailOpen && action.key === "ShiftTab") {
+    const panes = ["filters", "rooms", "messages"] as const;
+    const current = panes.indexOf(state.pane ?? "rooms");
+    return { ...state, pane: panes[(current + panes.length - 1) % panes.length], notice: undefined };
+  }
+  // A compose session stays open while focus visits another workspace pane, but
+  // only the room list remains navigable until focus returns to the editor.
+  if (state.composeActive && state.pane !== "messages") {
+    if (state.pane === "rooms" && ["j", "k", "ArrowDown", "ArrowUp"].includes(action.key)) {
+      const delta = action.key === "j" || action.key === "ArrowDown" ? 1 : -1;
+      return { ...state, roomFocus: Math.max(0, Math.min(conversationRows(state).length - 1, (state.roomFocus ?? 0) + delta)) };
+    }
+    return state;
+  }
   if (state.composeActive) {
     if (state.composeMode !== "approved_template") {
+      const edited = editDraft(state.draft, state.draftCursor ?? state.draft.length, action.key);
+      if (edited) return { ...state, draft: edited.text, draftCursor: edited.cursor };
       const cursor = Math.min(state.draftCursor ?? state.draft.length, state.draft.length);
       const left = state.draft.slice(0, cursor), right = state.draft.slice(cursor);
-      const previous = removeLastGrapheme(left).length;
-      const next = new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(right)[Symbol.iterator]().next().value?.segment.length ?? 0;
-      if (action.key === "ArrowLeft") return { ...state, draftCursor: previous };
-      if (action.key === "ArrowRight") return { ...state, draftCursor: cursor + next };
-      if (action.key === "Home") return { ...state, draftCursor: 0 };
-      if (action.key === "End") return { ...state, draftCursor: state.draft.length };
-      if (action.key === "Backspace") return { ...state, draft: left.slice(0, previous) + right, draftCursor: previous };
-      if (action.key === "Delete") return { ...state, draft: left + right.slice(next), draftCursor: cursor };
       const insertion = action.key === "ShiftEnter" ? "\n" : printableInput(action.key);
       if (insertion !== undefined) return { ...state, draft: left + insertion + right, draftCursor: cursor + insertion.length };
     }
@@ -420,7 +445,6 @@ export function reduce(state: TuiState, action: TuiAction): TuiState {
     return state;
   }
   if ((state.screen === "inbox" || state.screen === "chat") && !state.detailOpen) {
-    if (action.key === "Tab") return { ...state, pane: state.pane === "filters" ? "rooms" : state.pane === "rooms" ? "messages" : "filters", notice: undefined };
     if (action.key === "[" || action.key === "]" || (state.pane === "filters" && (action.key === "ArrowLeft" || action.key === "ArrowRight"))) {
       const options = platformOptions(state);
       const current = options.indexOf(state.platform ?? "all");
@@ -439,16 +463,13 @@ export function reduce(state: TuiState, action: TuiAction): TuiState {
   if (action.key === "?") return { ...state, helpOpen: !state.helpOpen };
   if (action.key === "Find") return { ...state, screen: "inbox", finderActive: true, finderQuery: "", platform: undefined, pane: "rooms", roomFocus: 0, notice: undefined };
   if (action.key === "/" || action.key === "MessageSearch") return { ...state, screen: "search", platform: state.accountMode ? state.platform : undefined, searchActive: true, searchQuery: "", helpOpen: false, notice: "search input is memory-only" };
-  if (action.key === "q") return { ...state, quitRequested: true, detailOpen: false, draft: "", searchQuery: "", composeActive: false, composeMode: undefined, replyTo: undefined, templateStep: undefined, templateId: "", templateArguments: "", notice: "memory drafts cleared on exit" };
-  if (action.key === "j" || action.key === "ArrowDown") { const focus = Math.min(maxFocus(state), state.focus + 1); return { ...state, focus, detailOffset: 0, selected: state.screen === "approvals" ? { ...state.selected, approvals: focus } : state.selected }; }
-  if (action.key === "k" || action.key === "ArrowUp") { const focus = Math.max(0, state.focus - 1); return { ...state, focus, detailOffset: 0, selected: state.screen === "approvals" ? { ...state.selected, approvals: focus } : state.selected }; }
-  if (action.key === "d") {
-    return { ...state, selected: { ...state.selected, [state.screen]: state.focus }, detailOpen: true, detailRow: undefined, detailOffset: 0, notice: `${screenLabels[state.screen].toLowerCase()} detail opened` };
-  }
+  if (action.key === "Quit") return { ...state, quitRequested: true, detailOpen: false, draft: "", searchQuery: "", composeActive: false, composeMode: undefined, replyTo: undefined, templateStep: undefined, templateId: "", templateArguments: "", notice: "memory drafts cleared on exit" };
+  if (action.key === "j" || action.key === "ArrowDown") { const focus = Math.min(maxFocus(state), state.focus + 1); return { ...state, focus, chatScrollOffset: undefined, detailOffset: 0, selected: state.screen === "approvals" ? { ...state.selected, approvals: focus } : state.selected }; }
+  if (action.key === "k" || action.key === "ArrowUp") { const focus = Math.max(0, state.focus - 1); return { ...state, focus, chatScrollOffset: undefined, detailOffset: 0, selected: state.screen === "approvals" ? { ...state.selected, approvals: focus } : state.selected }; }
   if (action.key === "Enter") {
     return { ...state, selected: { ...state.selected, [state.screen]: state.focus }, detailOpen: false, detailOffset: 0, notice: `${screenLabels[state.screen].toLowerCase()} selection activated` };
   }
-  if (action.key === "b") {
+  if (action.key === "R") {
     if (state.connection.status !== "connected") return { ...state, notice: "backfill disabled while disconnected" };
     if (!capabilityClaimsCurrent(state)) return { ...state, notice: capabilityRefreshNotice("backfill", state) };
     const resource = selectedResource(state);
@@ -458,11 +479,7 @@ export function reduce(state: TuiState, action: TuiAction): TuiState {
     if (capability.read.mode === "none") return { ...state, notice: "backfill disabled — exact resource is not readable" };
     return { ...state, notice: "backfill requested — no action retried after disconnect" };
   }
-  if (action.key === "n") {
-    if (state.connection.status !== "connected") return { ...state, notice: "more results disabled while disconnected" };
-    if (state.views[state.screen].nextCursor === undefined) return { ...state, notice: "no more results" };
-    return { ...state, notice: "fetching more results" };
-  }
+
   if (action.key === "c") {
     if (state.sendPending) return { ...state, notice: "전송 중입니다." };
     if (state.screen !== "chat") return { ...state, notice: "compose is only available in Chat" };
@@ -601,7 +618,7 @@ function dataLines(state: TuiState, screen: Screen, empty: string, height: numbe
     if (view.error?.includes("discovery")) return [`> ${view.error}`, "Recovery: fix connector pagination.", "Restart daemon and TUI to reload scope."];
     return [`> ${view.error} — retry query`];
   }
-  const more = view.nextCursor === undefined ? [] : ["  more results [n] — fetch next page"];
+  const more = view.nextCursor === undefined ? [] : ["  ↓ scroll for more results"];
   const rows = visibleRows(state, screen);
   if (view.status === "empty" || rows.length === 0) return [`> ${empty}`, ...more];
   const capacity = Math.max(1, height - (view.nextCursor === undefined ? 0 : 1));
@@ -623,7 +640,7 @@ function listContentLines(state: TuiState, height: number): string[] {
   if (screen === "inbox") return ["Inbox", ...dataLines(state, screen, "No messages", height - 1)];
   if (screen === "search") {
     const query = state.searchQuery.length === 0 ? "(memory-only)" : `${state.searchQuery} [memory-only]`;
-    const inputHint = state.searchActive ? " · Enter submit · Esc cancel" : "";
+    const inputHint = state.searchActive ? " · Enter submit · Ctrl+C cancel" : "";
     return [`Search query: ${query}${inputHint}`, `Coverage: ${coverageText(state.coverage)}`, "", "Results", ...dataLines(state, screen, "No results", height - 4)];
   }
   if (screen === "chat") {
@@ -666,7 +683,7 @@ function detailLines(state: TuiState, width: number, height: number): string[] {
   const screen = state.screen;
   const row = state.detailRow ?? visibleRows(state, screen)[state.selected[screen]];
   const title = `Detail — ${screenLabels[screen][0]}${screenLabels[screen].slice(1).toLowerCase()}`;
-  if (row === undefined) return [title, ...(screen === "chat" ? deliveryLines(state) : []), "No selected item", "Back: Esc"];
+  if (row === undefined) return [title, ...(screen === "chat" ? deliveryLines(state) : []), "No selected item", "Back: Ctrl+C"];
   const details = [
     rowResource(row) === undefined ? undefined : `Resource: ${resourcePath(rowResource(row)!)}`,
     row.unread,
@@ -688,7 +705,7 @@ function detailLines(state: TuiState, width: number, height: number): string[] {
   const content = [`ID: ${row.id}`, ...details].flatMap(line => wrapCells(line, width));
   const capacity = Math.max(1, height - header.length - 1);
   const offset = Math.min(state.detailOffset, Math.max(0, content.length - capacity));
-  return [...header, ...content.slice(offset, offset + capacity), `Back: Esc · PgUp/PgDn scroll · Home top (${offset + 1}–${Math.min(offset + capacity, content.length)}/${content.length})`];
+  return [...header, ...content.slice(offset, offset + capacity), `Back: Ctrl+C · PgUp/PgDn scroll · Home top (${offset + 1}–${Math.min(offset + capacity, content.length)}/${content.length})`];
 }
 
 function joinColumns(left: readonly string[], right: readonly string[], width: number): string[] {
@@ -726,18 +743,18 @@ export function renderInspectorScreen(state: TuiState, size: { width: number; he
         `Template ID: ${state.templateId}${state.templateStep === "template_id" ? "_" : ""}`,
         `Arguments JSON: ${state.templateArguments}${state.templateStep === "arguments" ? "_" : ""}`,
         `Preview: ${state.draft}${state.templateStep === "preview" ? "_" : ""}`,
-        "[memory-only] · Enter next/send · Esc cancel",
+        "[memory-only] · Enter next/send · Ctrl+C cancel",
       ]
-      : state.composeActive ? [`${state.composeMode === "reply" ? `Reply ${state.replyTo}` : "Compose text"}: ${state.draft || "_"} [memory-only]`, "[memory-only] · Enter send · Esc cancel"] : [];
+      : state.composeActive ? [`${state.composeMode === "reply" ? `Reply ${state.replyTo}` : "Compose text"}: ${state.draft || "_"} [memory-only]`, "[memory-only] · Enter send · Ctrl+C cancel"] : [];
   const contentHeight = rowsForBody - inputPanel.length - (state.notice === undefined ? 0 : 1) - (state.helpOpen ? 2 : 0);
   const body = wide ? wideBodyLines(state, size.width, contentHeight) : narrowBodyLines(state, contentHeight, size.width);
   if (state.notice) body.push(`! ${state.notice}`);
-  if (state.helpOpen) body.push("Keys: 1–5 screens · j/k/↑↓ move · Enter open · / search · n more · b backfill", "      c compose · s send status · Esc cancel/back · ? help · q quit");
+  if (state.helpOpen) body.push("Keys: 1–5 screens · j/k/↑↓ move · Enter open · / search · Shift+R backfill", "      c compose · s send status · Ctrl+C cancel/back · ? help · Ctrl+C twice quit");
   const lines = [status, tabs, ...resourceLines, ...body.slice(0, rowsForBody - inputPanel.length)];
   while (inputPanel.length && lines.length < size.height - 1 - inputPanel.length) lines.push("");
   lines.push(...inputPanel);
   while (lines.length < size.height - 1) lines.push("");
-  lines.push("1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply s-status Esc ? q");
+  lines.push("1–5 j/k ↑↓ Enter-open / Shift+R c r-reply s-status Ctrl+C ?");
   return lines.slice(0, size.height).map((line) => fit(line, size.width)).join("\n");
 }
 
@@ -876,6 +893,8 @@ function messageRows(value: unknown, fallbackResource?: ResourceRefV1): Row[] {
     if (id === undefined) return [];
     const chat = chatRef(item);
     const resource = chat === undefined ? fallbackResource : exactChatResource(chat);
+    const body = messageDisplayBody(resource?.platform, stringValue(item.body));
+    if (body === null) return [];
     return [{
       id,
       resource,
@@ -883,7 +902,7 @@ function messageRows(value: unknown, fallbackResource?: ResourceRefV1): Row[] {
       authorName: stringValue(item.author_name),
       author: stringValue(item.author_id) ?? stringValue(item.author),
       ts: stringValue(item.ts) ?? (numberValue(item.ts) === undefined ? undefined : String(numberValue(item.ts))),
-      body: stringValue(item.body),
+      body,
       edited: item.edited_at != null || item.edited === true,
       deleted: item.deleted_at != null || item.deleted === true,
     }];
@@ -894,13 +913,17 @@ function chatRows(value: unknown): Row[] {
   return records(value).flatMap((item) => {
     const ref = chatRef(item);
     if (ref === undefined) return [];
+    const preview = messageDisplayBody(ref.platform, stringValue(item.preview));
     return [{
       id: `${ref.platform}:${ref.account}:${ref.chat_id}`,
       chat: ref,
       title: stringValue(item.display_name),
       ts: numberValue(item.latest_ts) === undefined ? undefined : String(item.latest_ts),
-      body: stringValue(item.preview),
+      body: preview === null ? "" : preview,
+      previewSuppressed: preview === null,
       canSend: item.can_send === true,
+      unreadEvidence: record(item.unread) ? { count: numberValue(record(item.unread)!.count), source: stringValue(record(item.unread)!.source) ?? "unknown", status: stringValue(record(item.unread)!.status) ?? "unknown", observed_at: numberValue(record(item.unread)!.observed_at) } : numberValue(item.unread_count) !== undefined ? { count: numberValue(item.unread_count), source: "provider", status: "known" } : undefined,
+      suggestionStatus: stringValue(item.suggestion_status),
       author: stringValue(item.display_name) ?? ref.chat_id,
       destination: `${ref.platform}:${ref.account}`,
     }];
@@ -1007,6 +1030,19 @@ export class TuiController {
   private liveRefresh?: Promise<void>;
   private liveDirectoryDirty = false;
   private liveChatDirty = false;
+  private responseEpoch = 0;
+  private draftRevision = 0;
+  private readonly roomDrafts = new RoomDrafts();
+  private suggestionGeneration = 0;
+  private pendingResponseTyped = false;
+  private responseTimer?: ReturnType<typeof setTimeout>;
+  private readonly displayed = new Set<string>();
+  private readonly seenMessages = new Set<string>();
+  private readonly completedReadSync = new Map<string, "failed" | "synced">();
+  private readonly emptyChats = new Map<string, string>();
+  private chatHistoryComplete = false;
+  private readonly visibleLines = new Map<string, Set<number>>();
+  private responseNavigation = false;
   private directoryTimer?: ReturnType<typeof setTimeout>;
   private readonly listeners = new Set<(state: TuiState) => void>();
 
@@ -1052,6 +1088,7 @@ export class TuiController {
       await this.refresh();
     } catch (error) {
       if (generation === this.generation) {
+        this.roomDrafts.clear();
         this.update({ type: "disconnected", generation, degraded: true });
         this.replace({ ...this.current, notice: `connection failed — ${error instanceof Error ? error.message : "retry when daemon is available"}` });
       }
@@ -1059,6 +1096,8 @@ export class TuiController {
   }
 
   stop(): void {
+    this.closeResponse("exit");
+    this.roomDrafts.clear();
     clearTimeout(this.directoryTimer);
     this.generation++;
     this.options.client.stop();
@@ -1067,6 +1106,8 @@ export class TuiController {
   }
 
   disconnected(degraded = false): void {
+    this.closeResponse("disconnected");
+    this.roomDrafts.clear();
     clearTimeout(this.directoryTimer);
     this.inFlightPages.clear();
     if (this.current.lastSend?.state === "Sending") this.replace({ ...this.current, lastSend: { ...this.current.lastSend, state: "Uncertain" } });
@@ -1075,6 +1116,44 @@ export class TuiController {
 
   /** Called by the runtime's ReconnectingProtocolClient event callback. */
   async receiveEvent(method: ProtocolEventMethod, params: JsonObject = {}): Promise<void> {
+    if (method === "account.changed" && params.phase === "read_sync") {
+      const sync = record(params.read_sync);
+      const operation = stringValue(sync?.operation_id);
+      if (operation && (sync?.status === "failed" || sync?.status === "synced")) {
+        this.completedReadSync.set(operation, sync.status);
+        while (this.completedReadSync.size > 1024) this.completedReadSync.delete(this.completedReadSync.keys().next().value!);
+      }
+      const chat = typeof params.platform === "string" && typeof params.account === "string" && typeof params.chat_id === "string"
+        ? { platform: params.platform, account: params.account, chat_id: params.chat_id } : undefined;
+      const unread = record(params.unread);
+      if (chat && unread) this.applyUnread(chat, unread);
+      if (chat && this.current.response && sameChat(chat, this.current.response.chat)) {
+        if (sync?.status === "failed" && operation && operation === this.current.response.allReadOperationId) {
+          for (const id of this.current.response.sourceIds) {
+            if (!this.current.views.chat.data.some(row => row.id === id)) this.seenMessages.delete(id);
+          }
+        }
+        this.replace({ ...this.current, response: { ...this.current.response, readSyncFailed: sync?.status === "failed" } });
+      }
+      if (chat && sync?.status === "failed" && this.activeChat && sameChat(chat, this.activeChat)) {
+        this.replace({ ...this.current, notice: "서버 읽음 동기화 실패 · 안 읽음 상태를 복구했습니다. 방을 다시 열면 재시도합니다." });
+      }
+      // Completion concerns unread state only; refreshing message content here
+      // would unnecessarily invalidate the draft and recommendation.
+      return;
+    }
+    const responseChat = this.current.response?.chat;
+    const changedChat = typeof params.chat_id === "string" ? params.chat_id.replace(/^telegram:chat:/, "") : undefined;
+    if (method === "message.upserted" && this.activeChat
+      && (!params.platform || params.platform === this.activeChat.platform)
+      && (!params.account || params.account === this.activeChat.account)
+      && (!changedChat || changedChat === this.activeChat.chat_id.replace(/^telegram:chat:/, ""))) {
+      this.suggestionGeneration++;
+      if (responseChat && sameChat(responseChat, this.activeChat)) this.replace({ ...this.current,
+        response: { ...this.current.response!, status: "stale", suggestion: undefined },
+        ...(this.current.draft ? { notice: "대화 내용이 바뀌었습니다 · 작성한 답변을 다시 확인하세요." } : {}),
+      });
+    }
     if (method === "account.changed" && this.current.accountMode) {
       if (!this.current.accountMode || this.current.connection.status !== "connected" || params.phase === "refreshing") return;
       this.liveDirectoryDirty = true;
@@ -1102,6 +1181,7 @@ export class TuiController {
     this.update({ type: "event", generation, method });
     if (this.current.accountMode === undefined) return;
     await this.refresh();
+    if (this.current.response?.status === "stale" && this.current.draft) this.replace({ ...this.current, notice: "대화 내용이 바뀌었습니다 · 작성한 답변을 다시 확인하세요." });
   }
 
   private invalidateView(screen: Screen): void {
@@ -1119,11 +1199,12 @@ export class TuiController {
   }
 
   setActiveResource(resource: ResourceRefV1 | undefined): void {
+    this.closeResponse("room_changed");
     this.activeResource = resource;
     this.activeChat = resource?.kind === "chat"
       ? { platform: resource.platform, account: resource.account, chat_id: resource.chat_id }
       : undefined;
-    this.current = { ...this.current, activeChat: this.activeChat, activeResource: resource, attachment: undefined };
+    this.current = { ...this.current, activeChat: this.activeChat, activeResource: resource, chatScrollOffset: undefined, detailOffset: 0, attachment: undefined };
     this.invalidateView("chat");
   }
 
@@ -1133,34 +1214,109 @@ export class TuiController {
   }
 
   async selectConversation(index: number): Promise<void> {
-    if (this.current.composeActive || this.current.searchActive) return;
+    if (this.current.searchActive || this.current.sendPending) return;
     const room = conversationRows(this.current)[index];
     if (!room) return;
+    if (sameResource(this.activeResource, room.resource) && this.current.screen === "chat") {
+      this.replace({ ...this.current, pane: "messages", finderActive: false, roomFocus: index, notice: undefined });
+      if (this.current.response) void this.markRoomSeen(this.current.response);
+      return;
+    }
+    if (this.activeResource) this.roomDrafts.save(this.activeResource, this.current);
+    const savedDraft = this.roomDrafts.take(room.resource);
+    this.replace({ ...this.current, composeActive: false, composeMode: undefined, replyTo: undefined, templateStep: undefined, templateId: "", templateArguments: "", draft: "", draftCursor: 0 });
     this.setActiveResource(room.resource);
     this.update({ type: "switchScreen", screen: "chat" });
-    this.replace({ ...this.current, pane: "messages", finderActive: false, roomFocus: index, notice: undefined });
-    if (room.resource.kind === "chat" && this.current.connection.status === "connected") await this.refreshChat(this.generation);
+    this.replace({ ...this.current, ...savedDraft, pane: "messages", finderActive: false, roomFocus: index, notice: undefined });
+    if (room.resource.kind === "chat" && this.current.connection.status === "connected") {
+      await this.refreshChat(this.generation);
+      if (sameResource(this.activeResource, room.resource)) await this.openResponse();
+    }
   }
 
   focusMessages(): void { this.replace({ ...this.current, pane: "messages" }); }
 
   async dispatchPaste(text: string): Promise<void> {
+    this.interruptArmed = false;
+    if (this.current.sendPending || this.current.responseFocus && ["Failed", "Uncertain"].includes(this.current.response?.sendState ?? "")) return;
     if (!this.current.composeActive && !this.current.searchActive && !this.current.finderActive) return;
-    if (this.current.composeActive && this.current.composeMode !== "approved_template") {
+    if (this.current.composeActive && this.current.pane === "messages" && this.current.composeMode !== "approved_template") {
       const normalized = text.replace(/\r\n?/g, "\n").replace(/\t/g, "    ");
       if (/[\x00-\x08\x0b-\x1f\x7f-\x9f]/.test(normalized)) return;
       const cursor = this.current.draftCursor ?? this.current.draft.length;
+      if (normalized) this.firstResponseInput();
       this.replace({ ...this.current, draft: this.current.draft.slice(0, cursor) + normalized + this.current.draft.slice(cursor), draftCursor: cursor + normalized.length });
     } else if (printableInput(text) !== undefined) await this.dispatchKey(text);
   }
 
+  private interruptArmed = false;
+  private viewport = { width: 80, height: 24 };
+  setViewport(width: number, height: number): void { this.viewport = { width, height }; }
+
+  private async scrollChat(direction: number): Promise<void> {
+    const resource = this.activeResource;
+    let metrics = chatScrollMetrics(this.current, this.viewport);
+    let top = metrics.top + direction * Math.max(1, metrics.visible - 1);
+    if (direction < 0 && top <= 0 && this.current.views.chat.nextCursor) {
+      const oldTotal = metrics.total;
+      await this.loadMore("chat", this.current.views.chat.nextCursor);
+      if (!sameResource(resource, this.activeResource)) return;
+      metrics = chatScrollMetrics(this.current, this.viewport);
+      top += Math.max(0, metrics.total - oldTotal);
+    }
+    top = Math.max(0, Math.min(top, Math.max(0, metrics.total - metrics.visible)));
+    let position = 0, focus = 0;
+    for (let i = 0; i < metrics.blocks.length; i++) {
+      if (position < top + metrics.visible) focus = i;
+      position += metrics.blocks[i]!;
+    }
+    this.replace({ ...this.current, chatScrollOffset: top, focus, detailOffset: 0, selected: { ...this.current.selected, chat: focus } });
+  }
+
   async dispatchKey(key: string): Promise<void> {
+    if (key === "Escape") return;
+    if (key === "Cancel") {
+      if (this.interruptArmed || this.current.pane === "filters" || this.current.pane === "rooms") {
+        this.closeResponse("interrupt");
+        this.replace({ ...this.current, quitRequested: true, composeActive: false, draft: "", searchQuery: "", finderQuery: "", attachment: undefined });
+        this.stop();
+        return;
+      }
+      this.interruptArmed = true;
+      await this.cancelCurrentInput();
+      this.replace({ ...this.current, notice: "Ctrl+C를 한 번 더 누르면 종료합니다." });
+      return;
+    }
+    this.interruptArmed = false;
+    await this.handleKey(key);
+  }
+
+  private async cancelCurrentInput(): Promise<void> {
+    await this.handleKey("Cancel");
+  }
+
+  private async handleKey(key: string): Promise<void> {
+    if (this.current.screen === "chat" && !this.current.detailOpen && !this.current.searchActive && !this.current.finderActive && ["PageUp", "PageDown"].includes(key)) {
+      await this.scrollChat(key === "PageUp" ? -1 : 1);
+      return;
+    }
+    if (key === "PageDown" && this.current.screen !== "chat" && !this.current.detailOpen && !this.current.composeActive && !this.current.searchActive && !this.current.finderActive) {
+      const screen = this.current.screen;
+      const view = this.current.views[screen];
+      const focus = Math.min(Math.max(0, view.data.length - 1), this.current.focus + Math.max(1, this.viewport.height - 10));
+      this.replace({ ...this.current, focus, selected: { ...this.current.selected, [screen]: focus } });
+      if (focus >= view.data.length - 1 && view.nextCursor) await this.loadMore(screen, view.nextCursor);
+      return;
+    }
+    const responseAction = this.responseKey(key);
+    if (responseAction === true) return;
+    if (responseAction instanceof Promise) { await responseAction; return; }
     if (this.current.sendPending && key === "Enter") return;
-    if (this.current.attachmentPicking) return;
+    if (this.current.attachmentPicking && key !== "Cancel") return;
     if (key === "Attach" || (key === "a" && this.current.screen === "chat" && !this.current.composeActive && !this.current.searchActive && !this.current.finderActive)) {
       await this.selectAttachment(); return;
     }
-    if (this.current.attachment && key === "Escape") { this.replace({ ...this.current, attachment: undefined }); return; }
+    if (this.current.attachment && key === "Cancel") { this.replace({ ...this.current, attachment: undefined }); return; }
     if (this.current.attachment && key === "Enter") {
       const file = this.current.attachment, resource = this.activeResource;
       this.replace({ ...this.current, attachment: undefined });
@@ -1168,7 +1324,7 @@ export class TuiController {
       return;
     }
     if (this.current.attachment && key !== "Quit") return;
-    if (key === "Quit") { this.update({ type: "key", key: "Escape" }); this.update({ type: "key", key: "q" }); this.stop(); return; }
+
     if (key === "Enter" && this.current.finderActive) {
       const index = this.current.roomFocus ?? 0;
       const room = conversationRows(this.current)[index];
@@ -1180,19 +1336,14 @@ export class TuiController {
       return;
     }
     const workspace = this.current;
+    // Room navigation is independent of the response composer in the message pane.
+    if (key === "Enter" && workspace.pane === "rooms" && !workspace.searchActive && !workspace.finderActive && !workspace.detailOpen && !workspace.helpOpen && (workspace.screen === "inbox" || workspace.screen === "chat")) {
+      await this.selectConversation(workspace.roomFocus ?? 0);
+      return;
+    }
     const editing = workspace.searchActive || workspace.composeActive || workspace.finderActive;
     if (!editing && !workspace.detailOpen && !workspace.helpOpen && (workspace.screen === "inbox" || workspace.screen === "chat")) {
-      if (key === "d" && workspace.pane === "rooms") {
-        const room = conversationRows(workspace)[workspace.roomFocus ?? 0];
-        const row = room ? workspace.views.inbox.data.find(row => sameResource(rowResource(row), room.resource)) ?? { id: resourceKey(room.resource), resource: room.resource, body: room.preview } : undefined;
-        this.replace({ ...workspace, detailOpen: true, detailOffset: 0, detailRow: row, notice: undefined });
-        return;
-      }
-      if (key === "Enter" && workspace.pane === "rooms") {
-        await this.selectConversation(workspace.roomFocus ?? 0);
-        return;
-      }
-      if (key === "Enter" && workspace.pane === "messages" && workspace.screen === "chat" && workspace.activeResource) { this.update({ type: "key", key: "c" }); return; }
+      if (key === "Enter" && workspace.pane === "messages" && workspace.screen === "chat" && workspace.activeResource) { this.update({ type: "key", key: "c" }); if (!this.current.response) await this.openResponse(); return; }
       if ((key === "c" || key === "r") && workspace.screen === "chat") this.replace({ ...this.current, pane: "messages" });
     }
     const before = this.current;
@@ -1206,39 +1357,36 @@ export class TuiController {
     const displayedResource = selectedResource(before);
     const focused = focusedResource(before);
     const inputActive = before.searchActive || before.composeActive || before.finderActive;
-    const nextCursor = before.views[before.screen].nextCursor;
     this.update({ type: "key", key });
+    if (!before.composeActive && this.current.composeActive && this.current.composeMode !== "approved_template" && !this.current.response) await this.openResponse();
     if (!inputActive && key === "1") this.replace({ ...this.current, platform: undefined, pane: "rooms", roomFocus: 0 });
     if (!inputActive && (key === "[" || key === "]" || before.pane === "filters" && ["ArrowLeft", "ArrowRight"].includes(key)) && this.current.platform && this.activeResource?.platform !== this.current.platform) {
       this.update({ type: "switchScreen", screen: "inbox" });
       if (before.pane === "filters") this.replace({ ...this.current, pane: "filters" });
     }
     if ((key === "MessageSearch" || key === "/") && !inputActive) this.invalidateView("search");
-    if (key === "Escape" && before.screen === "search") { this.setSearch(undefined); this.accountSearchRequest++; }
-    if (key === "q" && !inputActive) {
-      this.stop();
-      return;
-    }
+    if (key === "Cancel" && before.screen === "search") { this.setSearch(undefined); this.accountSearchRequest++; }
+
     if (key === "Enter" && before.searchActive && query.trim().length > 0) await this.submitSearch(query);
-    if (key === "Enter" && before.composeActive && composeMode !== "approved_template" && draft.trim().length > 0) {
+    if (key === "Enter" && before.composeActive && before.pane === "messages" && composeMode !== "approved_template" && draft.trim().length > 0) {
       await this.sendText(draft, composeMode === "reply" ? replyTo : undefined);
     }
-    if (key === "Enter" && before.composeActive && composeMode === "approved_template" && templateStep === "preview" && draft.trim().length > 0) {
+    if (key === "Enter" && before.composeActive && before.pane === "messages" && composeMode === "approved_template" && templateStep === "preview" && draft.trim().length > 0) {
       const args = templateArgumentsObject(templateArguments);
       if (args !== undefined) await this.sendTemplate(templateId, args, draft);
     }
     if (key === "s" && !inputActive) await this.recoverSendStatus();
-    if (key === "b" && before.connection.status === "connected" && !inputActive) {
+    if (key === "R" && before.connection.status === "connected" && !inputActive) {
       if (this.current.accountMode) { await this.refreshAccountDirectory(this.generation, true); if (this.activeChat) await this.refreshChat(this.generation, undefined, false, true); }
       else await this.backfill(displayedResource);
     }
-    if (key === "n" && before.connection.status === "connected" && !inputActive && nextCursor !== undefined) await this.loadMore(before.screen, nextCursor);
+
     if (key === "Enter" && (before.screen === "inbox" || before.screen === "search") && !inputActive) await this.openFocusedChat();
     if (key === "Enter" && before.screen === "chat" && before.activeResource === undefined && focused !== undefined && !inputActive) {
       this.setActiveResource(focused);
       if (focused.kind === "chat" && this.current.connection.status === "connected") await this.refreshChat(this.generation);
     }
-    if (key === "Escape" && before.screen === "chat" && before.activeResource !== undefined && !inputActive && !before.detailOpen && !before.helpOpen) {
+    if (key === "Cancel" && before.screen === "chat" && before.activeResource !== undefined && !inputActive && !before.detailOpen && !before.helpOpen) {
       this.setActiveResource(undefined);
       this.update({ type: "switchScreen", screen: "inbox" });
     }
@@ -1286,12 +1434,245 @@ export class TuiController {
     if (this.current.requery.includes("doctor")) await this.refreshDoctor(generation);
   }
 
+  private feedback(event: string, extra: JsonObject = {}): void {
+    const session = this.current.response;
+    if (!session) return;
+    void this.options.client.request("response.feedback", { response_session_id: session.id, event_id: `${session.id}:${event}:${session.suggestion?.id ?? "none"}`, event, ...(session.suggestion ? { suggestion_id: session.suggestion.id } : {}), ...extra }).catch(() => {
+      if (this.current.response?.id === session.id) this.replace({ ...this.current, notice: "추천 행동 기록 실패 · 직접 작성과 전송은 계속할 수 있습니다." });
+    });
+  }
+
+  private closeResponse(reason: string): void {
+    if (this.current.response) this.feedback("closed", { reason });
+    clearTimeout(this.responseTimer); this.responseEpoch++;
+    this.displayed.clear(); this.seenMessages.clear(); this.visibleLines.clear(); this.pendingResponseTyped = false;
+    this.current = { ...this.current, response: undefined, responseFocus: false };
+  }
+
+  private cancelResponseDraft(session: ResponseSession): void {
+    this.draftRevision++;
+    this.replace({ ...this.current,
+      composeActive: false, composeMode: undefined, replyTo: undefined,
+      templateStep: undefined, templateId: "", templateArguments: "",
+      draft: "", draftCursor: 0,
+      response: { ...session, hidden: true, inserted: false }, pane: "messages",
+    });
+  }
+
+  private async openResponse(): Promise<void> {
+    if (!this.current.accountMode || !this.activeChat || this.current.connection.status !== "connected") return;
+    if (this.current.views.chat.data.length === 0) {
+      const chat = this.activeChat;
+      await this.refreshChat(this.generation, undefined, false, true);
+      const visited = new Set<string>();
+      for (let page = 0; page < 25 && sameChat(chat, this.activeChat) && !this.current.views.chat.data.length; page++) {
+        const cursor = this.current.views.chat.nextCursor;
+        if (!cursor || visited.has(cursor)) break;
+        visited.add(cursor);
+        await this.refreshChat(this.generation, cursor, true);
+      }
+      if (!sameChat(chat, this.activeChat)) return;
+      if (!this.current.views.chat.data.length) {
+        if (this.current.views.chat.status === "empty" && this.chatHistoryComplete) {
+          const room = this.current.directory?.find(row => sameChat(row.chat, chat));
+          this.emptyChats.set(JSON.stringify(chat), JSON.stringify([room?.ts, room?.body]));
+          this.replace({ ...this.current, directory: this.current.directory?.filter(row => !sameChat(row.chat, chat)) });
+          this.setActiveChat(undefined);
+          this.update({ type: "switchScreen", screen: "inbox" });
+          this.accountInbox(this.generation);
+        } else this.replace({ ...this.current, notice: "대화 기록을 불러오지 못했습니다 · Shift+R로 다시 시도하세요." });
+        return;
+      }
+    }
+    const previousCompose = { composeActive: this.current.composeActive, composeMode: this.current.composeMode, notice: this.current.notice };
+    this.closeResponse("new_session");
+    const chat = this.activeChat, epoch = this.responseEpoch, generation = this.generation;
+    const suggestionGeneration = this.suggestionGeneration;
+    // Typing is available before even the short response.open round trip returns.
+    if (!this.current.composeActive) this.update({ type: "key", key: "c" });
+    this.replace({ ...this.current, responseFocus: true, pane: "messages" });
+    try {
+      const result = await this.options.client.request("response.open", { chat });
+      if (epoch !== this.responseEpoch || generation !== this.generation || !sameChat(chat, this.activeChat)) return;
+      const id = stringValue(result.response_session_id);
+      if (!id) { this.replace({ ...this.current, ...previousCompose, responseFocus: false }); return; } // Older daemon compatibility.
+      const session: ResponseSession = { id, chat, status: stringValue(result.status) ?? "failed", error: stringValue(result.error) ?? stringValue(record(result.suggestion)?.error), incomingVersion: stringValue(result.incoming_version), sourceIds: Array.isArray(result.source_message_ids) ? result.source_message_ids.filter((id): id is string => typeof id === "string") : [], hidden: this.pendingResponseTyped || this.current.draft.length > 0, firstInput: this.pendingResponseTyped || this.current.draft.length > 0, inserted: false };
+      this.replace({ ...this.current, response: session });
+      if (suggestionGeneration === this.suggestionGeneration) this.applyResponse(result, id);
+      else this.replace({ ...this.current, response: { ...session, status: "stale", suggestion: undefined } });
+      if (session.firstInput) this.feedback("first_input");
+      void this.markRoomSeen(session);
+      this.pollResponse(epoch, id);
+    } catch {
+      if (epoch === this.responseEpoch) this.replace({ ...this.current, notice: "추천을 불러오지 못했습니다 · 직접 작성할 수 있습니다." });
+    }
+  }
+
+  private applyResponse(result: JsonObject, id: string): void {
+    const session = this.current.response;
+    if (!session || session.id !== id || !sameChat(session.chat, this.activeChat)) return;
+    const suggestion = record(result.suggestion);
+    const incoming = stringValue(result.incoming_version);
+    const changed = result.status === "stale" || suggestion?.status === "stale" || !!session.incomingVersion && !!incoming && incoming !== session.incomingVersion;
+    this.replace({ ...this.current, response: { ...session, sourceIds: Array.isArray(result.source_message_ids) ? result.source_message_ids.filter((id): id is string => typeof id === "string") : session.sourceIds, status: stringValue(result.status) ?? stringValue(suggestion?.status) ?? session.status, error: stringValue(result.error) ?? stringValue(suggestion?.error), incomingVersion: incoming ?? session.incomingVersion,
+      suggestion: suggestion && stringValue(suggestion.id) && stringValue(suggestion.text) ? { id: String(suggestion.id), text: String(suggestion.text), contextVersion: stringValue(suggestion.context_version) } : undefined,
+    }, ...(changed && this.current.draft ? { notice: "대화 내용이 바뀌었습니다 · 작성한 답변을 다시 확인하세요." } : {}) });
+  }
+
+  private pollResponse(epoch: number, id: string): void {
+    clearTimeout(this.responseTimer);
+    this.responseTimer = setTimeout(async () => {
+      if (epoch !== this.responseEpoch || this.current.response?.id !== id || this.current.connection.status !== "connected") return;
+      const suggestionGeneration = this.suggestionGeneration;
+      try {
+        const result = await this.options.client.request("response.get", { response_session_id: id });
+        if (epoch !== this.responseEpoch) return;
+        if (suggestionGeneration === this.suggestionGeneration) this.applyResponse(result, id);
+      } catch {
+        if (epoch === this.responseEpoch && suggestionGeneration === this.suggestionGeneration && this.current.response?.id === id) this.replace({ ...this.current, response: { ...this.current.response, status: "failed", suggestion: undefined } });
+      }
+      if (epoch === this.responseEpoch) this.pollResponse(epoch, id);
+    }, 250);
+    this.responseTimer.unref?.();
+  }
+
+  private firstResponseInput(): void {
+    this.draftRevision++;
+    this.pendingResponseTyped = true;
+    const session = this.current.response;
+    if (!session || session.firstInput) return;
+    this.feedback("first_input");
+    this.replace({ ...this.current, response: { ...session, firstInput: true, hidden: true } });
+  }
+
+  private async markRoomSeen(session: ResponseSession): Promise<void> {
+    const ids = this.current.views.chat.data.map(row => row.id);
+    for (const id of ids) this.seenMessages.add(id);
+    try {
+      const result = await this.options.client.request("response.seen", { response_session_id: session.id, all: true, message_ids: [] });
+      if (this.current.response?.id !== session.id) return;
+      const operation = stringValue(record(result.read_sync)?.operation_id);
+      const completed = operation && this.completedReadSync.get(operation);
+      if (completed === "failed") return;
+      for (const id of session.sourceIds) this.seenMessages.add(id);
+      this.replace({ ...this.current, response: { ...this.current.response!, allReadOperationId: operation } });
+      const unread = record(result.unread);
+      if (unread && completed !== "synced") this.applyUnread(session.chat, unread);
+    } catch {
+      for (const id of ids) this.seenMessages.delete(id);
+      if (this.current.response?.id === session.id) this.replace({ ...this.current, notice: "읽음 처리에 실패했습니다 · 방에 다시 들어가면 재시도합니다." });
+    }
+  }
+
+  /** Called by the renderer, never by message fetch or suggestion generation. */
+  observeRendered(slices: { id: string; start: number; end: number; total: number }[], suggestionVisible: boolean): void {
+    const session = this.current.response;
+    if (!session || this.current.screen !== "chat" || this.current.detailOpen || this.current.connection.status !== "connected") return;
+    if (suggestionVisible && session.suggestion && !this.displayed.has(session.suggestion.id)) {
+      this.displayed.add(session.suggestion.id); this.feedback("shown");
+    }
+    const newlySeen: string[] = [];
+    for (const slice of slices) {
+      const lines = this.visibleLines.get(slice.id) ?? new Set<number>();
+      for (let n = slice.start; n < slice.end; n++) lines.add(n);
+      this.visibleLines.set(slice.id, lines);
+      if (lines.size >= slice.total && !this.seenMessages.has(slice.id)) { this.seenMessages.add(slice.id); newlySeen.push(slice.id); }
+    }
+    if (!newlySeen.length) return;
+    void this.options.client.request("response.seen", { response_session_id: session.id, message_ids: newlySeen }).then(result => {
+      if (this.current.response?.id !== session.id) return;
+      const operation = stringValue(record(result.read_sync)?.operation_id);
+      // A fast asynchronous failure may arrive before the optimistic RPC reply.
+      if (operation && this.completedReadSync.has(operation)) return;
+      const unread = record(result.unread);
+      if (unread) this.applyUnread(session.chat, unread);
+    }).catch(() => { for (const id of newlySeen) this.seenMessages.delete(id); });
+  }
+
+  private applyUnread(chat: ChatRef, unread: JsonObject): void {
+    this.replace({ ...this.current, directory: this.current.directory?.map(row => sameChat(row.chat, chat) ? { ...row, unreadEvidence: { count: numberValue(unread.count), source: stringValue(unread.source) ?? "unknown", status: stringValue(unread.status) ?? "unknown" } } : row) });
+  }
+
+  private responseKey(key: string): boolean | Promise<void> {
+    if (this.current.screen !== "chat" || !this.current.responseFocus || this.current.searchActive || this.current.finderActive || this.current.detailOpen || this.current.attachment) return false;
+    if (key === "ShiftTab" || this.current.pane !== "messages") return false;
+    const session = this.current.response;
+    if (key === "Cancel") {
+      if (session && this.current.draft && session.sendState !== "Failed" && session.sendState !== "Uncertain") {
+        // Cancelling an unsent reply leaves the room's response session available
+        // so the next Tab can advance. A second Ctrl+C exits.
+        this.cancelResponseDraft(session);
+      } else {
+        this.closeResponse("escape");
+        this.replace({ ...this.current, composeActive: false, composeMode: undefined, draft: "", pane: "messages" });
+      }
+      return true;
+    }
+    if (this.current.sendPending) return true;
+    if (session?.sendState === "Failed" || session?.sendState === "Uncertain") {
+      if (key === "s") return this.recoverSendStatus();
+      else this.replace({ ...this.current, notice: "전송 결과 확인 필요 · s 상태 확인 · Ctrl+C 후 명시적으로 새 작성 · 자동 재전송하지 않습니다." });
+      return true;
+    }
+    if (key === "Tab") {
+      if (this.current.draft) return true;
+      const capability = this.current.capabilities.data.find(c => sameResource(c.resource, this.activeResource));
+      const canRecommend = capabilityClaimsCurrent(this.current) && capability?.auth.state === "authenticated" && capability.write.mode === "send" && capability.write.content_mode === "text";
+      if (canRecommend && session && !session.hidden && session.suggestion && session.status === "ready") {
+        this.draftRevision++;
+        this.feedback("inserted");
+        this.replace({ ...this.current, composeActive: true, composeMode: "text", draft: session.suggestion.text, draftCursor: session.suggestion.text.length, response: { ...session, inserted: true, hidden: true } });
+      } else if (canRecommend && session && !session.hidden && ["queued", "generating"].includes(session.status)) this.replace({ ...this.current, notice: "추천 생성 중 · 직접 작성하거나 Ctrl+C로 다른 방을 선택하세요." });
+      else if (session) return this.nextResponse();
+      return true;
+    }
+    if (key === "Enter" && !this.current.draft) return true;
+    if (printableInput(key) !== undefined || key === "ShiftEnter") {
+      const capability = this.current.capabilities.data.find(c => sameResource(c.resource, this.activeResource));
+      if (capability?.write.mode !== "send") return true;
+      if (!this.current.composeActive) this.update({ type: "key", key: "c" });
+      this.firstResponseInput();
+    }
+    return false;
+  }
+
+  private async nextResponse(): Promise<void> {
+    const session = this.current.response;
+    if (!session || this.responseNavigation) return;
+    const unseen = session.sourceIds.find(id => !this.seenMessages.has(id));
+    if (unseen) {
+      const focus = this.current.views.chat.data.findIndex(row => row.id === unseen);
+      if (focus >= 0) this.replace({ ...this.current, focus, detailOffset: 0, notice: "남은 안 읽은 메시지를 확인하세요 · PgUp/PgDn 내용 확인" });
+      else if (this.current.views.chat.nextCursor) await this.loadMore("chat", this.current.views.chat.nextCursor);
+      else this.replace({ ...this.current, notice: "아직 표시하지 못한 안 읽은 메시지가 남아 있습니다 · Ctrl+C 후 Shift+R로 불러오세요." });
+      return;
+    }
+    this.responseNavigation = true;
+    const epoch = this.responseEpoch;
+    const draftRevision = this.draftRevision;
+    try {
+      const result = await this.options.client.request("response.next", { response_session_id: session.id, ...(this.current.platform ? { platform: this.current.platform } : {}) });
+      if (epoch !== this.responseEpoch) return;
+      if (draftRevision !== this.draftRevision || this.current.draft) {
+        this.replace({ ...this.current, notice: "현재 방에서 작성을 시작해 이동을 취소했습니다." });
+        return;
+      }
+      const chat = result.status === "next" ? chatRef(record(result.chat) ?? {}) : undefined;
+      if (!chat) { this.replace({ ...this.current, notice: result.status === "done" ? "안 읽은 대화를 모두 확인했습니다" : "확인할 수 없는 대화가 남아 있습니다 · 목록을 확인하세요." }); return; }
+      this.setActiveChat(chat);
+      this.replace({ ...this.current, screen: "chat", pane: "messages", composeActive: false, draft: "", detailOffset: 0 });
+      await this.refreshChat(this.generation);
+      if (sameChat(chat, this.activeChat)) await this.openResponse();
+    } catch { if (epoch === this.responseEpoch) this.replace({ ...this.current, notice: "다음 대화 조회 실패 · 현재 방에서 계속할 수 있습니다." }); }
+    finally { this.responseNavigation = false; }
+  }
+
   private async refreshAccountDirectory(generation: number, refresh = false, first?: JsonObject): Promise<void> {
     try { await this.loadAccountDirectory(generation, refresh, first); }
     catch {
       if (generation !== this.generation || !accepted(this.current, generation)) return;
       this.update({ type: "capabilityFailed", generation, error: "채팅 목록 조회 실패" });
-      this.replace({ ...this.current, notice: "채팅 목록 조회 실패 · b로 다시 시도하세요." });
+      this.replace({ ...this.current, notice: "채팅 목록 조회 실패 · Shift+R로 다시 시도하세요." });
     }
   }
 
@@ -1302,11 +1683,16 @@ export class TuiController {
       const result = first ?? await this.options.client.request("account.list", { ...(cursor ? { cursor } : {}), ...(!cursor ? { background: true, ...(refresh ? { refresh: true } : {}) } : {}) }); first = undefined;
       if (generation !== this.generation || request !== this.accountDirectoryRequest) return;
       refreshing ||= result.refreshing === true;
-      rows.push(...chatRows(result.chats)); errors = Array.isArray(result.errors) ? result.errors : [];
+      rows.push(...chatRows(result.chats).filter(row => {
+        const key = JSON.stringify(row.chat), fingerprint = JSON.stringify([row.ts, row.body]);
+        if (this.emptyChats.get(key) === fingerprint) return false;
+        this.emptyChats.delete(key);
+        return true;
+      })); errors = Array.isArray(result.errors) ? result.errors : [];
       cursor = stringValue(result.next_cursor); if (cursor && seen.has(cursor)) throw new Error("목록 커서 반복"); if (cursor) seen.add(cursor);
     } while (cursor);
     const focused = conversationRows(this.current)[this.current.roomFocus ?? 0]?.resource;
-    this.replace({ ...this.current, directory: rows, directoryRefreshing: refreshing, notice: errors.length ? "일부 계정의 채팅 목록을 가져오지 못했습니다. b로 다시 시도하세요." : undefined });
+    this.replace({ ...this.current, directory: rows, directoryRefreshing: refreshing, notice: errors.length ? "일부 계정의 채팅 목록을 가져오지 못했습니다. Shift+R로 다시 시도하세요." : undefined });
     const capabilities: ResourceCapabilityV1[] = rows.map(row => ({ v: 1, resource: rowResource(row)!,
       read: { mode: "bounded_history", limits: { max_page_size: 80, max_pages: 1, cursor: "opaque" } },
       write: { mode: row.canSend ? "send" : "none", content_mode: row.canSend ? "text" : "none", reply: false },
@@ -1314,6 +1700,7 @@ export class TuiController {
     this.update({ type: "capabilitySucceeded", generation, data: capabilities });
     if (focused) this.replace({ ...this.current, roomFocus: Math.max(0, conversationRows(this.current).findIndex(room => sameResource(room.resource, focused))) });
     this.accountInbox(generation);
+    if (focused) this.replace({ ...this.current, roomFocus: Math.max(0, conversationRows(this.current).findIndex(room => sameResource(room.resource, focused))) });
     clearTimeout(this.directoryTimer);
     if (refreshing) this.directoryTimer = setTimeout(() => {
       if (generation === this.generation && this.current.connection.status === "connected") void this.refreshAccountDirectory(generation);
@@ -1321,7 +1708,7 @@ export class TuiController {
   }
 
   private accountInbox(generation: number): void {
-    const data = (this.current.directory ?? []).filter(row => row.body || Number(row.ts)>0).map(row => ({ ...row, previewOnly: true, id: `preview:${row.id}`, resource: rowResource(row) }));
+    const data = (this.current.directory ?? []).filter(row => !row.previewSuppressed && (row.body || Number(row.ts)>0)).map(row => ({ ...row, previewOnly: true, id: `preview:${row.id}`, resource: rowResource(row) }));
     this.update({ type: "querySucceeded", generation, screen: "inbox", data, coverage: { freshness: "partial" } });
   }
 
@@ -1357,9 +1744,12 @@ export class TuiController {
     const generation = this.generation;
     this.replace({ ...this.current, sendPending: true, lastSend: { requestId, resource, state: "Sending" }, notice: "전송 중…" });
     try {
-      const result = await this.options.client.request("message.send", { request_id: requestId, ...payload });
+      const responseSession = this.current.response;
+      if (responseSession) this.replace({ ...this.current, response: { ...responseSession, hidden: true, sendState: "Sending" } });
+      const result = await this.options.client.request("message.send", { request_id: requestId, ...payload, ...(responseSession ? { response_session_id: responseSession.id } : {}) });
       if (generation !== this.generation) return;
       const state = stringValue(result.state) ?? "Uncertain";
+      if (responseSession && this.current.response?.id === responseSession.id) this.replace({ ...this.current, responseFocus: true, response: { ...this.current.response, sendState: state, hidden: true }, composeActive: state === "Sent" || state === "Verified", composeMode: "text" });
       this.replace({ ...this.current, lastSend: { requestId, resource, state }, notice: `${state} · ${state === "Sent" || state === "Verified" ? "보냈습니다." : "전송 결과 확인 필요 — 자동 재전송하지 않습니다."} · s 상태 확인` });
       if (state === "Sent" || state === "Verified") {
         if (this.current.accountMode) {
@@ -1370,11 +1760,12 @@ export class TuiController {
           await this.refreshChat(generation);
           if (generation === this.generation && sameResource(this.activeResource, resource) && this.current.views.chat.status === "ready") {
             const last = Math.max(0, this.current.views.chat.data.length - 1);
-            this.replace({ ...this.current, focus: last, selected: { ...this.current.selected, chat: last } });
+            this.replace({ ...this.current, focus: last, chatScrollOffset: undefined, detailOffset: 0, selected: { ...this.current.selected, chat: last } });
           }
         }
       }
     } catch {
+      if (this.current.response && this.current.lastSend?.requestId === requestId) this.replace({ ...this.current, response: { ...this.current.response, sendState: "Uncertain", hidden: true }, responseFocus: true });
       if (this.current.lastSend?.requestId === requestId) this.replace({ ...this.current, lastSend: { requestId, resource, state: "Uncertain" }, notice: "Uncertain · 전송 결과 확인 필요 — 자동 재전송하지 않습니다. · s 상태 확인" });
     } finally { this.replace({ ...this.current, sendPending: false }); }
   }
@@ -1387,6 +1778,7 @@ export class TuiController {
       const result = await this.options.client.request("send.status", { id: send.requestId });
       if (this.current.lastSend?.requestId !== send.requestId) return;
       const state = stringValue(result.state) ?? "Uncertain";
+      if (this.current.response?.sendState) this.replace({ ...this.current, response: { ...this.current.response, sendState: state }, composeActive: state === "Sent" || state === "Verified", composeMode: "text" });
       this.replace({ ...this.current, lastSend: { ...send, state }, notice: `${state} · 요청 ${send.requestId}${state === "Uncertain" ? " · 자동 재전송하지 않습니다." : ""}` });
     } catch {
       this.replace({ ...this.current, notice: `상태 확인 실패 · 요청 ${send.requestId} · 자동 재전송하지 않습니다.` });
@@ -1652,28 +2044,30 @@ export class TuiController {
     const previous = this.current.views.chat.data;
     const focusedIndex = this.current.screen === "chat" ? this.current.focus : this.current.selected.chat;
     const selectedId = previous[focusedIndex]?.id;
-    const followTail = focusedIndex >= previous.length - 1;
+    const scroll = chatScrollMetrics(this.current, this.viewport);
+    const followTail = this.current.chatScrollOffset === undefined ? focusedIndex >= previous.length - 1 : scroll.top + scroll.visible >= scroll.total;
     const response = await this.call("chat", generation, this.current.accountMode ? "account.messages" : "message.inbox", { ...(this.current.accountMode ? { ...chat, ...(force ? { refresh: true } : {}), ...(live && !followTail && selectedId ? { message_id: selectedId } : {}) } : { chat }), ...(cursor === undefined ? {} : { cursor }) });
     if (response === undefined || !response.isCurrent()) return;
     const { result } = response;
+    this.chatHistoryComplete = result.complete === true && !stringValue(result.next_cursor);
     const wasEmpty = this.current.views.chat.data.length === 0;
     let messages = messageRows(result.messages, this.activeResource);
     const priorFocus = this.current.views.chat.data[this.current.focus]?.id;
-    if (this.current.accountMode && append) {
+    if (append) {
       messages = [...new Map([...this.current.views.chat.data, ...messages].map(row => [row.id,row])).values()].sort((a,b) => Number(a.ts)-Number(b.ts));
     }
-    this.update({ type: "querySucceeded", generation, screen: "chat", data: messages, coverage: coverage(result.coverage), nextCursor: stringValue(result.next_cursor), append: append && !this.current.accountMode });
-    if (this.current.accountMode && append && priorFocus) {
+    this.update({ type: "querySucceeded", generation, screen: "chat", data: messages, coverage: coverage(result.coverage), nextCursor: stringValue(result.next_cursor), append: false });
+    if (append && priorFocus) {
       const focus = Math.max(0,messages.findIndex(row => row.id === priorFocus));
       this.replace({ ...this.current, focus, selected: { ...this.current.selected, chat: focus } });
     }
     if (live && this.current.screen === "chat" && messages.length) {
       const focus = followTail ? messages.length - 1 : Math.max(0, messages.findIndex(row => row.id === selectedId));
-      this.replace({ ...this.current, focus, selected: { ...this.current.selected, chat: focus } });
+      this.replace({ ...this.current, focus, chatScrollOffset: followTail ? undefined : this.current.chatScrollOffset, selected: { ...this.current.selected, chat: focus } });
     }
     if (wasEmpty && !append && this.current.screen === "chat" && messages.length) {
       const last = messages.length - 1;
-      this.replace({ ...this.current, focus: last, selected: { ...this.current.selected, chat: last } });
+      this.replace({ ...this.current, focus: last, chatScrollOffset: undefined, detailOffset: 0, selected: { ...this.current.selected, chat: last } });
     }
   }
 

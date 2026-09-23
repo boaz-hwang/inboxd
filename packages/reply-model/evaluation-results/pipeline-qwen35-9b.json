@@ -1,0 +1,176 @@
+{
+  "model": "Qwen3.5-9B-4bit",
+  "scope": "typed policy + generation + check; synthetic prompt-touched 6 cases",
+  "results": [
+    {
+      "id": "thanks",
+      "seconds": 10.330125125008635,
+      "plan": {
+        "action": "reply",
+        "gaps": [],
+        "queries": [],
+        "threadSufficiency": "sufficient",
+        "evidenceIds": [],
+        "unresolvedGaps": [],
+        "reasonCode": "sufficient_grounded_context",
+        "policyVersion": "context-policy-v1",
+        "budgetCost": {
+          "retrievalRounds": 0,
+          "queryCalls": 0,
+          "reasoningCalls": 0
+        }
+      },
+      "status": "ready",
+      "text": "네, 사진 잘 받았다고 하셔서 다행이에요.",
+      "error": null
+    },
+    {
+      "id": "unknown_schedule",
+      "seconds": 9.0061401251005,
+      "plan": {
+        "action": "clarify",
+        "gaps": [
+          {
+            "key": "availability",
+            "question": "내 일정상 이 시간이 가능한지 확인해야 합니다.",
+            "sourceCandidates": []
+          },
+          {
+            "key": "user_decision",
+            "question": "내가 이 요청을 수락하거나 확정할지 결정해야 합니다.",
+            "sourceCandidates": []
+          }
+        ],
+        "queries": [],
+        "threadSufficiency": "insufficient",
+        "evidenceIds": [],
+        "unresolvedGaps": [
+          "availability",
+          "user_decision"
+        ],
+        "reasonCode": "user_decision_required",
+        "policyVersion": "context-policy-v1",
+        "budgetCost": {
+          "retrievalRounds": 0,
+          "queryCalls": 0,
+          "reasoningCalls": 0
+        }
+      },
+      "status": "abstained",
+      "text": null,
+      "error": "draft_check_withheld"
+    },
+    {
+      "id": "missing_agreement",
+      "seconds": 8.42734729195945,
+      "plan": {
+        "action": "clarify",
+        "gaps": [
+          {
+            "key": "user_decision",
+            "question": "내가 이 요청을 수락하거나 확정할지 결정해야 합니다.",
+            "sourceCandidates": []
+          }
+        ],
+        "queries": [],
+        "threadSufficiency": "insufficient",
+        "evidenceIds": [],
+        "unresolvedGaps": [
+          "user_decision"
+        ],
+        "reasonCode": "user_decision_required",
+        "policyVersion": "context-policy-v1",
+        "budgetCost": {
+          "retrievalRounds": 0,
+          "queryCalls": 0,
+          "reasoningCalls": 0
+        }
+      },
+      "status": "ready",
+      "text": "아직 계약 진행 여부를 결정하지 못했어요. 금액이나 조건에 대해 다시 한번 확인해 볼 수 있을까요?",
+      "error": null
+    },
+    {
+      "id": "approved_terms",
+      "seconds": 8.00543370808009,
+      "plan": {
+        "action": "reply",
+        "gaps": [],
+        "queries": [],
+        "threadSufficiency": "sufficient",
+        "evidenceIds": [],
+        "unresolvedGaps": [],
+        "reasonCode": "sufficient_grounded_context",
+        "policyVersion": "context-policy-v1",
+        "budgetCost": {
+          "retrievalRounds": 0,
+          "queryCalls": 0,
+          "reasoningCalls": 0
+        }
+      },
+      "status": "ready",
+      "text": "네, 20 개 개당 3 만원 조건으로 진행하겠습니다.",
+      "error": null
+    },
+    {
+      "id": "negation",
+      "seconds": 8.878641124931164,
+      "plan": {
+        "action": "clarify",
+        "gaps": [
+          {
+            "key": "user_decision",
+            "question": "내가 이 요청을 수락하거나 확정할지 결정해야 합니다.",
+            "sourceCandidates": []
+          }
+        ],
+        "queries": [],
+        "threadSufficiency": "insufficient",
+        "evidenceIds": [],
+        "unresolvedGaps": [
+          "user_decision"
+        ],
+        "reasonCode": "user_decision_required",
+        "policyVersion": "context-policy-v1",
+        "budgetCost": {
+          "retrievalRounds": 0,
+          "queryCalls": 0,
+          "reasoningCalls": 0
+        }
+      },
+      "status": "abstained",
+      "text": null,
+      "error": "draft_check_withheld"
+    },
+    {
+      "id": "fact_retrieval",
+      "seconds": 8.527133666095324,
+      "plan": {
+        "action": "reply",
+        "gaps": [
+          {
+            "key": "project_state",
+            "question": "현재 프로젝트 상태를 확인해야 합니다.",
+            "sourceCandidates": []
+          }
+        ],
+        "queries": [],
+        "threadSufficiency": "sufficient",
+        "evidenceIds": [
+          "fact"
+        ],
+        "unresolvedGaps": [],
+        "reasonCode": "sufficient_grounded_context",
+        "policyVersion": "context-policy-v1",
+        "budgetCost": {
+          "retrievalRounds": 0,
+          "queryCalls": 0,
+          "reasoningCalls": 0
+        }
+      },
+      "status": "abstained",
+      "text": null,
+      "error": "draft_check_withheld"
+    }
+  ]
+}

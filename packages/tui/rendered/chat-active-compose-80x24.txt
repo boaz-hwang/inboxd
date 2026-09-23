@@ -15,10 +15,10 @@ Resource: slack › work › chat:ops
 Author: 민수                                                                    
 Time: 09:41                                                                     
 Message: 재현 가능한 대화 내용                                                  
-Back: Esc · PgUp/PgDn scroll · Home top (1–5/5)                                 
+Back: Ctrl+C · PgUp/PgDn scroll · Home top (1–5/5)                              
 ! compose text — draft remains memory-only                                      
                                                                                 
                                                                                 
 Compose text: 검토 후 배포할까요? 👩‍💻 [memory-only]                              
-[memory-only] · Enter send · Esc cancel                                         
-1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply s-status Esc ? q            
+[memory-only] · Enter send · Ctrl+C cancel                                      
+1–5 j/k ↑↓ Enter-open / Shift+R c r-reply s-status Ctrl+C ?                     

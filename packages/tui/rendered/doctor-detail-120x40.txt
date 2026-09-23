@@ -13,13 +13,12 @@ Doctor · C connect accounts                     │Context: 1 of 4 · partial �
   Cipher: fixture-version                       │Cipher: fixture-version                                                
   Schema: 2                                     │Schema: 2                                                              
   Authentication: slack=unknown                 │State: SQLCipher ready=true                                            
-  Sync: slack=degraded                          │Back: Esc · PgUp/PgDn scroll · Home top (1–4/4)                        
+  Sync: slack=degraded                          │Back: Ctrl+C · PgUp/PgDn scroll · Home top (1–4/4)                     
   Isolation: grade=b protected=false            │                                                                       
   same-user access is outside isolation         │                                                                       
   Daemon: connected                             │                                                                       
   Connection: connected                         │                                                                       
   Generation: 1 / subscribed 1                  │                                                                       
-! doctor detail opened                                                                                                  
                                                                                                                         
                                                                                                                         
                                                                                                                         
@@ -37,4 +36,5 @@ Doctor · C connect accounts                     │Context: 1 of 4 · partial �
                                                                                                                         
                                                                                                                         
                                                                                                                         
-1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply s-status Esc ? q                                                    
+                                                                                                                        
+1–5 j/k ↑↓ Enter-open / Shift+R c r-reply s-status Ctrl+C ?                                                             

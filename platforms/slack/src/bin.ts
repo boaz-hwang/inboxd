@@ -6,7 +6,7 @@ import {
   parseWorkerResponse,
   type WorkerRequestV1,
 } from "../../../packages/protocol/src/index.ts";
-import { createSlackWebApiTransport } from "./transport.ts";
+import { createRecoveringSlackTransport } from "./recovering-transport.ts";
 import { createSlackWorker, type SlackWorker } from "./worker.ts";
 
 export const SLACK_WORKER_ENV = Object.freeze({
@@ -160,7 +160,7 @@ export async function main(env: Environment = process.env): Promise<number> {
       account: config.account,
       expectedTeamId: config.teamId,
       allowedChatIds: config.allowedChatIds,
-      transport: createSlackWebApiTransport({ token: config.token, cookie: config.cookie }),
+      transport: createRecoveringSlackTransport({ bot_token: config.token, session_cookie: config.cookie, team_id: config.teamId }),
     });
   } catch {
     return terminate("invalid configuration", 64);

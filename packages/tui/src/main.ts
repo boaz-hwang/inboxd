@@ -109,7 +109,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<"connect" | u
   });
 
   const { createCliRenderer } = await import("@opentui/core");
-  const renderer = await createCliRenderer({ exitOnCtrlC: false, exitSignals: ["SIGINT", "SIGTERM"] });
+  const renderer = await createCliRenderer({ exitOnCtrlC: false, useKittyKeyboard: { disambiguate: true, alternateKeys: true }, exitSignals: ["SIGINT", "SIGTERM"] });
   let connectRequested = false;
   const onConnectionKey = (event: { sequence: string; preventDefault(): void }) => {
     if (event.sequence === "C" && controller.state.screen === "doctor" && !controller.state.composeActive) {

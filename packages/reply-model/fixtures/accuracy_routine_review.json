@@ -1,0 +1,4 @@
+{"purpose":"Distinguish routine review intent from fabricated completed action","cases":[
+  {"id":"routine_review_intent_valid","conversation":[{"message_id":"o1","author_role":"other","body":"공유드린 자료 확인 부탁드립니다."}],"evidence":[],"reply_mode":"reply_other","draft":"네, 확인해 보겠습니다.","expected":{"supported":true,"reasonCode":"grounded"}},
+  {"id":"fabricated_review_completion_invalid","conversation":[{"message_id":"o1","author_role":"other","body":"공유드린 자료 확인 부탁드립니다."}],"evidence":[],"reply_mode":"reply_other","draft":"네, 모두 확인했고 처리 완료했습니다.","expected":{"supported":false,"reasonCode":"unsupported_fact"}}
+]}

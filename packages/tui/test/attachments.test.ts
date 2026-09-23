@@ -44,6 +44,6 @@ test("cancel and chat changes never send, and a late picker cannot attach to ano
   const canceled = await setup("slack", async () => undefined);
   await canceled.controller.dispatchKey("a"); expect(canceled.controller.state.attachment).toBeUndefined(); canceled.controller.stop();
   const selected = await setup("slack", async () => file);
-  await selected.controller.dispatchKey("a"); await selected.controller.dispatchKey("Escape");
+  await selected.controller.dispatchKey("a"); await selected.controller.dispatchKey("Cancel");
   expect(selected.controller.state.attachment).toBeUndefined(); expect(selected.calls.some(c => c.method === "message.send")).toBe(false); selected.controller.stop();
 });

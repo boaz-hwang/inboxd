@@ -1,14 +1,103 @@
-diff --git a/node_modules/agent-messenger/.bun-tag-1e7d028d02f6928b b/.bun-tag-1e7d028d02f6928b
+diff --git a/node_modules/agent-messenger/.bun-tag-531d4fdfa5cf1d71 b/.bun-tag-531d4fdfa5cf1d71
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/agent-messenger/.bun-tag-e5ef5073ebc11a8e b/.bun-tag-e5ef5073ebc11a8e
+diff --git a/node_modules/agent-messenger/.bun-tag-a85c79083a35635c b/.bun-tag-a85c79083a35635c
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/agent-messenger/.bun-tag-e264caf4a599a548 b/.bun-tag-e264caf4a599a548
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/agent-messenger/.bun-tag-eba65b053868dee6 b/.bun-tag-eba65b053868dee6
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/dist/src/platforms/kakaotalk/client.js b/dist/src/platforms/kakaotalk/client.js
-index 71c1a5442bc303f6886056565697bff9cdd35218..10d1a2539b5a1d6f8f1ea5252ebfde423ae90bbf 100644
+index 71c1a5442bc303f6886056565697bff9cdd35218..2cf921dcf870f26e08c714c06da2dd8b66e1d004 100644
 --- a/dist/src/platforms/kakaotalk/client.js
 +++ b/dist/src/platforms/kakaotalk/client.js
-@@ -751,7 +751,7 @@ export class KakaoTalkClient {
+@@ -154,18 +154,22 @@ function parseLinkId(linkId) {
+         throw new KakaoTalkError(`Invalid linkId: ${linkId}`, 'invalid_link_id', { cause });
+     }
+ }
+-function formatChat(chat, title, nameCache) {
++function formatChat(chat, title, nameCache, directoryEvidence = false) {
+     const memberNames = (chat.k ?? []);
+     const lastLog = chat.l;
+     const displayName = memberNames.join(', ') || null;
+     const chatId = longToString(chat.c);
++    const openLinkId = isOpenChat(chat) ? getOpenLinkId(chat) : null;
+     return {
+         chat_id: chatId,
+         type: requiredChatType(chat.t),
++        open_link_id: openLinkId ? longToString(openLinkId) : null,
+         display_name: displayName,
+-        title,
++        title: clientChatTitle(chat.m) ?? title,
+         active_members: chat.a,
+         unread_count: chat.n,
++        ...(directoryEvidence && bsonToLong(chat.s) ? { last_seen_log_id: bsonToLong(chat.s).toString() } : {}),
++        ...(directoryEvidence && bsonToLong(chat.ll) ? { last_log_id: bsonToLong(chat.ll).toString() } : {}),
+         last_message: lastLog
+             ? {
+                 author_id: lastLog.authorId,
+@@ -177,8 +181,18 @@ function formatChat(chat, title, nameCache) {
+     };
+ }
+ const META_TYPE_TITLE = 3;
++// Kakao's personal room name is client metadata, not the shared TITLE meta.
++function clientChatTitle(meta) {
++    if (typeof meta === 'string') {
++        try { meta = JSON.parse(meta); } catch { return null; }
++    }
++    const name = meta && typeof meta === 'object' ? meta.name : null;
++    return typeof name === 'string' && name.trim().length > 0 ? name : null;
++}
+ function extractTitle(body) {
+     const info = body.chatInfo;
++    const personalTitle = clientChatTitle(info?.mcMetas) ?? clientChatTitle(info?.meta);
++    if (personalTitle) return personalTitle;
+     const metas = info?.chatMetas;
+     if (!Array.isArray(metas))
+         return null;
+@@ -197,6 +211,30 @@ function extractChannelInfo(body, expectedChatId) {
+     }
+     return info;
+ }
++async function readWatermarkIsVerified(session, expectedChatId, requestedWatermark) {
++    let lastTokenId = Long.ZERO;
++    let lastChatId = Long.ZERO;
++    for (let page = 0; page < MAX_PAGES; page++) {
++        const response = await session.getChatList(lastTokenId, lastChatId);
++        assertLocoOk(response, 'LCHATLIST');
++        const body = response.body;
++        const chats = body.chatDatas ?? [];
++        const room = chats.find((chat) => longToString(chat.c) === expectedChatId);
++        if (room) {
++            const providerCursor = bsonToLong(room.s);
++            return providerCursor?.greaterThanOrEqual(requestedWatermark) === true;
++        }
++        if (body.eof === true)
++            return false;
++        const nextTokenId = bsonToLong(body.lastTokenId);
++        const nextChatId = bsonToLong(body.lastChatId);
++        if (!nextTokenId || !nextChatId || (nextTokenId.equals(lastTokenId) && nextChatId.equals(lastChatId)))
++            return false;
++        lastTokenId = nextTokenId;
++        lastChatId = nextChatId;
++    }
++    return false;
++}
+ function requiredNonNegativeInteger(value, field) {
+     if (!Number.isInteger(value) || value < 0) {
+         throw new Error(`CHATINFO response invalid ${field}`);
+@@ -235,6 +273,7 @@ function channelInfoToChatData(body, expectedChatId) {
+         i: memberIds,
+         k: memberNames,
+         li: info.li,
++        m: info.mcMetas ?? info.meta,
+     };
+ }
+ function extractChannelMaxLogId(body, expectedChatId) {
+@@ -751,7 +790,7 @@ export class KakaoTalkClient {
              const newSyncState = mergeSyncState(syncState, loginResult);
              await saveSyncState(this.deviceUuid, newSyncState);
              this.nameCache.ingest((loginResult.chatDatas ?? []));
@@ -17,7 +106,7 @@ index 71c1a5442bc303f6886056565697bff9cdd35218..10d1a2539b5a1d6f8f1ea5252ebfde42
          }
          catch (error) {
              session.close();
-@@ -816,18 +816,22 @@ export class KakaoTalkClient {
+@@ -816,18 +855,22 @@ export class KakaoTalkClient {
          }
      }
      async getChats(options) {
@@ -44,7 +133,84 @@ index 71c1a5442bc303f6886056565697bff9cdd35218..10d1a2539b5a1d6f8f1ea5252ebfde42
                      let pages = 0;
                      const requireCompleteList = options?.all === true;
                      while (pages < MAX_PAGES) {
-@@ -1175,7 +1179,8 @@ export class KakaoTalkClient {
+@@ -871,7 +914,7 @@ export class KakaoTalkClient {
+                 const titles = options?.resolveTitles
+                     ? await Promise.all(results.map((chat) => this.fetchChatTitle(session, parseLong(longToString(chat.c)), chat)))
+                     : null;
+-                return results.map((chat, i) => formatChat(chat, titles ? titles[i] : null, this.nameCache));
++                return results.map((chat, i) => formatChat(chat, titles ? titles[i] : null, this.nameCache, true));
+             }
+             catch (error) {
+                 throw wrapError(error, 'get_chats_failed');
+@@ -1001,20 +1044,16 @@ export class KakaoTalkClient {
+                     return buildMessagePage(batch, count, cursor, response.body.eof === true, normalizedChatId, this.nameCache);
+                 }
+                 // CHATINFO is read-only and supplies a fresh lastLogId even for rooms
+-                // absent from the login snapshot. This avoids CHATONROOM, which can
+-                // advance server-side unread state.
++                // absent from the login snapshot. SYNCMSG is intentionally not used as
++                // a history fallback: KakaoTalk also uses terminal SYNCMSG to advance
++                // this device's provider read cursor.
+                 const chatInfoResponse = await session.getChannelInfo(parsedChatId);
+                 assertLocoOk(chatInfoResponse, 'CHATINFO');
+                 const maxLogId = extractChannelMaxLogId(chatInfoResponse.body, normalizedChatId);
+                 if (maxLogId.lessThanOrEqual(cursor)) {
+                     return { messages: [], next_cursor: null, complete: true };
+                 }
+-                const syncResponse = await session.syncMessages(parsedChatId, Math.min(count, 80), cursor, maxLogId);
+-                assertLocoOk(syncResponse, 'SYNCMSG');
+-                const syncBatch = (syncResponse.body.chatLogs ?? []).filter((log) => longToString(log.chatId) === normalizedChatId);
+-                const maxReturned = findMaxLogId(syncBatch, 'logId');
+-                const protocolComplete = syncResponse.body.isOK === true || (maxReturned !== null && maxReturned.greaterThanOrEqual(maxLogId));
+-                return buildMessagePage(syncBatch, count, cursor, protocolComplete, normalizedChatId, this.nameCache);
++                return { messages: [], next_cursor: null, complete: false };
+             }
+             catch (error) {
+                 throw wrapError(error, 'get_message_page_failed');
+@@ -1066,39 +1105,9 @@ export class KakaoTalkClient {
+                     warn(`[agent-kakaotalk] Warning: message fetch capped at ${MAX_PAGES} pages. Results may be incomplete.`);
+                     return formatMessages(allMessages, count, chatId, this.nameCache);
+                 }
+-                // CHATONROOM represents entering a room and can advance unread state on
+-                // the server. Use the login-time chat-list watermark for the read-only
+-                // SYNCMSG fallback instead, and skip sync when the cursor is current.
+-                const maxLogId = getLoginMaxLogId(loginResult, chatId);
+-                if (!maxLogId || maxLogId.lessThanOrEqual(cur)) {
+-                    return [];
+-                }
+-                let reachedEnd = false;
+-                for (let page = 0; page < MAX_PAGES; page++) {
+-                    const response = await session.syncMessages(cid, 80, cur, maxLogId);
+-                    const batch = (response.body.chatLogs ?? []);
+-                    if (batch.length === 0) {
+-                        reachedEnd = true;
+-                        break;
+-                    }
+-                    for (const log of batch) {
+-                        const lid = longToString(log.logId);
+-                        if (!seenLogIds.has(lid)) {
+-                            seenLogIds.add(lid);
+-                            allMessages.push(log);
+-                        }
+-                    }
+-                    const maxLog = findMaxLogId(batch, 'logId');
+-                    if (!maxLog || maxLog.equals(cur) || response.body.isOK) {
+-                        reachedEnd = true;
+-                        break;
+-                    }
+-                    cur = maxLog;
+-                }
+-                if (!reachedEnd) {
+-                    warn(`[agent-kakaotalk] Warning: message fetch capped at ${MAX_PAGES} pages. Results may be incomplete.`);
+-                }
+-                return formatMessages(allMessages, count, chatId, this.nameCache);
++                // Do not fall back to SYNCMSG here. It is provider read state, not a
++                // read-only history primitive, and this method is used by prefetch.
++                return [];
+             }
+             catch (error) {
+                 throw wrapError(error, 'get_messages_failed');
+@@ -1175,7 +1184,8 @@ export class KakaoTalkClient {
          });
      }
      async sendMessage(chatId, text, options) {
@@ -54,7 +220,7 @@ index 71c1a5442bc303f6886056565697bff9cdd35218..10d1a2539b5a1d6f8f1ea5252ebfde42
              try {
                  const response = options?.replyTo
                      ? await session.sendReply(parseLong(chatId), text, buildReplyExtra(options.replyTo))
-@@ -1191,7 +1196,7 @@ export class KakaoTalkClient {
+@@ -1191,7 +1201,7 @@ export class KakaoTalkClient {
              catch (error) {
                  throw wrapError(error, 'send_message_failed');
              }
@@ -63,7 +229,7 @@ index 71c1a5442bc303f6886056565697bff9cdd35218..10d1a2539b5a1d6f8f1ea5252ebfde42
      }
      async sendTyping(chatId, opts) {
          const parsedChatId = parseChatId(chatId);
-@@ -1385,7 +1390,9 @@ export class KakaoTalkClient {
+@@ -1385,7 +1395,9 @@ export class KakaoTalkClient {
      }
      async sendMediaViaLoco(opts) {
          const parsedChatId = parseChatId(opts.chatId);
@@ -74,17 +240,827 @@ index 71c1a5442bc303f6886056565697bff9cdd35218..10d1a2539b5a1d6f8f1ea5252ebfde42
              try {
                  const shipResp = await session.shipMedia(parsedChatId, opts.msgType, opts.data.byteLength, opts.checksum, opts.extension);
                  if (shipResp.statusCode !== 0) {
-@@ -1425,7 +1432,7 @@ export class KakaoTalkClient {
+@@ -1425,31 +1437,45 @@ export class KakaoTalkClient {
              catch (error) {
                  throw wrapError(error, opts.errorCode);
              }
 -        });
 +        })();
      }
+-    /**
+-     * Advance the read watermark for `chatId` up to and including `logId`.
+-     * The caller decides open vs normal: pass `opts.linkId` for open chats
+-     * (오픈채팅) and omit it for normal chats. Open chats without a `linkId`
+-     * are rejected by the server with a non-zero `body.status` — this method
+-     * does not auto-detect.
+-     */
++    /** Advance this device's provider read cursor through an already-rendered log. */
+     async markRead(chatId, logId, opts) {
+         const parsedChatId = parseChatId(chatId);
+         const parsedWatermark = parseLogId(logId);
+         const parsedLinkId = opts?.linkId !== undefined ? parseLinkId(opts.linkId) : undefined;
+         return this.executeWithReconnect(async ({ session }) => {
+             try {
+-                const response = await session.markRead(parsedChatId, parsedWatermark, parsedLinkId);
+-                // Throw on transport-level failure (incl. synthetic { statusCode: -1 }
+-                // from LocoConnection.handleClose) so executeWithReconnect retries on
+-                // a fresh session. The NOTIREAD command result lives in body.status.
++                // KakaoTalk's explicit read action uses terminal SYNCMSG: cur=max is
++                // the exact viewed cursor and cnt=0. This cannot include later arrivals.
++                const response = await session.confirmRead(parsedChatId, parsedWatermark);
+                 if (response.statusCode !== 0) {
+-                    throw new Error(`NOTIREAD failed: statusCode=${response.statusCode}`);
++                    throw new Error(`SYNCMSG failed: statusCode=${response.statusCode}`);
+                 }
+                 const bodyStatus = typeof response.body.status === 'number' ? response.body.status : 0;
++                if (bodyStatus !== 0 || response.body.isOK !== true) {
++                    return {
++                        success: false,
++                        status_code: bodyStatus,
++                        chat_id: chatId,
++                        watermark: logId,
++                    };
++                }
++                // CHATINFO.lastSeenLogId is zero even when LCHATLIST has the canonical
++                // cursor. Only commit the optimistic local read after a fresh list page
++                // proves the provider cursor reached the requested watermark.
++                const verified = await readWatermarkIsVerified(session, chatId, parsedWatermark);
++                // NOTIREAD is the peer-facing read receipt path. Its ACK is not evidence
++                // of own-device unread state, so failure here does not undo a verified
++                // terminal SYNCMSG.
++                if (verified) {
++                    try {
++                        await session.markRead(parsedChatId, parsedWatermark, parsedLinkId);
++                    }
++                    catch { }
++                }
+                 return {
+-                    success: bodyStatus === 0,
++                    success: verified,
+                     status_code: bodyStatus,
+                     chat_id: chatId,
+                     watermark: logId,
+diff --git a/dist/src/platforms/kakaotalk/protocol/session.d.ts b/dist/src/platforms/kakaotalk/protocol/session.d.ts
+index 779e23d3e4c6628f9423ebe3427c86001b18df26..32f23c7cfe021b9d52625cee03823707d09e1444 100644
+--- a/dist/src/platforms/kakaotalk/protocol/session.d.ts
++++ b/dist/src/platforms/kakaotalk/protocol/session.d.ts
+@@ -3,6 +3,11 @@ import { type KakaoDeviceType } from '../types.js';
+ import { LocoConnection } from './connection.js';
+ import type { LoginListResponse, LocoPacket, SyncState } from './types.js';
+ export declare const TYPING_ACTION_METHOD = "ACTION";
++export declare const READ_CONFIRMATION_METHOD = "SYNCMSG";
++export declare function buildReadConfirmationBody(chatId: Long, watermark: Long): Record<string, unknown>;
++export declare function sendReadConfirmationPacket(connection: {
++    sendPacket: (method: string, body: Record<string, unknown>) => Promise<LocoPacket>;
++}, chatId: Long, watermark: Long): Promise<LocoPacket>;
+ export declare function buildTypingActionBody(chatId: Long, linkId?: Long): Record<string, unknown>;
+ export declare function sendTypingPacket(connection: {
+     sendPacket: (method: string, body: Record<string, unknown>) => Promise<LocoPacket>;
+@@ -23,6 +28,15 @@ export declare class LocoSession {
+     forwardChat(chatId: Long, type: number, extra: Record<string, unknown>, caption?: string): Promise<LocoPacket>;
+     getConnection(): LocoConnection | null;
+     syncMessages(chatId: Long, count?: number, cursor?: Long, maxLogId?: Long): Promise<LocoPacket>;
++    /**
++     * Confirm that this device has read through `watermark`.
++     *
++     * KakaoTalk's explicit "mark as read" path uses a terminal SYNCMSG request:
++     * cur and max are the same already-rendered log id and cnt is zero.  Keep
++     * this separate from history synchronization so background retrieval never
++     * advances the provider read cursor.
++     */
++    confirmRead(chatId: Long, watermark: Long): Promise<LocoPacket>;
+     getChatLogs(chatIds: Long[], sinces: Long[]): Promise<LocoPacket>;
+     getChatInfo(chatId: Long): Promise<LocoPacket>;
      /**
-      * Advance the read watermark for `chatId` up to and including `logId`.
+@@ -54,12 +68,8 @@ export declare class LocoSession {
+      */
+     getMembersByIds(chatId: Long, memberIds: Long[]): Promise<LocoPacket>;
+     getChatList(lastTokenId?: Long, lastChatId?: Long): Promise<LocoPacket>;
+-    /**
+-     * Advance the server-side read watermark for a chat (NOTIREAD). Open chats
+-     * supply `linkId`; normal chats must omit it (the wire `li` key must be
+-     * absent, not null/0).
+-     */
+     leaveChat(chatId: Long): Promise<LocoPacket>;
++    /** Notify peers of the read watermark (NOTIREAD). */
+     markRead(chatId: Long, watermark: Long, linkId?: Long): Promise<LocoPacket>;
+     /**
+      * Fire a single typing pulse to peers of a chat — this is what triggers the
+diff --git a/dist/src/platforms/kakaotalk/protocol/session.js b/dist/src/platforms/kakaotalk/protocol/session.js
+index bbcc12b5452da308b22a4c731f792f55a188b047..c85cd964078294a5f7e4b213313521ad148a30c3 100644
+--- a/dist/src/platforms/kakaotalk/protocol/session.js
++++ b/dist/src/platforms/kakaotalk/protocol/session.js
+@@ -6,6 +6,13 @@ import { validateLoginListResponse } from './login-response.js';
+ // LOCO opcode string emitted on the wire for typing indicator pulses.
+ // Reverse-engineered from KakaoTalk 25.x — see `LocoSession.sendTyping` docs.
+ export const TYPING_ACTION_METHOD = 'ACTION';
++export const READ_CONFIRMATION_METHOD = 'SYNCMSG';
++export function buildReadConfirmationBody(chatId, watermark) {
++    return { chatId, cur: watermark, cnt: 0, max: watermark };
++}
++export async function sendReadConfirmationPacket(connection, chatId, watermark) {
++    return connection.sendPacket(READ_CONFIRMATION_METHOD, buildReadConfirmationBody(chatId, watermark));
++}
+ // Builds the BSON body the official KakaoTalk client emits for the typing
+ // indicator subtype of the `ACTION` opcode. Exported so protocol tests can lock
+ // the exact field shape.
+@@ -205,6 +212,19 @@ export class LocoSession {
+             max: maxLogId ?? Long.fromNumber(0),
+         });
+     }
++    /**
++     * Confirm that this device has read through `watermark`.
++     *
++     * KakaoTalk's explicit "mark as read" path uses a terminal SYNCMSG request:
++     * cur and max are the same already-rendered log id and cnt is zero.  Keep
++     * this separate from history synchronization so background retrieval never
++     * advances the provider read cursor.
++     */
++    async confirmRead(chatId, watermark) {
++        if (!this.connection)
++            throw new Error('Not connected');
++        return sendReadConfirmationPacket(this.connection, chatId, watermark);
++    }
+     async getChatLogs(chatIds, sinces) {
+         if (!this.connection)
+             throw new Error('Not connected');
+@@ -272,16 +292,12 @@ export class LocoSession {
+             lastChatId: lastChatId ?? Long.fromNumber(0),
+         });
+     }
+-    /**
+-     * Advance the server-side read watermark for a chat (NOTIREAD). Open chats
+-     * supply `linkId`; normal chats must omit it (the wire `li` key must be
+-     * absent, not null/0).
+-     */
+     async leaveChat(chatId) {
+         if (!this.connection)
+             throw new Error('Not connected');
+         return this.connection.sendPacket('LEAVE', { chatId });
+     }
++    /** Notify peers of the read watermark (NOTIREAD). */
+     async markRead(chatId, watermark, linkId) {
+         if (!this.connection)
+             throw new Error('Not connected');
+diff --git a/dist/src/platforms/kakaotalk/types.d.ts b/dist/src/platforms/kakaotalk/types.d.ts
+index 1f485bdf79bcaa452cfe8d00f31999fa9ba5fadb..931464f769834bcc036206759a19131164bc1a7f 100644
+--- a/dist/src/platforms/kakaotalk/types.d.ts
++++ b/dist/src/platforms/kakaotalk/types.d.ts
+@@ -60,10 +60,13 @@ export declare function isKnownKakaoChatStringType(value: unknown): value is (ty
+ export interface KakaoChat {
+     chat_id: string;
+     type: KakaoChatType;
++    open_link_id: string | null;
+     display_name: string | null;
+     title: string | null;
+     active_members: number;
+     unread_count: number;
++    last_seen_log_id?: string | null;
++    last_log_id?: string | null;
+     last_message: {
+         author_id: number;
+         author_name: string | null;
+@@ -200,6 +203,8 @@ export declare const KakaoChatSchema: z.ZodObject<{
+     title: z.ZodNullable<z.ZodString>;
+     active_members: z.ZodNumber;
+     unread_count: z.ZodNumber;
++    last_seen_log_id: z.ZodOptional<z.ZodNullable<z.ZodString>>;
++    last_log_id: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+     last_message: z.ZodNullable<z.ZodObject<{
+         author_id: z.ZodNumber;
+         author_name: z.ZodNullable<z.ZodString>;
+diff --git a/dist/src/platforms/kakaotalk/types.js b/dist/src/platforms/kakaotalk/types.js
+index 58473dbbc930434855363c33c51271ef244ca2c5..0371ed92d290887aaece803b005815c5b693de16 100644
+--- a/dist/src/platforms/kakaotalk/types.js
++++ b/dist/src/platforms/kakaotalk/types.js
+@@ -33,6 +33,8 @@ export const KakaoChatSchema = z.object({
+     title: z.string().nullable(),
+     active_members: z.number(),
+     unread_count: z.number(),
++    last_seen_log_id: z.string().nullable().optional(),
++    last_log_id: z.string().nullable().optional(),
+     last_message: z
+         .object({
+         author_id: z.number(),
+diff --git a/src/platforms/kakaotalk/client.test.ts b/src/platforms/kakaotalk/client.test.ts
+index 634c05c37dc4068107a28601160e16d064b45214..ce6e6fe057e15fd6a7368c2549c40e32b079a078 100644
+--- a/src/platforms/kakaotalk/client.test.ts
++++ b/src/platforms/kakaotalk/client.test.ts
+@@ -1,4 +1,7 @@
+ import { afterEach, beforeEach, describe, expect, mock, it } from 'bun:test'
++import { mkdtempSync, rmSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
+ 
+ import { KakaoTalkClient, KakaoTalkError } from './client'
+ 
+@@ -12,6 +15,7 @@ const mockGetOpenLinkInfo = mock(() => Promise.resolve({}))
+ const mockGetAllMembers = mock(() => Promise.resolve({}))
+ const mockGetMembersByIds = mock(() => Promise.resolve({}))
+ const mockSyncMessages = mock(() => Promise.resolve({}))
++const mockConfirmRead = mock(() => Promise.resolve({}))
+ const mockSendMessage = mock(() => Promise.resolve({}))
+ const mockSendReply = mock(() => Promise.resolve({}))
+ const mockMarkRead = mock(() => Promise.resolve({}))
+@@ -32,6 +36,7 @@ mock.module('./protocol/session', () => ({
+     getAllMembers = mockGetAllMembers
+     getMembersByIds = mockGetMembersByIds
+     syncMessages = mockSyncMessages
++    confirmRead = mockConfirmRead
+     sendMessage = mockSendMessage
+     sendReply = mockSendReply
+     markRead = mockMarkRead
+@@ -64,6 +69,20 @@ function memberChannelInfo(
+   }
+ }
+ 
++function readVerification(chatId: number, lastSeenLogId: number, newMessageCount: number) {
++  return {
++    statusCode: 0,
++    body: {
++      chatInfo: {
++        chatId: makeLong(chatId),
++        lastSeenLogId: makeLong(lastSeenLogId),
++        newMessageCount,
++        invalidNewMessageCount: false,
++      },
++    },
++  }
++}
++
+ function resetAllMocks() {
+   mockLogin.mockReset()
+   mockGetChatList.mockReset()
+@@ -74,6 +93,7 @@ function resetAllMocks() {
+   mockGetAllMembers.mockReset()
+   mockGetMembersByIds.mockReset()
+   mockSyncMessages.mockReset()
++  mockConfirmRead.mockReset()
+   mockSendMessage.mockReset()
+   mockSendReply.mockReset()
+   mockMarkRead.mockReset()
+@@ -117,7 +137,13 @@ const DEFAULT_LOGIN_RESULT = {
+ }
+ 
+ describe('KakaoTalkClient', () => {
++  let testConfigDir: string
++  let previousConfigDir: string | undefined
+   beforeEach(() => {
++    // Each fake device persists sync state; isolate it across tests and from real credentials.
++    previousConfigDir = process.env.AGENT_MESSENGER_CONFIG_DIR
++    testConfigDir = mkdtempSync(join(tmpdir(), 'kakao-client-test-'))
++    process.env.AGENT_MESSENGER_CONFIG_DIR = testConfigDir
+     resetAllMocks()
+     // Deep-clone so tests that mutate loginResult.chatDatas (e.g. leaveChat)
+     // don't leak into subsequent tests.
+@@ -125,11 +151,18 @@ describe('KakaoTalkClient', () => {
+     mockGetChatLogs.mockResolvedValue({ body: { status: 0, chatLogs: [], eof: true } })
+     mockGetChatInfo.mockResolvedValue({ body: { l: makeLong(99999) } })
+     mockSyncMessages.mockResolvedValue({ body: { status: 0, isOK: true, chatLogs: [] } })
++    mockConfirmRead.mockResolvedValue({ statusCode: 0, body: { status: 0, isOK: true } })
+   })
+ 
+   afterEach(() => {
+-    expect(mockGetChatInfo).not.toHaveBeenCalled()
+-    resetAllMocks()
++    try {
++      expect(mockGetChatInfo).not.toHaveBeenCalled()
++    } finally {
++      resetAllMocks()
++      if (previousConfigDir === undefined) delete process.env.AGENT_MESSENGER_CONFIG_DIR
++      else process.env.AGENT_MESSENGER_CONFIG_DIR = previousConfigDir
++      rmSync(testConfigDir, { recursive: true, force: true })
++    }
+   })
+ 
+   describe('constructor', () => {
+@@ -220,6 +253,17 @@ describe('KakaoTalkClient', () => {
+   })
+ 
+   describe('getChats', () => {
++    it('exposes the fresh LCHATLIST own-read cursor without marking messages read', async () => {
++      const client = await new KakaoTalkClient().login({ oauthToken: 'token', userId: 'user1', deviceUuid: 'device1' })
++      mockGetChatList.mockResolvedValueOnce({ statusCode: 0, body: { chatDatas: [{ c: makeLong(100), t: 1, a: 2, n: 0, s: { low: 1, high: 2097152 }, ll: { low: 1, high: 2097152 }, i: [], k: [] }], eof: true } })
++      const chats = await client.getChats({ all: true })
++      expect(chats[0].last_seen_log_id).toBe('9007199254740993')
++      expect(chats[0].last_log_id).toBe('9007199254740993')
++      expect(chats[0].unread_count).toBe(0)
++      expect(mockConfirmRead).not.toHaveBeenCalled()
++      expect(mockMarkRead).not.toHaveBeenCalled()
++    })
++
+     it('returns formatted chats from login snapshot', async () => {
+       const client = await new KakaoTalkClient().login({ oauthToken: 'token', userId: 'user1', deviceUuid: 'device1' })
+       const chats = await client.getChats()
+@@ -596,6 +640,8 @@ describe('KakaoTalkClient', () => {
+       }
+       mockLogin.mockResolvedValue(loginResult)
+ 
++      // all=true starts from a fresh provider page, not the login snapshot.
++      mockGetChatList.mockResolvedValueOnce({statusCode: 0, body: {...structuredClone(DEFAULT_LOGIN_RESULT), status: 0, eof: false, lastTokenId: makeLong(1), lastChatId: makeLong(200)}})
+       mockGetChatList.mockResolvedValueOnce({
+         statusCode: 0,
+         body: {
+@@ -622,7 +668,7 @@ describe('KakaoTalkClient', () => {
+       const chats = await client.getChats({ all: true })
+ 
+       expect(chats).toHaveLength(3)
+-      expect(mockGetChatList).toHaveBeenCalledTimes(1)
++      expect(mockGetChatList).toHaveBeenCalledTimes(2)
+ 
+       client.close()
+     })
+@@ -635,6 +681,8 @@ describe('KakaoTalkClient', () => {
+       mockLogin.mockResolvedValue(loginResult)
+ 
+       // Return a chat with same ID as login result
++      // all=true starts from a fresh provider page, not the login snapshot.
++      mockGetChatList.mockResolvedValueOnce({statusCode: 0, body: {...structuredClone(DEFAULT_LOGIN_RESULT), status: 0, eof: false, lastTokenId: makeLong(1), lastChatId: makeLong(200)}})
+       mockGetChatList.mockResolvedValueOnce({
+         statusCode: 0,
+         body: {
+@@ -708,6 +756,8 @@ describe('KakaoTalkClient', () => {
+ 
+     it('collects every LCHATLIST page until an explicit EOF', async () => {
+       mockLogin.mockResolvedValue({ ...DEFAULT_LOGIN_RESULT, eof: false })
++      // all=true starts from a fresh provider page, not the login snapshot.
++      mockGetChatList.mockResolvedValueOnce({statusCode: 0, body: {...structuredClone(DEFAULT_LOGIN_RESULT), status: 0, eof: false, lastTokenId: makeLong(1), lastChatId: makeLong(200)}})
+       mockGetChatList
+         .mockResolvedValueOnce({
+           statusCode: 0,
+@@ -758,7 +808,7 @@ describe('KakaoTalkClient', () => {
+       const chats = await client.getChats({ all: true })
+ 
+       expect(chats.map((chat) => chat.chat_id)).toEqual(['100', '200', '300', '400'])
+-      expect(mockGetChatList).toHaveBeenCalledTimes(2)
++      expect(mockGetChatList).toHaveBeenCalledTimes(3)
+ 
+       client.close()
+     })
+@@ -1099,6 +1149,7 @@ describe('KakaoTalkClient', () => {
+       expect(chat).toEqual({
+         chat_id: '300',
+         type: 11,
++        open_link_id: null,
+         display_name: 'Alice, Bob',
+         title: 'Late room',
+         active_members: 2,
+@@ -1447,6 +1498,7 @@ describe('KakaoTalkClient', () => {
+         expect(chat).toEqual({
+           chat_id: '300',
+           type: openChatType,
++          open_link_id: '7777',
+           display_name: 'Alice, Bob',
+           title: 'Open Group Title',
+           active_members: 2,
+@@ -1525,6 +1577,7 @@ describe('KakaoTalkClient', () => {
+         await expect(client.getChat('300')).resolves.toEqual({
+           chat_id: '300',
+           type: normalChatType,
++          open_link_id: null,
+           display_name: null,
+           title: null,
+           active_members: 2,
+@@ -1600,6 +1653,7 @@ describe('KakaoTalkClient', () => {
+       await expect(client.getChat('300')).resolves.toEqual({
+         chat_id: '300',
+         type: 'UnknownChat',
++        open_link_id: null,
+         display_name: null,
+         title: null,
+         active_members: 2,
+@@ -1723,112 +1777,48 @@ describe('KakaoTalkClient', () => {
+       client.close()
+     })
+ 
+-    it('does not report completion when the protocol makes no cursor progress', async () => {
+-      mockGetChatLogs.mockResolvedValueOnce({
+-        statusCode: 0,
+-        body: { status: 0, chatLogs: [], eof: false },
+-      })
++    it('does not use SYNCMSG when a read-only page makes no cursor progress', async () => {
++      mockGetChatLogs.mockResolvedValueOnce({ statusCode: 0, body: { status: 0, chatLogs: [], eof: false } })
+       mockGetChannelInfo.mockResolvedValueOnce({
+         statusCode: 0,
+-        body: {
+-          chatInfo: {
+-            chatId: makeLong(100),
+-            type: 11,
+-            activeMembersCount: 2,
+-            newMessageCount: 0,
+-            invalidNewMessageCount: false,
+-            lastLogId: makeLong(999),
+-            lastSeenLogId: makeLong(0),
+-            displayMembers: [],
+-            chatMetas: [],
+-            pushAlert: true,
+-          },
+-        },
+-      })
+-      mockSyncMessages.mockResolvedValueOnce({
+-        statusCode: 0,
+-        body: { status: 0, chatLogs: [], isOK: false },
++        body: { chatInfo: { chatId: makeLong(100), lastLogId: makeLong(999) } },
+       })
+-
+       const client = await new KakaoTalkClient().login({ oauthToken: 'token', userId: 'user1', deviceUuid: 'device1' })
++
+       const page = await client.getMessagePage('100', { from: '9', count: 10 })
+ 
+       expect(page).toEqual({ messages: [], next_cursor: null, complete: false })
+-
++      expect(mockSyncMessages).not.toHaveBeenCalled()
++      expect(mockConfirmRead).not.toHaveBeenCalled()
+       client.close()
+     })
+ 
+-    it('uses read-only CHATINFO to paginate a late room missing from the login snapshot', async () => {
++    it('does not mutate read state for a late room missing from the login snapshot', async () => {
+       mockLogin.mockResolvedValueOnce({ ...structuredClone(DEFAULT_LOGIN_RESULT), chatDatas: [] })
+-      mockGetChatLogs.mockResolvedValueOnce({
+-        statusCode: 0,
+-        body: { status: 0, chatLogs: [], eof: true },
+-      })
++      mockGetChatLogs.mockResolvedValueOnce({ statusCode: 0, body: { status: 0, chatLogs: [], eof: true } })
+       mockGetChannelInfo.mockResolvedValueOnce({
+         statusCode: 0,
+-        body: {
+-          chatInfo: {
+-            chatId: makeLong(300),
+-            type: 11,
+-            activeMembersCount: 2,
+-            newMessageCount: 1,
+-            invalidNewMessageCount: false,
+-            lastLogId: makeLong(12),
+-            lastSeenLogId: makeLong(0),
+-            displayMembers: [],
+-            chatMetas: [],
+-            pushAlert: true,
+-          },
+-        },
+-      })
+-      mockSyncMessages.mockResolvedValueOnce({
+-        statusCode: 0,
+-        body: {
+-          status: 0,
+-          isOK: true,
+-          chatLogs: [{ logId: makeLong(12), chatId: 300, type: 1, authorId: 42, message: 'late', sendAt: 12 }],
+-        },
++        body: { chatInfo: { chatId: makeLong(300), lastLogId: makeLong(12) } },
+       })
+-
+       const client = await new KakaoTalkClient().login({ oauthToken: 'token', userId: 'user1', deviceUuid: 'device1' })
+-      const page = await client.getMessagePage('300', { from: '11', count: 10 })
+ 
+-      expect(page.messages.map((message) => message.log_id)).toEqual(['12'])
+-      expect(page.next_cursor).toBe('12')
+-      expect(page.complete).toBe(true)
+-      expect(mockGetChatInfo).not.toHaveBeenCalled()
+-      expect(mockSyncMessages.mock.calls[0]?.[2]?.toString()).toBe('11')
+-      expect(mockSyncMessages.mock.calls[0]?.[3]?.toString()).toBe('12')
++      const page = await client.getMessagePage('300', { from: '11', count: 10 })
+ 
++      expect(page).toEqual({ messages: [], next_cursor: null, complete: false })
++      expect(mockSyncMessages).not.toHaveBeenCalled()
++      expect(mockConfirmRead).not.toHaveBeenCalled()
+       client.close()
+     })
+ 
+-    it('falls back to SYNCMSG when MCHATLOGS succeeds with an empty result', async () => {
+-      const loginResult = structuredClone(DEFAULT_LOGIN_RESULT)
+-      loginResult.chatDatas[0]!.ll = makeLong(10)
+-      mockLogin.mockResolvedValueOnce(loginResult)
+-      mockGetChatLogs.mockResolvedValueOnce({
+-        body: { status: 0, chatLogs: [], eof: true },
+-      })
+-      mockSyncMessages.mockResolvedValueOnce({
+-        body: {
+-          status: 0,
+-          isOK: true,
+-          chatLogs: [
+-            { logId: makeLong(10), chatId: 100, type: 1, authorId: 42, message: 'fallback', sendAt: 1700000001 },
+-          ],
+-        },
+-      })
+-
++    it('does not fall back to SYNCMSG when MCHATLOGS is empty', async () => {
++      mockGetChatLogs.mockResolvedValueOnce({ body: { status: 0, chatLogs: [], eof: true } })
+       const client = await new KakaoTalkClient().login({ oauthToken: 'token', userId: 'user1', deviceUuid: 'device1' })
+-      const messages = await client.getMessages('100')
+ 
+-      expect(messages).toHaveLength(1)
+-      expect(messages[0]?.message).toBe('fallback')
+-      expect(mockGetChatInfo).not.toHaveBeenCalled()
+-      expect(mockSyncMessages).toHaveBeenCalledTimes(1)
+-      expect(mockSyncMessages.mock.calls[0]?.[3]?.toString()).toBe('10')
++      const messages = await client.getMessages('100')
+ 
++      expect(messages).toEqual([])
++      expect(mockSyncMessages).not.toHaveBeenCalled()
++      expect(mockConfirmRead).not.toHaveBeenCalled()
+       client.close()
+     })
+ 
+@@ -1847,63 +1837,27 @@ describe('KakaoTalkClient', () => {
+       client.close()
+     })
+ 
+-    it('uses SYNCMSG without entering the room when the chat-list watermark is ahead of the cursor', async () => {
+-      const loginResult = structuredClone(DEFAULT_LOGIN_RESULT)
+-      loginResult.chatDatas[0]!.ll = makeLong(10)
+-      mockLogin.mockResolvedValueOnce(loginResult)
+-      mockGetChatLogs.mockResolvedValueOnce({
+-        body: { status: 0, chatLogs: [], eof: true },
+-      })
+-      mockSyncMessages.mockResolvedValueOnce({
+-        body: {
+-          status: 0,
+-          isOK: true,
+-          chatLogs: [
+-            { logId: makeLong(10), chatId: 100, type: 1, authorId: 42, message: 'incremental', sendAt: 1700000001 },
+-          ],
+-        },
+-      })
+-
++    it('does not use SYNCMSG when the chat-list watermark is ahead of the cursor', async () => {
++      mockGetChatLogs.mockResolvedValueOnce({ body: { status: 0, chatLogs: [], eof: true } })
+       const client = await new KakaoTalkClient().login({ oauthToken: 'token', userId: 'user1', deviceUuid: 'device1' })
+-      const messages = await client.getMessages('100', { from: '9' })
+ 
+-      expect(messages).toHaveLength(1)
+-      expect(messages[0]?.message).toBe('incremental')
+-      expect(mockGetChatInfo).not.toHaveBeenCalled()
+-      expect(mockSyncMessages.mock.calls[0]?.[2]?.toString()).toBe('9')
+-      expect(mockSyncMessages.mock.calls[0]?.[3]?.toString()).toBe('10')
++      const messages = await client.getMessages('100', { from: '9' })
+ 
++      expect(messages).toEqual([])
++      expect(mockSyncMessages).not.toHaveBeenCalled()
++      expect(mockConfirmRead).not.toHaveBeenCalled()
+       client.close()
+     })
+ 
+-    it('uses the last-message log ID when the primary chat-list watermark is missing', async () => {
+-      const loginResult = structuredClone(DEFAULT_LOGIN_RESULT)
+-      const chat = loginResult.chatDatas[0]! as Record<string, unknown>
+-      delete chat.ll
+-      chat.l = { logId: makeLong(12) }
+-      mockLogin.mockResolvedValueOnce(loginResult)
+-      mockGetChatLogs.mockResolvedValueOnce({
+-        body: { status: 0, chatLogs: [], eof: true },
+-      })
+-      mockSyncMessages.mockResolvedValueOnce({
+-        body: {
+-          status: 0,
+-          isOK: true,
+-          chatLogs: [
+-            { logId: makeLong(12), chatId: 100, type: 1, authorId: 42, message: 'last-log', sendAt: 1700000001 },
+-          ],
+-        },
+-      })
+-
++    it('does not use a last-message watermark to issue SYNCMSG', async () => {
++      mockGetChatLogs.mockResolvedValueOnce({ body: { status: 0, chatLogs: [], eof: true } })
+       const client = await new KakaoTalkClient().login({ oauthToken: 'token', userId: 'user1', deviceUuid: 'device1' })
+-      const messages = await client.getMessages('100', { from: '11' })
+ 
+-      expect(messages).toHaveLength(1)
+-      expect(messages[0]?.message).toBe('last-log')
+-      expect(mockGetChatInfo).not.toHaveBeenCalled()
+-      expect(mockSyncMessages.mock.calls[0]?.[2]?.toString()).toBe('11')
+-      expect(mockSyncMessages.mock.calls[0]?.[3]?.toString()).toBe('12')
++      const messages = await client.getMessages('100', { from: '11' })
+ 
++      expect(messages).toEqual([])
++      expect(mockSyncMessages).not.toHaveBeenCalled()
++      expect(mockConfirmRead).not.toHaveBeenCalled()
+       client.close()
+     })
+ 
+@@ -2200,169 +2154,120 @@ describe('KakaoTalkClient', () => {
+   })
+ 
+   describe('markRead', () => {
+-    it('calls session.markRead with parsed chatId/watermark and no linkId for normal chat', async () => {
+-      // given
++    function verifiedChatList(chatId = 100, seen = 42, unread = 0) {
++      return {
++        statusCode: 0,
++        body: {
++          status: 0,
++          chatDatas: [{ c: chatId, s: makeLong(seen), n: unread, ll: makeLong(seen + unread) }],
++          lastTokenId: makeLong(0),
++          lastChatId: makeLong(0),
++          eof: true,
++        },
++      }
++    }
++
++    it('confirms the exact viewed cursor with terminal SYNCMSG and verifies LCHATLIST', async () => {
++      mockGetChatList.mockResolvedValueOnce(verifiedChatList())
+       mockMarkRead.mockResolvedValueOnce({ statusCode: 0, body: { status: 0 } })
+       const client = await new KakaoTalkClient().login({ oauthToken: 'token', userId: 'user1', deviceUuid: 'device1' })
+ 
+-      // when
+       const result = await client.markRead('100', '42')
+ 
+-      // then
+-      expect(mockMarkRead).toHaveBeenCalledTimes(1)
+-      const [chatIdArg, watermarkArg, linkIdArg] = mockMarkRead.mock.calls[0] as [
++      expect(mockConfirmRead).toHaveBeenCalledTimes(1)
++      const [chatIdArg, watermarkArg] = mockConfirmRead.mock.calls[0] as [
+         { toString(): string },
+         { toString(): string },
+-        unknown,
+       ]
+       expect(chatIdArg.toString()).toBe('100')
+       expect(watermarkArg.toString()).toBe('42')
+-      expect(linkIdArg).toBeUndefined()
++      expect(mockGetChatList).toHaveBeenCalledTimes(1)
++      expect(mockMarkRead).toHaveBeenCalledTimes(1)
+       expect(result).toEqual({ success: true, status_code: 0, chat_id: '100', watermark: '42' })
+-
+       client.close()
+     })
+ 
+-    it('forwards linkId when caller passes it (open chat)', async () => {
+-      // given
++    it('forwards linkId only to the peer-facing NOTIREAD receipt', async () => {
++      mockGetChatList.mockResolvedValueOnce(verifiedChatList(200, 999))
+       mockMarkRead.mockResolvedValueOnce({ statusCode: 0, body: { status: 0 } })
+       const client = await new KakaoTalkClient().login({ oauthToken: 'token', userId: 'user1', deviceUuid: 'device1' })
+ 
+-      // when
+       await client.markRead('200', '999', { linkId: '77777' })
+ 
+-      // then
+       const [, , linkIdArg] = mockMarkRead.mock.calls[0] as [unknown, unknown, { toString(): string }]
+-      expect(linkIdArg).toBeDefined()
+       expect(linkIdArg.toString()).toBe('77777')
+-
+       client.close()
+     })
+ 
+-    it('reports success when body.status is absent (treated as 0)', async () => {
+-      // given
+-      mockMarkRead.mockResolvedValueOnce({ statusCode: 0, body: {} })
++    it('does not confirm when terminal SYNCMSG is incomplete', async () => {
++      mockConfirmRead.mockResolvedValueOnce({ statusCode: 0, body: { status: 0, isOK: false } })
+       const client = await new KakaoTalkClient().login({ oauthToken: 'token', userId: 'user1', deviceUuid: 'device1' })
+ 
+-      // when
+       const result = await client.markRead('100', '42')
+ 
+-      // then
+-      expect(result).toEqual({ success: true, status_code: 0, chat_id: '100', watermark: '42' })
+-
++      expect(result).toEqual({ success: false, status_code: 0, chat_id: '100', watermark: '42' })
++      expect(mockGetChatList).not.toHaveBeenCalled()
++      expect(mockMarkRead).not.toHaveBeenCalled()
+       client.close()
+     })
+ 
+-    it('reports failure from body.status (not transport statusCode) - the open-chat-missing-link case', async () => {
+-      // given
+-      mockMarkRead.mockResolvedValueOnce({ statusCode: 0, body: { status: -500 } })
++    it('does not confirm a stale LCHATLIST cursor and skips the peer receipt', async () => {
++      mockGetChatList.mockResolvedValueOnce(verifiedChatList(100, 41))
+       const client = await new KakaoTalkClient().login({ oauthToken: 'token', userId: 'user1', deviceUuid: 'device1' })
+ 
+-      // when
+       const result = await client.markRead('100', '42')
+ 
+-      // then
+-      expect(result).toEqual({ success: false, status_code: -500, chat_id: '100', watermark: '42' })
+-
+-      client.close()
+-    })
+-
+-    it('throws (so executeWithReconnect retries) on transport-level statusCode != 0', async () => {
+-      // given - simulates LocoConnection.handleClose synthetic packet
+-      mockMarkRead.mockRejectedValue(new Error('NOTIREAD failed: statusCode=-1'))
+-      const client = await new KakaoTalkClient().login({ oauthToken: 'token', userId: 'user1', deviceUuid: 'device1' })
+-
+-      // when / then
+-      try {
+-        await client.markRead('100', '42')
+-        throw new Error('expected to throw')
+-      } catch (e) {
+-        expect(e).toBeInstanceOf(KakaoTalkError)
+-        expect((e as KakaoTalkError).code).toBe('mark_read_failed')
+-      }
+-
++      expect(result.success).toBe(false)
++      expect(mockMarkRead).not.toHaveBeenCalled()
+       client.close()
+     })
+ 
+-    it('treats synthetic disconnect packet (statusCode: -1) as transport failure (throws)', async () => {
+-      // given
+-      mockMarkRead.mockResolvedValueOnce({ statusCode: -1, body: { error: 'connection closed' } })
++    it('confirms the viewed cursor while preserving newer unread messages', async () => {
++      mockGetChatList.mockResolvedValueOnce(verifiedChatList(100, 42, 1))
++      mockMarkRead.mockResolvedValueOnce({ statusCode: 0, body: { status: 0 } })
+       const client = await new KakaoTalkClient().login({ oauthToken: 'token', userId: 'user1', deviceUuid: 'device1' })
+ 
+-      // when / then
+-      try {
+-        await client.markRead('100', '42')
+-        throw new Error('expected to throw')
+-      } catch (e) {
+-        expect(e).toBeInstanceOf(KakaoTalkError)
+-        expect((e as KakaoTalkError).code).toBe('mark_read_failed')
+-      }
++      const result = await client.markRead('100', '42')
+ 
++      expect(result.success).toBe(true)
+       client.close()
+     })
+ 
+-    it('throws KakaoTalkError(invalid_chat_id) for non-numeric chatId', async () => {
+-      // given
++    it('keeps verified own-device success when the peer receipt fails', async () => {
++      mockGetChatList.mockResolvedValueOnce(verifiedChatList())
++      mockMarkRead.mockRejectedValueOnce(new Error('NOTIREAD unavailable'))
+       const client = await new KakaoTalkClient().login({ oauthToken: 'token', userId: 'user1', deviceUuid: 'device1' })
+ 
+-      // when / then
+-      try {
+-        await client.markRead('not-a-number', '42')
+-        throw new Error('expected to throw')
+-      } catch (e) {
+-        expect(e).toBeInstanceOf(KakaoTalkError)
+-        expect((e as KakaoTalkError).code).toBe('invalid_chat_id')
+-      }
++      const result = await client.markRead('100', '42')
+ 
++      expect(result.success).toBe(true)
+       client.close()
+     })
+ 
+-    it('throws KakaoTalkError(invalid_log_id) for non-numeric logId', async () => {
+-      // given
++    it('reports terminal SYNCMSG provider rejection', async () => {
++      mockConfirmRead.mockResolvedValueOnce({ statusCode: 0, body: { status: -500, isOK: false } })
+       const client = await new KakaoTalkClient().login({ oauthToken: 'token', userId: 'user1', deviceUuid: 'device1' })
+ 
+-      // when / then
+-      try {
+-        await client.markRead('100', 'not-a-number')
+-        throw new Error('expected to throw')
+-      } catch (e) {
+-        expect(e).toBeInstanceOf(KakaoTalkError)
+-        expect((e as KakaoTalkError).code).toBe('invalid_log_id')
+-      }
++      const result = await client.markRead('100', '42')
+ 
++      expect(result).toEqual({ success: false, status_code: -500, chat_id: '100', watermark: '42' })
+       client.close()
+     })
+ 
+-    it('throws KakaoTalkError(invalid_link_id) for non-numeric linkId', async () => {
+-      // given
++    it('throws on terminal SYNCMSG transport failure', async () => {
++      mockConfirmRead.mockResolvedValueOnce({ statusCode: -1, body: { error: 'connection closed' } })
+       const client = await new KakaoTalkClient().login({ oauthToken: 'token', userId: 'user1', deviceUuid: 'device1' })
+ 
+-      // when / then
+-      try {
+-        await client.markRead('100', '42', { linkId: 'not-a-number' })
+-        throw new Error('expected to throw')
+-      } catch (e) {
+-        expect(e).toBeInstanceOf(KakaoTalkError)
+-        expect((e as KakaoTalkError).code).toBe('invalid_link_id')
+-      }
+-
++      await expect(client.markRead('100', '42')).rejects.toMatchObject({ code: 'mark_read_failed' })
+       client.close()
+     })
+ 
+-    it('wraps transport errors as KakaoTalkError(mark_read_failed)', async () => {
+-      // given
+-      mockMarkRead.mockRejectedValue(new Error('Socket closed'))
++    it('validates chat, log, and link ids before opening a session', async () => {
+       const client = await new KakaoTalkClient().login({ oauthToken: 'token', userId: 'user1', deviceUuid: 'device1' })
+-
+-      // when / then
+-      try {
+-        await client.markRead('100', '42')
+-        throw new Error('expected to throw')
+-      } catch (e) {
+-        expect(e).toBeInstanceOf(KakaoTalkError)
+-        expect((e as KakaoTalkError).code).toBe('mark_read_failed')
+-      }
+-
++      await expect(client.markRead('not-a-number', '42')).rejects.toMatchObject({ code: 'invalid_chat_id' })
++      await expect(client.markRead('100', 'not-a-number')).rejects.toMatchObject({ code: 'invalid_log_id' })
++      await expect(client.markRead('100', '42', { linkId: 'not-a-number' })).rejects.toMatchObject({ code: 'invalid_link_id' })
++      expect(mockConfirmRead).not.toHaveBeenCalled()
+       client.close()
+     })
+   })
 diff --git a/src/platforms/kakaotalk/client.ts b/src/platforms/kakaotalk/client.ts
-index 76a4ccb403ca6ba92891cf16ffd210a76e3b8cc0..f61d842a20b3dad9b07ad21d68110d86df44baa5 100644
+index 76a4ccb403ca6ba92891cf16ffd210a76e3b8cc0..a4430491275f7c41b5bed84a096b044a4bd022ee 100644
 --- a/src/platforms/kakaotalk/client.ts
 +++ b/src/platforms/kakaotalk/client.ts
 @@ -101,6 +101,7 @@ type ChatData = Record<string, unknown>
@@ -95,7 +1071,113 @@ index 76a4ccb403ca6ba92891cf16ffd210a76e3b8cc0..f61d842a20b3dad9b07ad21d68110d86
  }
  
  class MemberNameCache {
-@@ -959,7 +960,7 @@ export class KakaoTalkClient {
+@@ -222,19 +223,23 @@ function parseLinkId(linkId: string): Long {
+   }
+ }
+ 
+-function formatChat(chat: ChatData, title: string | null, nameCache: MemberNameCache): KakaoChat {
++function formatChat(chat: ChatData, title: string | null, nameCache: MemberNameCache, directoryEvidence = false): KakaoChat {
+   const memberNames = (chat.k ?? []) as string[]
+   const lastLog = chat.l as Record<string, unknown> | null
+   const displayName = memberNames.join(', ') || null
+   const chatId = longToString(chat.c)
++  const openLinkId = isOpenChat(chat) ? getOpenLinkId(chat) : null
+ 
+   return {
+     chat_id: chatId,
+     type: requiredChatType(chat.t),
++    open_link_id: openLinkId ? longToString(openLinkId) : null,
+     display_name: displayName,
+-    title,
++    title: clientChatTitle(chat.m) ?? title,
+     active_members: chat.a as number,
+     unread_count: chat.n as number,
++    ...(directoryEvidence && bsonToLong(chat.s) ? { last_seen_log_id: bsonToLong(chat.s)!.toString() } : {}),
++    ...(directoryEvidence && bsonToLong(chat.ll) ? { last_log_id: bsonToLong(chat.ll)!.toString() } : {}),
+     last_message: lastLog
+       ? {
+           author_id: lastLog.authorId as number,
+@@ -248,6 +253,15 @@ function formatChat(chat: ChatData, title: string | null, nameCache: MemberNameC
+ 
+ const META_TYPE_TITLE = 3
+ 
++// Personal names are account-scoped client metadata, not shared room TITLE.
++function clientChatTitle(meta: unknown): string | null {
++  if (typeof meta === 'string') {
++    try { meta = JSON.parse(meta) } catch { return null }
++  }
++  const name = meta && typeof meta === 'object' ? (meta as Record<string, unknown>).name : null
++  return typeof name === 'string' && name.trim().length > 0 ? name : null
++}
++
+ interface ChannelMetaEntry {
+   type?: number
+   content?: string
+@@ -264,6 +278,8 @@ interface ChannelInfoData {
+   lastChatLog?: Record<string, unknown> | null
+   displayMembers?: Array<Record<string, unknown>>
+   chatMetas?: ChannelMetaEntry[]
++  meta?: unknown
++  mcMetas?: unknown
+   li?: unknown
+ }
+ 
+@@ -273,6 +289,8 @@ interface ChannelInfoResponse {
+ 
+ function extractTitle(body: Record<string, unknown>): string | null {
+   const info = (body as ChannelInfoResponse).chatInfo
++  const personalTitle = clientChatTitle(info?.mcMetas) ?? clientChatTitle(info?.meta)
++  if (personalTitle) return personalTitle
+   const metas = info?.chatMetas
+   if (!Array.isArray(metas)) return null
+ 
+@@ -293,6 +311,37 @@ function extractChannelInfo(body: Record<string, unknown>, expectedChatId: strin
+   return info
+ }
+ 
++async function readWatermarkIsVerified(
++  session: LocoSession,
++  expectedChatId: string,
++  requestedWatermark: Long,
++): Promise<boolean> {
++  let lastTokenId = Long.ZERO
++  let lastChatId = Long.ZERO
++
++  for (let page = 0; page < MAX_PAGES; page++) {
++    const response = await session.getChatList(lastTokenId, lastChatId)
++    assertLocoOk(response, 'LCHATLIST')
++    const body = response.body as unknown as ChatListResponse
++    const chats = (body.chatDatas ?? []) as ChatData[]
++    const room = chats.find((chat) => longToString(chat.c) === expectedChatId)
++    if (room) {
++      const providerCursor = bsonToLong(room.s)
++      return providerCursor?.greaterThanOrEqual(requestedWatermark) === true
++    }
++    if (body.eof === true) return false
++
++    const nextTokenId = bsonToLong(body.lastTokenId)
++    const nextChatId = bsonToLong(body.lastChatId)
++    if (!nextTokenId || !nextChatId || (nextTokenId.equals(lastTokenId) && nextChatId.equals(lastChatId))) {
++      return false
++    }
++    lastTokenId = nextTokenId
++    lastChatId = nextChatId
++  }
++  return false
++}
++
+ function requiredNonNegativeInteger(value: unknown, field: string): number {
+   if (!Number.isInteger(value) || (value as number) < 0) {
+     throw new Error(`CHATINFO response invalid ${field}`)
+@@ -334,6 +383,7 @@ function channelInfoToChatData(body: Record<string, unknown>, expectedChatId: st
+     i: memberIds,
+     k: memberNames,
+     li: info.li,
++    m: info.mcMetas ?? info.meta,
+   }
+ }
+ 
+@@ -959,7 +1009,7 @@ export class KakaoTalkClient {
  
        this.nameCache.ingest((loginResult.chatDatas ?? []) as ChatData[])
  
@@ -104,7 +1186,7 @@ index 76a4ccb403ca6ba92891cf16ffd210a76e3b8cc0..f61d842a20b3dad9b07ad21d68110d86
      } catch (error) {
        session.close()
        const code = isLoginResponseError(error) ? error.code : 'login_failed'
-@@ -1025,20 +1026,29 @@ export class KakaoTalkClient {
+@@ -1025,20 +1075,29 @@ export class KakaoTalkClient {
    }
  
    async getChats(options?: { all?: boolean; search?: string; resolveTitles?: boolean }): Promise<KakaoChat[]> {
@@ -138,7 +1220,94 @@ index 76a4ccb403ca6ba92891cf16ffd210a76e3b8cc0..f61d842a20b3dad9b07ad21d68110d86
            let pages = 0
            const requireCompleteList = options?.all === true
  
-@@ -1421,7 +1431,8 @@ export class KakaoTalkClient {
+@@ -1091,7 +1150,7 @@ export class KakaoTalkClient {
+             )
+           : null
+ 
+-        return results.map((chat, i) => formatChat(chat, titles ? titles[i] : null, this.nameCache))
++        return results.map((chat, i) => formatChat(chat, titles ? titles[i] : null, this.nameCache, true))
+       } catch (error) {
+         throw wrapError(error, 'get_chats_failed')
+       }
+@@ -1227,25 +1286,16 @@ export class KakaoTalkClient {
+         }
+ 
+         // CHATINFO is read-only and supplies a fresh lastLogId even for rooms
+-        // absent from the login snapshot. This avoids CHATONROOM, which can
+-        // advance server-side unread state.
++        // absent from the login snapshot. SYNCMSG is intentionally not used as
++        // a history fallback: KakaoTalk also uses terminal SYNCMSG to advance
++        // this device's provider read cursor.
+         const chatInfoResponse = await session.getChannelInfo(parsedChatId)
+         assertLocoOk(chatInfoResponse, 'CHATINFO')
+         const maxLogId = extractChannelMaxLogId(chatInfoResponse.body as Record<string, unknown>, normalizedChatId)
+         if (maxLogId.lessThanOrEqual(cursor)) {
+           return { messages: [], next_cursor: null, complete: true }
+         }
+-
+-        const syncResponse = await session.syncMessages(parsedChatId, Math.min(count, 80), cursor, maxLogId)
+-        assertLocoOk(syncResponse, 'SYNCMSG')
+-        const syncBatch = ((syncResponse.body.chatLogs ?? []) as Array<Record<string, unknown>>).filter(
+-          (log) => longToString(log.chatId) === normalizedChatId,
+-        )
+-        const maxReturned = findMaxLogId(syncBatch, 'logId')
+-        const protocolComplete =
+-          syncResponse.body.isOK === true || (maxReturned !== null && maxReturned.greaterThanOrEqual(maxLogId))
+-
+-        return buildMessagePage(syncBatch, count, cursor, protocolComplete, normalizedChatId, this.nameCache)
++        return { messages: [], next_cursor: null, complete: false }
+       } catch (error) {
+         throw wrapError(error, 'get_message_page_failed')
+       }
+@@ -1306,44 +1356,9 @@ export class KakaoTalkClient {
+           return formatMessages(allMessages, count, chatId, this.nameCache)
+         }
+ 
+-        // CHATONROOM represents entering a room and can advance unread state on
+-        // the server. Use the login-time chat-list watermark for the read-only
+-        // SYNCMSG fallback instead, and skip sync when the cursor is current.
+-        const maxLogId = getLoginMaxLogId(loginResult, chatId)
+-        if (!maxLogId || maxLogId.lessThanOrEqual(cur)) {
+-          return []
+-        }
+-
+-        let reachedEnd = false
+-        for (let page = 0; page < MAX_PAGES; page++) {
+-          const response = await session.syncMessages(cid, 80, cur, maxLogId)
+-          const batch = (response.body.chatLogs ?? []) as Array<Record<string, unknown>>
+-          if (batch.length === 0) {
+-            reachedEnd = true
+-            break
+-          }
+-
+-          for (const log of batch) {
+-            const lid = longToString(log.logId)
+-            if (!seenLogIds.has(lid)) {
+-              seenLogIds.add(lid)
+-              allMessages.push(log)
+-            }
+-          }
+-
+-          const maxLog = findMaxLogId(batch, 'logId')
+-
+-          if (!maxLog || maxLog.equals(cur) || response.body.isOK) {
+-            reachedEnd = true
+-            break
+-          }
+-          cur = maxLog
+-        }
+-        if (!reachedEnd) {
+-          warn(`[agent-kakaotalk] Warning: message fetch capped at ${MAX_PAGES} pages. Results may be incomplete.`)
+-        }
+-
+-        return formatMessages(allMessages, count, chatId, this.nameCache)
++        // Do not fall back to SYNCMSG here. It is provider read state, not a
++        // read-only history primitive, and this method is used by prefetch.
++        return []
+       } catch (error) {
+         throw wrapError(error, 'get_messages_failed')
+       }
+@@ -1421,7 +1436,8 @@ export class KakaoTalkClient {
    }
  
    async sendMessage(chatId: string, text: string, options?: { replyTo?: KakaoReplyTarget }): Promise<KakaoSendResult> {
@@ -148,7 +1317,7 @@ index 76a4ccb403ca6ba92891cf16ffd210a76e3b8cc0..f61d842a20b3dad9b07ad21d68110d86
        try {
          const response = options?.replyTo
            ? await session.sendReply(
-@@ -1441,7 +1452,7 @@ export class KakaoTalkClient {
+@@ -1441,7 +1457,7 @@ export class KakaoTalkClient {
        } catch (error) {
          throw wrapError(error, 'send_message_failed')
        }
@@ -157,7 +1326,7 @@ index 76a4ccb403ca6ba92891cf16ffd210a76e3b8cc0..f61d842a20b3dad9b07ad21d68110d86
    }
  
    async sendTyping(chatId: string, opts?: { linkId?: string }): Promise<KakaoTypingResult> {
-@@ -1712,7 +1723,9 @@ export class KakaoTalkClient {
+@@ -1712,7 +1728,9 @@ export class KakaoTalkClient {
      errorCode: string
    }): Promise<KakaoSendResult> {
      const parsedChatId = parseChatId(opts.chatId)
@@ -168,7 +1337,7 @@ index 76a4ccb403ca6ba92891cf16ffd210a76e3b8cc0..f61d842a20b3dad9b07ad21d68110d86
        try {
          const shipResp = await session.shipMedia(
            parsedChatId,
-@@ -1766,7 +1779,7 @@ export class KakaoTalkClient {
+@@ -1766,16 +1784,10 @@ export class KakaoTalkClient {
        } catch (error) {
          throw wrapError(error, opts.errorCode)
        }
@@ -176,4 +1345,190 @@ index 76a4ccb403ca6ba92891cf16ffd210a76e3b8cc0..f61d842a20b3dad9b07ad21d68110d86
 +    })()
    }
  
-   /**
+-  /**
+-   * Advance the read watermark for `chatId` up to and including `logId`.
+-   * The caller decides open vs normal: pass `opts.linkId` for open chats
+-   * (오픈채팅) and omit it for normal chats. Open chats without a `linkId`
+-   * are rejected by the server with a non-zero `body.status` — this method
+-   * does not auto-detect.
+-   */
++  /** Advance this device's provider read cursor through an already-rendered log. */
+   async markRead(chatId: string, logId: string, opts?: { linkId?: string }): Promise<KakaoMarkReadResult> {
+     const parsedChatId = parseChatId(chatId)
+     const parsedWatermark = parseLogId(logId)
+@@ -1783,16 +1795,37 @@ export class KakaoTalkClient {
+ 
+     return this.executeWithReconnect(async ({ session }) => {
+       try {
+-        const response = await session.markRead(parsedChatId, parsedWatermark, parsedLinkId)
+-        // Throw on transport-level failure (incl. synthetic { statusCode: -1 }
+-        // from LocoConnection.handleClose) so executeWithReconnect retries on
+-        // a fresh session. The NOTIREAD command result lives in body.status.
++        // KakaoTalk's explicit read action uses terminal SYNCMSG: cur=max is
++        // the exact viewed cursor and cnt=0. This cannot include later arrivals.
++        const response = await session.confirmRead(parsedChatId, parsedWatermark)
+         if (response.statusCode !== 0) {
+-          throw new Error(`NOTIREAD failed: statusCode=${response.statusCode}`)
++          throw new Error(`SYNCMSG failed: statusCode=${response.statusCode}`)
+         }
+         const bodyStatus = typeof response.body.status === 'number' ? response.body.status : 0
++        if (bodyStatus !== 0 || response.body.isOK !== true) {
++          return {
++            success: false,
++            status_code: bodyStatus,
++            chat_id: chatId,
++            watermark: logId,
++          }
++        }
++
++        // CHATINFO.lastSeenLogId is zero even when LCHATLIST has the canonical
++        // cursor. Only commit the optimistic local read after a fresh list page
++        // proves the provider cursor reached the requested watermark.
++        const verified = await readWatermarkIsVerified(session, chatId, parsedWatermark)
++
++        // NOTIREAD is the peer-facing read receipt path. Its ACK is not evidence
++        // of own-device unread state, so failure here does not undo a verified
++        // terminal SYNCMSG.
++        if (verified) {
++          try {
++            await session.markRead(parsedChatId, parsedWatermark, parsedLinkId)
++          } catch {}
++        }
+         return {
+-          success: bodyStatus === 0,
++          success: verified,
+           status_code: bodyStatus,
+           chat_id: chatId,
+           watermark: logId,
+diff --git a/src/platforms/kakaotalk/protocol/session.test.ts b/src/platforms/kakaotalk/protocol/session.test.ts
+index e18e18de5d4738c7b03d0a8f96a8f4d1b8c486ea..3f70c488d07cb726ec979ada90875b0252e4b371 100644
+--- a/src/platforms/kakaotalk/protocol/session.test.ts
++++ b/src/platforms/kakaotalk/protocol/session.test.ts
+@@ -2,7 +2,14 @@ import { describe, expect, it, mock } from 'bun:test'
+ 
+ import { Long } from 'bson'
+ 
+-import { buildTypingActionBody, sendTypingPacket, TYPING_ACTION_METHOD } from './session'
++import {
++  buildReadConfirmationBody,
++  buildTypingActionBody,
++  READ_CONFIRMATION_METHOD,
++  sendReadConfirmationPacket,
++  sendTypingPacket,
++  TYPING_ACTION_METHOD,
++} from './session'
+ import type { LocoPacket } from './types'
+ 
+ type SentPacket = { method: string; body: Record<string, unknown> }
+@@ -111,3 +118,22 @@ describe('sendTypingPacket → sendPacket wire boundary', () => {
+     expect(packet.body).toEqual(buildTypingActionBody(Long.fromString('123'), Long.fromString('456')))
+   })
+ })
++
++describe('read confirmation wire contract', () => {
++  it('pins terminal SYNCMSG to the exact viewed cursor', async () => {
++    const { connection, sent } = fakeConnection({ statusCode: 0, body: { status: 0, isOK: true } })
++    const chatId = Long.fromString('4876318903415923')
++    const watermark = Long.fromString('3935083960246431370')
++
++    await sendReadConfirmationPacket(connection, chatId, watermark)
++
++    expect(sent).toHaveLength(1)
++    expect(sent[0]!.method).toBe(READ_CONFIRMATION_METHOD)
++    expect(Object.keys(sent[0]!.body).sort()).toEqual(['chatId', 'cnt', 'cur', 'max'])
++    expect((sent[0]!.body.chatId as Long).toString()).toBe(chatId.toString())
++    expect((sent[0]!.body.cur as Long).toString()).toBe(watermark.toString())
++    expect((sent[0]!.body.max as Long).toString()).toBe(watermark.toString())
++    expect(sent[0]!.body.cnt).toBe(0)
++    expect(sent[0]!.body).toEqual(buildReadConfirmationBody(chatId, watermark))
++  })
++})
+diff --git a/src/platforms/kakaotalk/protocol/session.ts b/src/platforms/kakaotalk/protocol/session.ts
+index a960e6c679dfa579424a0dbc53251856aa54695e..3694825bd48c060417b52c4501dd8af6638caed3 100644
+--- a/src/platforms/kakaotalk/protocol/session.ts
++++ b/src/platforms/kakaotalk/protocol/session.ts
+@@ -21,6 +21,19 @@ import type { BookingResponse, CheckinResponse, LoginListResponse, LocoPacket, S
+ // LOCO opcode string emitted on the wire for typing indicator pulses.
+ // Reverse-engineered from KakaoTalk 25.x — see `LocoSession.sendTyping` docs.
+ export const TYPING_ACTION_METHOD = 'ACTION'
++export const READ_CONFIRMATION_METHOD = 'SYNCMSG'
++
++export function buildReadConfirmationBody(chatId: Long, watermark: Long): Record<string, unknown> {
++  return { chatId, cur: watermark, cnt: 0, max: watermark }
++}
++
++export async function sendReadConfirmationPacket(
++  connection: { sendPacket: (method: string, body: Record<string, unknown>) => Promise<LocoPacket> },
++  chatId: Long,
++  watermark: Long,
++): Promise<LocoPacket> {
++  return connection.sendPacket(READ_CONFIRMATION_METHOD, buildReadConfirmationBody(chatId, watermark))
++}
+ 
+ // Builds the BSON body the official KakaoTalk client emits for the typing
+ // indicator subtype of the `ACTION` opcode. Exported so protocol tests can lock
+@@ -255,6 +268,19 @@ export class LocoSession {
+     })
+   }
+ 
++  /**
++   * Confirm that this device has read through `watermark`.
++   *
++   * KakaoTalk's explicit "mark as read" path uses a terminal SYNCMSG request:
++   * cur and max are the same already-rendered log id and cnt is zero.  Keep
++   * this separate from history synchronization so background retrieval never
++   * advances the provider read cursor.
++   */
++  async confirmRead(chatId: Long, watermark: Long): Promise<LocoPacket> {
++    if (!this.connection) throw new Error('Not connected')
++    return sendReadConfirmationPacket(this.connection, chatId, watermark)
++  }
++
+   async getChatLogs(chatIds: Long[], sinces: Long[]): Promise<LocoPacket> {
+     if (!this.connection) throw new Error('Not connected')
+     return this.connection.sendPacket('MCHATLOGS', {
+@@ -322,16 +348,12 @@ export class LocoSession {
+     })
+   }
+ 
+-  /**
+-   * Advance the server-side read watermark for a chat (NOTIREAD). Open chats
+-   * supply `linkId`; normal chats must omit it (the wire `li` key must be
+-   * absent, not null/0).
+-   */
+   async leaveChat(chatId: Long): Promise<LocoPacket> {
+     if (!this.connection) throw new Error('Not connected')
+     return this.connection.sendPacket('LEAVE', { chatId })
+   }
+ 
++  /** Notify peers of the read watermark (NOTIREAD). */
+   async markRead(chatId: Long, watermark: Long, linkId?: Long): Promise<LocoPacket> {
+     if (!this.connection) throw new Error('Not connected')
+     const body: Record<string, unknown> = { chatId, watermark }
+diff --git a/src/platforms/kakaotalk/types.ts b/src/platforms/kakaotalk/types.ts
+index 8d298f0d38e04315bdf6ad6c531ea04b37141427..4959c2b8430cc2beee8a4499f83cb2ebc6878d36 100644
+--- a/src/platforms/kakaotalk/types.ts
++++ b/src/platforms/kakaotalk/types.ts
+@@ -84,10 +84,13 @@ export function isKnownKakaoChatStringType(value: unknown): value is (typeof KNO
+ export interface KakaoChat {
+   chat_id: string
+   type: KakaoChatType
++  open_link_id: string | null
+   display_name: string | null
+   title: string | null
+   active_members: number
+   unread_count: number
++  last_seen_log_id?: string | null
++  last_log_id?: string | null
+   last_message: {
+     author_id: number
+     author_name: string | null
+@@ -252,6 +255,8 @@ export const KakaoChatSchema = z.object({
+   title: z.string().nullable(),
+   active_members: z.number(),
+   unread_count: z.number(),
++  last_seen_log_id: z.string().nullable().optional(),
++  last_log_id: z.string().nullable().optional(),
+   last_message: z
+     .object({
+       author_id: z.number(),

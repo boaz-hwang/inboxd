@@ -162,7 +162,42 @@ impl AccountService {
             messages,
         );
         let stored=storage.call_async(StorageOperation::ObserveMessages,json!({"platform":scope["platform"],"account":scope["account"],"observed_at":order,"messages":messages})).await.map_err(|e|e.message)?;
+        let mut inserted_by_chat: std::collections::BTreeMap<String, Vec<Value>> =
+            Default::default();
+        // A successful poll establishes a baseline even when all IDs already
+        // exist (or the explicitly requested room is empty).
+        for message in &messages {
+            if let Some(chat) = message["chat_id"].as_str() {
+                inserted_by_chat.entry(chat.to_owned()).or_default();
+            }
+        }
+        if let Some(chat) = scope["chat_id"].as_str() {
+            inserted_by_chat
+                .entry(crate::accounts_backend::storage_keys::chat(
+                    scope["platform"].as_str().unwrap_or(""),
+                    chat,
+                ))
+                .or_default();
+        }
+        if let Some(inserted) = stored["inserted"].as_array() {
+            for message in inserted {
+                if let (Some(chat), Some(id)) =
+                    (message["chat_id"].as_str(), message["id"].as_str())
+                {
+                    inserted_by_chat
+                        .entry(chat.to_owned())
+                        .or_default()
+                        .push(json!(id));
+                }
+            }
+        }
+        for (chat, message_ids) in inserted_by_chat {
+            let _=storage.call_async(StorageOperation::ResponseObserve,json!({"platform":scope["platform"],"account":scope["account"],"chat_id":chat,"message_ids":message_ids})).await;
+        }
         if stored["changed"].as_u64().unwrap_or(0) > 0 {
+            if let Some(replies) = &self.replies {
+                replies.observe(crate::reply::storage_chat(json!({"platform":scope["platform"],"account":scope["account"],"chat_id":scope["chat_id"]}))).await;
+            }
             if let Some(events) = &self.events {
                 let _=events.publish("message.upserted",json!({"platform":scope["platform"],"account":scope["account"],"chat_id":scope["chat_id"]}));
             }

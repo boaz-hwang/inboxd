@@ -290,6 +290,13 @@ impl AccountService {
                         .map(|c| (c["chat_id"].as_str().unwrap().to_owned(), c.clone()))
                         .collect();
                     if self.storage.is_some() {
+                        if self
+                            .record_unread_evidence(&current.values().cloned().collect::<Vec<_>>())
+                            .await
+                            .is_err()
+                        {
+                            failed = true;
+                        }
                         for (chat, value) in &current {
                             if directory.get(chat) != Some(value)
                                 && queued.insert((chat.clone(), None))

@@ -17,7 +17,7 @@ export function isArchivedResource(state: TuiState, resource: ResourceRefV1 | un
   return !!resource && !state.requeryCapabilities && (state.capabilities.status === "ready" || state.capabilities.status === "empty") && !isRegisteredResource(state, resource);
 }
 export function clean(value: string): string {
-  return value.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, "").replace(/\t/g, "    ");
+  return value.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2060\u2066-\u2069]/g, "").replace(/\t/g, "    ");
 }
 export function platformOptions(state: TuiState): string[] {
   return ["all", ...new Set([...state.capabilities.data.map(c => c.resource.platform), ...(state.directory ?? []).flatMap(row => resourceOf(row)?.platform ?? []), ...state.views.inbox.data.flatMap(row => resourceOf(row)?.platform ?? [])])].sort((a, b) => a === "all" ? -1 : b === "all" ? 1 : a.localeCompare(b));
@@ -25,7 +25,7 @@ export function platformOptions(state: TuiState): string[] {
 export function filteredMessages(state: TuiState, screen: "inbox" | "search"): Row[] {
   return state.views[screen].data.filter(row => !row.evidenceOnly && (!state.platform || resourceOf(row)?.platform === state.platform));
 }
-export interface Conversation { resource: ResourceRefV1; title: string; preview: string; ts?: string; unread?: number; }
+export interface Conversation { resource: ResourceRefV1; title: string; preview: string; ts?: string; unread?: number; unreadStatus?: string; suggestionStatus?: string; }
 export function conversationRows(state: TuiState, applyFilter = true): Conversation[] {
   const resources: ResourceRefV1[] = [];
   for (const resource of [...(state.directory ?? []).map(resourceOf), ...state.capabilities.data.map(c => c.resource), ...state.views.inbox.data.map(resourceOf)]) {
@@ -40,10 +40,11 @@ export function conversationRows(state: TuiState, applyFilter = true): Conversat
     const latest = [...messages].filter(row => !row.evidenceOnly).sort((a, b) => timestamp(b.ts) - timestamp(a.ts))[0];
     const rawId = resource.kind === "chat" ? resource.chat_id : resource.destination_id;
     const title = directory?.title || latest?.title || (/^[\p{L}][\p{L}\p{N} _-]{0,28}$/u.test(rawId) && !/^[CDUG][A-Z0-9]{7,}$/.test(rawId) ? rawId : `대화 ${index + 1}`);
+    const evidence = directory?.unreadEvidence;
     const unread = /^Unread: (\d+) /.exec(messages[0]?.unread ?? "");
-    return { resource, title: clean(title), preview: clean(latest?.deleted ? "삭제된 메시지" : latest?.body ?? directory?.body ?? "불러온 메시지 없음"), ts: latest?.ts ?? directory?.ts, unread: unread ? Number(unread[1]) : undefined };
+    return { resource, title: clean(title), preview: clean(directory && timestamp(directory.ts) >= timestamp(latest?.ts) ? directory.body ?? "불러온 메시지 없음" : latest?.deleted ? "삭제된 메시지" : latest?.body ?? directory?.body ?? "불러온 메시지 없음"), ts: directory && timestamp(directory.ts) >= timestamp(latest?.ts) ? directory.ts : latest?.ts ?? directory?.ts, unread: evidence?.count ?? (unread ? Number(unread[1]) : undefined), unreadStatus: evidence?.status, suggestionStatus: directory?.suggestionStatus };
   });
-  rooms.sort((a,b) => timestamp(b.ts)-timestamp(a.ts));
+  rooms.sort((a,b) => timestamp(b.ts)-timestamp(a.ts) || (state.accountMode ? resourceSortKey(a.resource).localeCompare(resourceSortKey(b.resource)) : 0));
   if (!applyFilter) return rooms;
   const query = (state.finderQuery ?? "").normalize("NFC").toLocaleLowerCase().trim();
   return rooms.filter(room => (!state.platform || room.resource.platform === state.platform) && (!query || `${room.title} ${platformNames[room.resource.platform] ?? room.resource.platform}`.normalize("NFC").toLocaleLowerCase().includes(query)));
@@ -72,3 +73,5 @@ export function authorLabel(row: Row, state?: TuiState): string {
   // Opaque provider identifiers belong in the inspector, not in every message.
   return clean(row.author && !/^(?:\d+|[UW][A-Z0-9]{7,}|(?:telegram|slack|kakao):.*)$/.test(row.author) ? row.author : "보낸 사람");
 }
+
+function resourceSortKey(resource: ResourceRefV1): string { return JSON.stringify([resource.platform, resource.account, resource.kind, resource.kind === "chat" ? resource.chat_id : resource.destination_id]); }

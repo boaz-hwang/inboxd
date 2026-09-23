@@ -98,3 +98,32 @@ test("only authoritative permanent Telegram deletions create tombstone evidence"
   listener!({...base,is_permanent:true,from_cache:false});
   expect(events.slice(-2)).toEqual([{event:"deleted",chat_id:"42",message_id:"100"},{event:"deleted",chat_id:"42",message_id:"101"}]);
 });
+
+test("directory preserves the own inbox read cursor, not the outgoing read cursor", async () => {
+  const adapter = createTelegramAdapter({ accountQuery: async () => ({ id: 42, title: "room", unread_count: 1, last_read_inbox_message_id: 10485760, last_read_outbox_message_id: 20971520 }) } as unknown as TdlibUserClientPort);
+  const result = await dispatch(adapter, { op: "telegram_chat", chat_id: "42" });
+  expect(result.chats?.[0]).toMatchObject({ unread: 1, read_through: "10485760" });
+});
+
+test("Telegram resumes one read after TDLib is ready and never replays a send", async () => {
+  let reads = 0, sends = 0;
+  const adapter = createTelegramAdapter({
+    getAuthorizationState: async () => ({ "@type": "authorizationStateReady" }),
+    accountQuery: async () => { if (++reads === 1) throw Object.assign(new Error("session"), { code: 401 }); return { chat_ids: [1] }; },
+    sendTextMessage: async () => { sends++; throw Object.assign(new Error("session"), { code: 401 }); },
+  } as never);
+  expect(await dispatch(adapter, { op: "telegram_list_directory", limit: 10, params: { list: "main" } })).toEqual({ ids: ["1"] });
+  expect(reads).toBe(2);
+  await expect(dispatch(adapter, { op: "telegram_send", chat_id: "1", body: "hello" })).rejects.toMatchObject({ code: "telegram_auth_required" });
+  expect(sends).toBe(1);
+});
+
+test("Telegram revoked sessions request reconnection without read loops", async () => {
+  let reads = 0;
+  const adapter = createTelegramAdapter({
+    getAuthorizationState: async () => ({ "@type": "authorizationStateWaitPhoneNumber" }),
+    accountQuery: async () => { reads++; throw Object.assign(new Error("session"), { code: 401 }); },
+  } as never);
+  await expect(dispatch(adapter, { op: "telegram_list_directory", limit: 10, params: { list: "main" } })).rejects.toMatchObject({ code: "telegram_auth_required" });
+  expect(reads).toBe(1);
+});

@@ -17,8 +17,8 @@ Destination: slack:work:ops
 Expires: 10m                                                                    
 Message: 과거 승인 요청                                                         
 Historical record [read-only]                                                   
-Back: Esc · PgUp/PgDn scroll · Home top (1–7/7)                                 
-! history detail opened                                                         
+Back: Ctrl+C · PgUp/PgDn scroll · Home top (1–7/7)                              
                                                                                 
                                                                                 
-1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply s-status Esc ? q            
+                                                                                
+1–5 j/k ↑↓ Enter-open / Shift+R c r-reply s-status Ctrl+C ?                     

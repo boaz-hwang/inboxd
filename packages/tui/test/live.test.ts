@@ -32,7 +32,7 @@ test("daemon invalidations refresh the account snapshot and current chat while p
   const messages = calls.filter(c => c.method === "account.messages").length;
   await controller.receiveEvent("account.changed", { platform: "telegram", account: "other", phase: "ready" });
   expect(calls.filter(c => c.method === "account.messages")).toHaveLength(messages);
-  await controller.dispatchKey("Escape");
+  await controller.dispatchKey("Cancel");
   await controller.dispatchKey("ArrowUp");
   version = 3;
   await controller.receiveEvent("account.changed", { platform: "slack", account: "a" });

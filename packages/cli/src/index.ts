@@ -87,6 +87,9 @@ export async function runCli(
       break;
     }
     case "doctor status": result = await handlers.doctor(); break;
+    case "trajectory list": result = await handlers.trajectory("list", payload === undefined ? {} : jsonArgument(payload, "trajectory list")); break;
+    case "trajectory delete": result = await handlers.trajectory("delete", jsonArgument(payload, "trajectory delete")); break;
+    case "trajectory settings": result = await handlers.trajectory("settings", payload === undefined ? {} : jsonArgument(payload, "trajectory settings")); break;
     case "safety propose":
     case "safety approve": throw new Error("safety proposals and approvals are retired; use message send with a stable request_id");
     case "safety list": result = await handlers.listPending(); break;

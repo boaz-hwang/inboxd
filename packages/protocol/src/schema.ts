@@ -22,7 +22,7 @@ export const LEGACY_REQUEST_METHODS = [
   "subscribe",
 ] as const;
 
-export const REQUEST_METHODS = [...LEGACY_REQUEST_METHODS.filter(method => method !== "safety.intent.create" && method !== "safety.intent.claimApprovalCode" && method !== "safety.intent.approve"), "capability.list", "account.list", "account.messages", "account.search", "message.send"] as const;
+export const REQUEST_METHODS = [...LEGACY_REQUEST_METHODS.filter(method => method !== "safety.intent.create" && method !== "safety.intent.claimApprovalCode" && method !== "safety.intent.approve"), "capability.list", "account.list", "account.messages", "account.search", "message.send", "response.open", "response.get", "response.seen", "response.feedback", "response.next", "trajectory.list", "trajectory.delete", "trajectory.settings"] as const;
 
 export const LEGACY_EVENT_METHODS = [
   "message.upserted",
@@ -290,7 +290,7 @@ function requestMethod(value: unknown): ProtocolMethod {
 
 function assertOwnerAccess(method: ProtocolMethod, role?: ClientRole): void {
   if (role === undefined) return;
-  if (["message.send", "safety.intent.listPending", "safety.intent.reject"].includes(method)
+  if ((["message.send", "safety.intent.listPending", "safety.intent.reject"].includes(method) || method.startsWith("response.") || method.startsWith("trajectory."))
     && role !== "sender" && role !== "approver") {
     throw new ProtocolSchemaError(`${method} requires an authenticated sender or approver role`);
   }
@@ -973,7 +973,7 @@ export function parseLocalAttachment(value: unknown): LocalAttachment {
 }
 
 /** A stable request ID identifies one attempted send, including after a lost response. */
-export type MessageSendParams = { readonly request_id: string } & (
+export type MessageSendParams = { readonly request_id: string; readonly response_session_id?: string } & (
   | { readonly envelope: SendEnvelopeV2 }
   | { readonly chat: { readonly platform: string; readonly account: string; readonly chat_id: string }; readonly file: LocalAttachment }
   | { readonly chat: { readonly platform: string; readonly account: string; readonly chat_id: string }; readonly body: string; readonly parent_id?: string }
@@ -983,16 +983,18 @@ export function parseMessageSendParams(value: unknown): MessageSendParams {
   const input = object(value, "message.send params");
   const request_id = boundedUtf8String(input.request_id, "request_id", 80);
   if (utf8Encoder.encode(request_id).byteLength < 16) throw new ProtocolSchemaError("request_id must contain 16 to 80 UTF-8 bytes");
+  const response_session_id = input.response_session_id === undefined ? undefined : boundedUtf8String(input.response_session_id, "response_session_id", 512);
+  const session = response_session_id === undefined ? {} : { response_session_id };
   if (input.envelope !== undefined) {
-    exactKeys(input, ["request_id", "envelope"], "message.send params");
-    return { request_id, envelope: parseSendEnvelopeV2(input.envelope) };
+    exactKeys(input, ["request_id", "envelope", "response_session_id"], "message.send params");
+    return { request_id, ...session, envelope: parseSendEnvelopeV2(input.envelope) };
   }
-  exactKeys(input, input.file !== undefined ? ["request_id", "chat", "file"] : ["request_id", "chat", "body", "parent_id"], "message.send params");
+  exactKeys(input, input.file !== undefined ? ["request_id", "chat", "file", "response_session_id"] : ["request_id", "chat", "body", "parent_id", "response_session_id"], "message.send params");
   const chat = object(input.chat, "chat");
   exactKeys(chat, ["platform", "account", "chat_id"], "chat");
   const ref = parseChatRef({ v: 1, kind: "chat", ...chat });
-  if (input.file !== undefined) return { request_id, chat: { platform: ref.platform, account: ref.account, chat_id: ref.chat_id }, file: parseLocalAttachment(input.file) };
+  if (input.file !== undefined) return { request_id, ...session, chat: { platform: ref.platform, account: ref.account, chat_id: ref.chat_id }, file: parseLocalAttachment(input.file) };
   const body = boundedUtf8String(input.body, "body", PROTOCOL_LIMITS.send_body_bytes);
   const parent_id = input.parent_id === undefined ? undefined : boundedString(input.parent_id, "parent_id", 4096);
-  return { request_id, chat: { platform: ref.platform, account: ref.account, chat_id: ref.chat_id }, body, ...(parent_id === undefined ? {} : { parent_id }) };
+  return { request_id, ...session, chat: { platform: ref.platform, account: ref.account, chat_id: ref.chat_id }, body, ...(parent_id === undefined ? {} : { parent_id }) };
 }

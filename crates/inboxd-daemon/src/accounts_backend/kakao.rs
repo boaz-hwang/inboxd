@@ -34,6 +34,19 @@ fn validate_page(v: &Value, chat: &str) -> Result<(), String> {
     }
     Ok(())
 }
+fn own_read_through(room: &Value) -> Value {
+    let seen = s(room, "last_seen_log_id").parse::<u64>().ok();
+    // n=0 proves all unread messages through this same directory snapshot's ll
+    // are consumed, even if s lags. Never use a later history page as this bound.
+    let end = (room["unread_count"].as_u64() == Some(0))
+        .then(|| s(room, "last_log_id").parse::<u64>().ok())
+        .flatten();
+    seen.into_iter()
+        .chain(end)
+        .max()
+        .map(|id| json!(id.to_string()))
+        .unwrap_or(Value::Null)
+}
 fn fresh(at: Option<Instant>, ttl: Duration) -> bool {
     at.is_some_and(|at| at.elapsed() < ttl)
 }
@@ -153,7 +166,9 @@ impl KakaoBackend {
                 if d["chat_id"] != rooms[i]["chat_id"] {
                     return Err("Kakao chat mismatch".into());
                 }
-                rooms[i]["title"] = d["title"].clone();
+                if !s(d, "title").trim().is_empty() {
+                    rooms[i]["title"] = d["title"].clone();
+                }
                 if s(&rooms[i], "type") == "MemoChat" {
                     if s(d, "type") != "MemoChat" {
                         return Err("Kakao self chat mismatch".into());
@@ -175,7 +190,7 @@ impl KakaoBackend {
                 if old["last_message"] != c["last_message"] {
                     self.invalidate(s(c, "chat_id"));
                 }
-                if !resolve && !old["title"].is_null() {
+                if !resolve && s(c, "title").trim().is_empty() && !old["title"].is_null() {
                     c["title"] = old["title"].clone();
                 }
             }
@@ -256,6 +271,14 @@ impl KakaoBackend {
     ) -> Result<Value, String> {
         validate_page(&value, chat)?;
         let mut messages = array(&value, "messages");
+        messages.retain_mut(|m| {
+            if let Some(body) = inboxd_core::message_body("kakao", s(m, "body")) {
+                m["body"] = json!(body);
+                true
+            } else {
+                false
+            }
+        });
         if let Some(query) = query {
             let q = fold(query);
             messages.retain(|m| fold(s(m, "body")).contains(&q));
@@ -362,7 +385,7 @@ impl KakaoBackend {
                 }
                 let chats:Vec<Value>=rooms.iter().map(|c| {
                     let title=[s(c,"title"),s(c,"display_name"),if s(c,"type")=="MemoChat" { &self.own_name } else { "" },"이름 없음"].into_iter().find(|v|!v.is_empty()).unwrap();
-                    json!({"chat_id":c["chat_id"],"title":title,"latest_ts":c["last_message"]["sent_at"].as_f64().unwrap_or(0.0),"preview":s(&c["last_message"],"message"),"can_send":true,"unread":c["unread_count"]})
+                    json!({"chat_id":c["chat_id"],"title":title,"latest_ts":c["last_message"]["sent_at"].as_f64().unwrap_or(0.0),"preview":inboxd_core::message_body("kakao",s(&c["last_message"],"message")),"can_send":true,"unread":c["unread_count"],"read_through":own_read_through(c)})
                 }).collect();
                 Ok(json!({"chats":chats,"complete":true}))
             }
@@ -392,6 +415,20 @@ impl KakaoBackend {
                 let mut result = result?;
                 result["messages"] = json!([{"id":result["receipt"],"chat_id":chat,"author_id":own["own_id"],"author_name":name,"ts":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64(),"body":req["body"]}]);
                 Ok(result)
+            }
+            "mark_read" => {
+                let message_id = s(req, "message_id");
+                if message_id.parse::<u128>().is_err() {
+                    return Err("Invalid Kakao read cursor".into());
+                }
+                let result = io
+                    .call(json!({"op":"kakao_mark_read","chat_id":chat,"message_id":message_id}))
+                    .await?;
+                if result["state"] != "Marked" || result["message_id"] != message_id {
+                    return Err("Malformed Kakao read acknowledgement".into());
+                }
+                self.directory_at = None;
+                Ok(json!({"state":"Marked","message_id":message_id}))
             }
             "search" => {
                 let query = s(req, "query");
@@ -610,6 +647,29 @@ impl KakaoBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn revision_feeds_are_filtered_before_search_without_changing_pagination() {
+        let mut backend = KakaoBackend::default();
+        let mut io = Fake::default();
+        for feed in [
+            r#"{"logId":123,"targetRevision":1,"hidden":true,"feedType":25}"#,
+            r#"{"logId":123,"byHost":false,"hidden":true,"feedType":14}"#,
+        ] {
+            let page = json!({"messages":[{"id":"124","chat_id":"r","author_id":"7","author_name":"name","ts":1,"body":feed}],"complete":false,"next_cursor":"124"});
+            let result = backend
+                .resolve_page("r", page.clone(), None, &mut io)
+                .await
+                .unwrap();
+            assert_eq!(result["messages"], json!([]));
+            assert_eq!(result["next_cursor"], "124");
+            assert_eq!(result["complete"], false);
+            let result = backend
+                .resolve_page("r", page, Some("logId"), &mut io)
+                .await
+                .unwrap();
+            assert_eq!(result["messages"], json!([]));
+        }
+    }
     #[derive(Default)]
     struct Fake {
         calls: Vec<Value>,
@@ -659,6 +719,69 @@ mod tests {
             self.answer(r)
         }
     }
+    #[test]
+    fn zero_unread_uses_only_the_same_directory_snapshot_end() {
+        assert_eq!(
+            own_read_through(&json!({"last_seen_log_id":"9","last_log_id":"10","unread_count":0})),
+            "10"
+        );
+        assert_eq!(
+            own_read_through(&json!({"last_seen_log_id":"9","last_log_id":"10","unread_count":1})),
+            "9"
+        );
+        assert_eq!(
+            own_read_through(&json!({"last_log_id":"9007199254740993","unread_count":0})),
+            "9007199254740993"
+        );
+        assert!(own_read_through(&json!({"last_log_id":"10"})).is_null());
+        assert!(
+            own_read_through(
+                &json!({"last_seen_log_id":"-1","last_log_id":"invalid","unread_count":0})
+            )
+            .is_null()
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_directory_preserves_own_read_cursor_even_without_new_messages() {
+        struct ReadIo {
+            cursor: &'static str,
+            unread: u64,
+        }
+        impl ProviderIo for ReadIo {
+            async fn call(&mut self, request: Value) -> Result<Value, String> {
+                match s(&request, "op") {
+                    "kakao_metadata" => Ok(json!({"own_id":"me","has_details":false})),
+                    "kakao_rooms" => Ok(
+                        json!({"data":[{"chat_id":"r","type":"MultiChat","title":"room","unread_count":self.unread,"last_seen_log_id":self.cursor,"last_message":{"message":"same preview","sent_at":1}}]}),
+                    ),
+                    _ => Err(
+                        "unexpected operation: read refresh must never mark read or send".into(),
+                    ),
+                }
+            }
+        }
+        let mut backend = KakaoBackend::default();
+        let mut io = ReadIo {
+            cursor: "9007199254740992",
+            unread: 1,
+        };
+        let first = backend
+            .run(&json!({"op":"chats","refresh":true}), &mut io)
+            .await
+            .unwrap();
+        assert_eq!(first["chats"][0]["unread"], 1);
+        io.cursor = "9007199254740993";
+        io.unread = 0;
+        let fresh = backend
+            .run(&json!({"op":"chats","refresh":true}), &mut io)
+            .await
+            .unwrap();
+        assert_eq!(fresh["chats"][0]["read_through"], "9007199254740993");
+        assert_eq!(fresh["chats"][0]["unread"], 0);
+        assert_eq!(first["chats"][0]["preview"], fresh["chats"][0]["preview"]);
+    }
+
     #[tokio::test]
     async fn independent_jobs_share_scoped_search_continuations_and_cycle_history() {
         let mut first = KakaoBackend::default();
@@ -767,6 +890,27 @@ mod tests {
             .unwrap();
         assert_eq!(io.count("kakao_members"), 0);
     }
+    #[tokio::test]
+    async fn fresh_personal_title_survives_cached_shared_title() {
+        struct Renamed;
+        impl ProviderIo for Renamed {
+            async fn call(&mut self, request: Value) -> Result<Value, String> {
+                match s(&request, "op") {
+                    "kakao_metadata" => Ok(json!({"own_id":"7","has_details":false})),
+                    "kakao_rooms" => {
+                        Ok(json!({"data":[{"chat_id":"r","title":"가족","type":"MultiChat"}]}))
+                    }
+                    _ => panic!("unexpected title lookup"),
+                }
+            }
+        }
+        let mut backend = KakaoBackend::default();
+        backend.directory = vec![json!({"chat_id":"r","title":"공유 이름"})];
+        backend.titles_at = Some(Instant::now());
+        let rooms = backend.rooms(true, true, &mut Renamed).await.unwrap();
+        assert_eq!(rooms[0]["title"], "가족");
+    }
+
     #[tokio::test]
     async fn memo_fallback_and_detail_reuse() {
         for details in [false, true] {

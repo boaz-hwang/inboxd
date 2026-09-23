@@ -1,1 +1,2 @@
 packages/tui/rendered/*.txt whitespace=-trailing-space
+patches/*.patch whitespace=-blank-at-eol

@@ -43,6 +43,26 @@ test("send is a single SDK invocation with rejection propagated", async () => {
   expect(sends).toBe(2);
 });
 
+test("mark-read is scoped to the exact chat/cursor and supplies open-chat link id", async () => {
+  const calls: unknown[]=[];
+  const adapter=await createKakaoAccount({userId:"7"} as PersonalCredentials, {
+    async getChat(chatId:string) { return {chat_id:chatId,type:"OM",open_link_id:"777"}; },
+    async markRead(chatId:string,messageId:string,options:unknown) { calls.push([chatId,messageId,options]); return {success:true,watermark:messageId}; },
+    close() {},
+  } as never);
+  expect(await dispatch(adapter,{op:"kakao_mark_read",chat_id:"123",message_id:"456"})).toEqual({state:"Marked",message_id:"456"});
+  expect(calls).toEqual([["123","456",{linkId:"777"}]]);
+});
+
+test("mark-read rejects a provider ACK that fails readback verification", async () => {
+  const adapter=await createKakaoAccount({userId:"7"} as PersonalCredentials, {
+    async getChat(chatId:string) { return {chat_id:chatId,type:"PlusChat",open_link_id:null}; },
+    async markRead(_chatId:string,messageId:string) { return {success:false,status_code:0,watermark:messageId}; },
+    close() {},
+  } as never);
+  await expect(dispatch(adapter,{op:"kakao_mark_read",chat_id:"123",message_id:"456"})).rejects.toThrow("KakaoTalk read receipt rejected");
+});
+
 test("push and reconnect share the existing Kakao session and detach on stop", async () => {
   let push: ((packet: any) => void) | undefined;
   let state: ((event: any) => void) | undefined;
@@ -55,10 +75,11 @@ test("push and reconnect share the existing Kakao session and detach on stop", a
   } as never);
   const stop = await adapter.listen!(event => events.push(event));
   push!({ method: "PING" });
+  push!({ method: "NOTIREAD", body: { userId: "another user", chatId: "r", watermark: "10" } });
   push!({ method: "MSG", body: { private: "never forwarded" } });
   state!({ type: "kicked", reason: "private provider error" });
   state!({ type: "connected" });
-  expect(events).toEqual([{ event: "state", state: "connected" }, { event: "changed" }, { event: "state", state: "disconnected" }, { event: "state", state: "connected" }]);
+  expect(events).toEqual([{ event: "state", state: "connected" }, { event: "changed" }, { event: "changed" }, { event: "state", state: "disconnected" }, { event: "state", state: "connected" }]);
   stop();
   expect(push).toBeUndefined();
   expect(state).toBeUndefined();

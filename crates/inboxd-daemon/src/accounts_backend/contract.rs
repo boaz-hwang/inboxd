@@ -91,6 +91,7 @@ fn valid_request(value: &Value, platform: &str, in_batch: bool) -> bool {
             && matches!(
                 op,
                 "kakao_send"
+                    | "kakao_mark_read"
                     | "telegram_send"
                     | "slack.chat.postMessage"
                     | "slack_send_file"

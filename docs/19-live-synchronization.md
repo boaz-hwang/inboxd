@@ -123,3 +123,30 @@ boundaries and production artifact builds passed. Regression coverage includes
 side-channel delivery while the request channel is idle, burst/backpressure
 coalescing, short reconnect gaps, failed-read backoff, callback cleanup, Kakao
 fresh-login directory refresh, and TUI draft/focus preservation.
+
+## Reads on another Kakao device (2026-09-22)
+
+Kakao read notifications, including `NOTIREAD`, invalidate the directory. Their
+payload is never treated as proof of the owner's read: another participant can
+emit the same kind of receipt. The daemon re-fetches `LCHATLIST`, and the SDK
+preserves its `s` field as a decimal-string `last_seen_log_id`. The Kakao backend
+passes it as `read_through` alongside the unread count. If the same directory
+snapshot reports `n=0`, its `ll` (exposed as `last_log_id`) also bounds the fully
+read range: the effective cursor is the larger of `s` and `ll`. A later history
+page is never used to extend this zero-unread snapshot boundary.
+
+The shared encrypted unread evidence retains that monotonic cursor. Local unseen
+rows and recommendation sources at or below it no longer count as unread. A late
+history page or older directory cannot revive them; messages after the cursor
+remain unread even if they arrived after a zero-count directory snapshot. Decimal
+IDs are compared without floating-point conversion. Response sessions drop already-read source IDs from unread navigation, while
+prepared, unsent recommendations remain available for the same message context
+and model runtime. Reading on either device is not reply completion. Reopening
+a room reuses that recommendation; successful sending retires it. The TUI also
+preserves an already-written draft. No provider mark-read call
+or synthetic local-view feedback is made to mirror another device's read.
+
+Push handling and the existing periodic reconciliation both fetch this evidence.
+This is eventually consistent with provider delivery and refresh completion, not
+an instantaneous synchronization guarantee. The cursor lives in the existing
+SQLCipher evidence JSON, so this change does not require a new schema version.

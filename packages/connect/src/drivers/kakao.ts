@@ -24,7 +24,7 @@ export async function connectKakaoAccount(ui: ConnectionUI, login: () => Promise
     if (!chats.some(c => c.chat_id === selected)) throw new Error("대화방 선택을 취소했습니다.");
     await client.getMessagePage(selected, { count: 1 });
     ui.report("KakaoTalk 계정과 대화 읽기를 확인했습니다.");
-    return { kind: "kakao_personal", binding_id: `kakao-personal-${id}-${selected}`, account: `kakao:self:${id}`, chat_id: selected, credentials: JSON.stringify(credentials) };
+    return { kind: "kakao_personal", binding_id: `kakao-personal-${id}-${selected}`, account: `kakao:self:${id}`, chat_id: selected, credentials: JSON.stringify(client.getCredentials()) };
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "invalid_access_token" && !reauthenticated) {
       client.close();

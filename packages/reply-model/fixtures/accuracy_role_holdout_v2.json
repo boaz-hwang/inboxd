@@ -1,0 +1,75 @@
+{
+  "purpose": "Unseen synthetic holdout for recipient and requested-actor direction; fixed before checker evaluation. Never insert these cases into production prompts.",
+  "cases": [
+    {
+      "id": "instructor_recipient_reversed_invalid",
+      "conversation": [
+        {"message_id": "s1", "author_role": "self", "author_id": "me", "body": "수업에 참여해 주신 분들 모두 감사합니다. 질문은 이 방에 남겨 주세요."},
+        {"message_id": "o1", "author_role": "other", "author_id": "student", "body": "강사님 감사합니다. 설명 덕분에 이해됐어요."}
+      ],
+      "reply_mode": "reply_other",
+      "evidence": [],
+      "draft": "네, 강사님 수고 많으셨습니다.",
+      "expected": {"supported": false, "reasonCode": "role_confusion"},
+      "rationale": "other가 self인 강사에게 감사했는데 초안은 other를 강사라고 부른다."
+    },
+    {
+      "id": "instructor_recipient_correct_valid",
+      "conversation": [
+        {"message_id": "s1", "author_role": "self", "author_id": "me", "body": "수업에 참여해 주신 분들 모두 감사합니다. 질문은 이 방에 남겨 주세요."},
+        {"message_id": "o1", "author_role": "other", "author_id": "student", "body": "강사님 감사합니다. 설명 덕분에 이해됐어요."}
+      ],
+      "reply_mode": "reply_other",
+      "evidence": [],
+      "draft": "네, 감사합니다! 궁금한 점이 있으면 말씀해 주세요.",
+      "expected": {"supported": true, "reasonCode": "grounded"},
+      "rationale": "강사인 self가 감사에 답하고 이미 허용한 질문을 받는다."
+    },
+    {
+      "id": "feedback_request_reversed_invalid_v2",
+      "conversation": [
+        {"message_id": "o2", "author_role": "other", "author_id": "coordinator", "body": "어제 강의 자료를 보시고 추가로 남기실 피드백이 있으면 오늘 중 알려주실 수 있을까요?"}
+      ],
+      "reply_mode": "reply_other",
+      "evidence": [],
+      "draft": "강의 자료에 대한 추가 피드백을 오늘 중 보내 주시면 감사하겠습니다.",
+      "expected": {"supported": false, "reasonCode": "role_confusion"},
+      "rationale": "other가 self의 피드백을 요청했는데 초안은 other에게 피드백을 보내 달라고 요구한다."
+    },
+    {
+      "id": "feedback_request_uncertain_valid_v2",
+      "conversation": [
+        {"message_id": "o2", "author_role": "other", "author_id": "coordinator", "body": "어제 강의 자료를 보시고 추가로 남기실 피드백이 있으면 오늘 중 알려주실 수 있을까요?"}
+      ],
+      "reply_mode": "reply_other",
+      "evidence": [],
+      "draft": "추가로 남길 피드백이 있는지 아직 확인이 필요합니다.",
+      "expected": {"supported": true, "reasonCode": "grounded"},
+      "rationale": "self가 요청받은 주체를 유지하고 피드백 여부를 임의로 확정하지 않는다."
+    },
+    {
+      "id": "group_other_actor_commitment_invalid",
+      "conversation": [
+        {"message_id": "s3", "author_role": "self", "author_id": "me", "body": "안녕하세요, 경찬입니다."},
+        {"message_id": "o3", "author_role": "other", "author_id": "manager", "body": "@민수 내일 오전까지 발표 자료 보내주실 수 있나요? 경찬님은 답변 안 하셔도 됩니다."}
+      ],
+      "reply_mode": "reply_other",
+      "evidence": [],
+      "draft": "네, 발표 자료는 내일 오전까지 보내드리겠습니다.",
+      "expected": {"supported": false, "reasonCode": "role_confusion"},
+      "rationale": "다른 참가자인 민수에게 한 요청을 self가 수행하겠다고 약속한다."
+    },
+    {
+      "id": "group_context_ack_valid",
+      "conversation": [
+        {"message_id": "s3", "author_role": "self", "author_id": "me", "body": "안녕하세요, 경찬입니다."},
+        {"message_id": "o3", "author_role": "other", "author_id": "manager", "body": "@민수 내일 오전까지 발표 자료 보내주실 수 있나요? 경찬님은 답변 안 하셔도 됩니다."}
+      ],
+      "reply_mode": "reply_other",
+      "evidence": [],
+      "draft": "네, 말씀하신 내용 참고하겠습니다.",
+      "expected": {"supported": true, "reasonCode": "grounded"},
+      "rationale": "self가 타인에게 향한 요청을 자기 약속으로 바꾸지 않고 대화 내용을 인지하는 짧은 응답이다."
+    }
+  ]
+}

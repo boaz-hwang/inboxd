@@ -13,12 +13,12 @@ ID: encryption
 Cipher: fixture-version                                                         
 Schema: 2                                                                       
 State: SQLCipher ready=true                                                     
-Back: Esc · PgUp/PgDn scroll · Home top (1–4/4)                                 
-! doctor detail opened                                                          
+Back: Ctrl+C · PgUp/PgDn scroll · Home top (1–4/4)                              
                                                                                 
                                                                                 
                                                                                 
                                                                                 
                                                                                 
                                                                                 
-1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply s-status Esc ? q            
+                                                                                
+1–5 j/k ↑↓ Enter-open / Shift+R c r-reply s-status Ctrl+C ?                     

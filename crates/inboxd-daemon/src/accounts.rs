@@ -29,6 +29,7 @@ struct Slot {
     chats: Vec<Value>,
     loaded: bool,
     failed: bool,
+    error: Option<String>,
     backend: Option<AccountBackend>,
     backend_seed: AccountBackend,
     generation: u64,
@@ -76,12 +77,14 @@ pub(crate) struct AccountService {
     run_worker: Option<WorkerCall>,
     storage: Option<Arc<StorageActor>>,
     events: Option<Arc<crate::server::EventHub>>,
+    replies: Option<Arc<crate::reply::ReplyService>>,
     pub(crate) work: crate::work_status::WorkStatus,
     searches: std::sync::Mutex<search::SearchJobs>,
     observation_sequence: std::sync::atomic::AtomicU64,
     slots: Vec<Entry>,
     pages: std::sync::Mutex<BTreeMap<u64, (std::time::Instant, Value)>>,
     sequence: std::sync::atomic::AtomicU64,
+    pub(crate) read_sync: Mutex<()>,
 }
 impl AccountService {
     pub(crate) fn new(configs: Vec<AccountConfig>) -> Self {
@@ -89,11 +92,13 @@ impl AccountService {
             run_worker: None,
             storage: None,
             events: None,
+            replies: None,
             work: Default::default(),
             searches: Default::default(),
             observation_sequence: std::sync::atomic::AtomicU64::new(0),
             pages: Default::default(),
             sequence: std::sync::atomic::AtomicU64::new(0),
+            read_sync: Mutex::new(()),
             slots: configs
                 .into_iter()
                 .map(|config| Entry {
@@ -112,6 +117,7 @@ impl AccountService {
                         chats: vec![],
                         loaded: false,
                         failed: false,
+                        error: None,
                     })),
                 })
                 .collect(),
@@ -125,8 +131,22 @@ impl AccountService {
         self.events = Some(events);
         self
     }
+    pub(crate) fn with_replies(mut self, replies: Arc<crate::reply::ReplyService>) -> Self {
+        self.replies = Some(replies);
+        self
+    }
     pub(crate) async fn list(&self, params: &Value) -> Result<Value, String> {
         self.list_filtered(params, None).await
+    }
+    pub(crate) async fn accessible_chats(&self) -> Vec<Value> {
+        let mut chats = Vec::new();
+        for entry in &self.slots {
+            let slot = entry.slot.lock().await;
+            for row in &slot.chats {
+                chats.push(crate::reply::storage_chat(json!({"platform":row["platform"],"account":row["account"],"chat_id":row["chat_id"]})));
+            }
+        }
+        chats
     }
     async fn list_filtered(
         &self,
@@ -137,12 +157,16 @@ impl AccountService {
             let (id, offset) = cursor.split_once(':').ok_or("목록을 다시 불러오세요")?;
             let id = id.parse::<u64>().map_err(|_| "잘못된 목록 커서")?;
             let offset = offset.parse::<usize>().map_err(|_| "잘못된 목록 커서")?;
-            let pages = self.pages.lock().unwrap();
-            let (created, snapshot) = pages.get(&id).ok_or("목록을 다시 불러오세요")?;
-            if created.elapsed() > Duration::from_secs(120) {
-                return Err("목록을 다시 불러오세요".into());
-            }
-            return directory_page(snapshot, id, offset);
+            let mut result = {
+                let pages = self.pages.lock().unwrap();
+                let (created, snapshot) = pages.get(&id).ok_or("목록을 다시 불러오세요")?;
+                if created.elapsed() > Duration::from_secs(120) {
+                    return Err("목록을 다시 불러오세요".into());
+                }
+                directory_page(snapshot, id, offset)?
+            };
+            self.enrich_directory(&mut result).await?;
+            return Ok(result);
         }
         let background = params["background"] == true;
         for entry in &self.slots {
@@ -203,12 +227,16 @@ impl AccountService {
                         slot.chats = chats;
                         slot.loaded = true;
                         slot.failed = false;
+                        slot.error = None;
                     }
-                    Err(_) => slot.failed = true,
+                    Err(error) => {
+                        slot.failed = true;
+                        slot.error = Some(error);
+                    }
                 }
                 let errors = if slot.failed {
                     vec![
-                        json!({"platform":slot.config.platform,"account":slot.config.account,"message":"채팅 목록을 가져오지 못했습니다"}),
+                        json!({"platform":slot.config.platform,"account":slot.config.account,"message":slot.error.as_deref().unwrap_or("채팅 목록을 가져오지 못했습니다")}),
                     ]
                 } else {
                     vec![]
@@ -254,7 +282,7 @@ impl AccountService {
         let id = self
             .sequence
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let result = directory_page(&value, id, 0)?;
+        let mut result = directory_page(&value, id, 0)?;
         if !result["next_cursor"].is_null() {
             let mut pages = self.pages.lock().unwrap();
             pages.retain(|_, (t, _)| t.elapsed() < Duration::from_secs(120));
@@ -263,7 +291,49 @@ impl AccountService {
             }
             pages.insert(id, (std::time::Instant::now(), value));
         }
+        self.enrich_directory(&mut result).await?;
         Ok(result)
+    }
+    async fn enrich_directory(&self, result: &mut Value) -> Result<(), String> {
+        let Some(storage) = &self.storage else {
+            return Ok(());
+        };
+        let rows = result["chats"].as_array().cloned().unwrap_or_default();
+        self.record_unread_evidence(&rows).await?;
+        if let Some(chats) = result["chats"].as_array_mut() {
+            for row in chats {
+                let mut scope = crate::reply::storage_chat(
+                    json!({"platform":row["platform"],"account":row["account"],"chat_id":row["chat_id"]}),
+                );
+                row["unread"] = storage
+                    .call_async(StorageOperation::ResponseUnread, scope.clone())
+                    .await
+                    .map_err(|e| e.message)?;
+                scope["runtime_version"] = json!(crate::reply::runtime_version());
+                let prepared = storage
+                    .call_async(StorageOperation::ResponsePrepare, scope)
+                    .await
+                    .map_err(|e| e.message)?;
+                row["suggestion_status"] = prepared["status"].clone();
+                if prepared["status"] == "queued" {
+                    if let Some(replies) = &self.replies {
+                        replies.observe(crate::reply::storage_chat(json!({"platform":row["platform"],"account":row["account"],"chat_id":row["chat_id"]}))).await;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    pub(super) async fn record_unread_evidence(&self, rows: &[Value]) -> Result<(), String> {
+        let Some(storage) = &self.storage else {
+            return Ok(());
+        };
+        let stored=rows.iter().map(|row|{let mut value=crate::reply::storage_chat(json!({"platform":row["platform"],"account":row["account"],"chat_id":row["chat_id"]}));value["unread_count"]=row["unread_count"].clone();value["read_through"]=row["read_through"].clone();value}).collect::<Vec<_>>();
+        storage
+            .call_async(StorageOperation::ResponseEvidence, json!({"chats":stored}))
+            .await
+            .map_err(|e| e.message)?;
+        Ok(())
     }
     pub(crate) async fn query(&self, op: &str, params: &Value) -> Result<Value, String> {
         #[cfg(test)]
@@ -301,6 +371,27 @@ impl AccountService {
         .await;
         work.finish(result.is_ok());
         result
+    }
+    pub(crate) async fn mark_read(&self, task: &Value) -> Result<Value, String> {
+        let platform = task["platform"].as_str().ok_or("메신저 없음")?;
+        let account = task["account"].as_str().ok_or("계정 없음")?;
+        let entry = self
+            .slots
+            .iter()
+            .find(|entry| entry.config.platform == platform && entry.config.account == account)
+            .ok_or("연결된 계정 없음")?;
+        if {
+            let slot = entry.slot.lock().await;
+            !slot.loaded || slot.failed
+        } {
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                self.list_filtered(&json!({"refresh":true}), Some((platform, account))),
+            )
+            .await
+            .map_err(|_| "계정 채팅 목록 조회 시간 초과")??;
+        }
+        self.dispatch_query("mark_read", &json!({"platform":task["platform"],"account":task["account"],"chat_id":task["chat_id"],"message_id":task["cursor"]})).await
     }
     /// Fixed binding workers and account reads use different provider sessions,
     /// but must share the same cache invalidation boundary. Keep the marker alive
@@ -368,7 +459,7 @@ impl AccountService {
             .ok_or("연결된 계정 없음")?;
         let slot = entry.slot.lock().await;
         if !slot.loaded || slot.failed {
-            return Err("채팅 목록을 먼저 불러오세요".into());
+            return Err(slot.error.clone().unwrap_or_else(|| "채팅 목록을 먼저 불러오세요".into()));
         }
         if !slot
             .chats
@@ -400,15 +491,16 @@ impl AccountService {
                     .filter(|s| !s.is_empty())
                     .ok_or("채팅방 없음")?;
             }
-            let _admission = entry.schedule.admit(op == "send")?;
-            let _send_guard = if op == "send" {
+            let mutation = matches!(op, "send" | "mark_read");
+            let _admission = entry.schedule.admit(mutation)?;
+            let _send_guard = if mutation {
                 Some(entry.schedule.sends.lock().await)
             } else {
                 None
             };
             let mut slot = entry.slot.lock().await;
             if !slot.loaded || slot.failed {
-                return Err("채팅 목록을 먼저 불러오세요".into());
+                return Err(slot.error.clone().unwrap_or_else(|| "채팅 목록을 먼저 불러오세요".into()));
             }
             let chat = params["chat_id"].as_str();
             if let Some(id) = chat {
@@ -488,6 +580,27 @@ impl AccountService {
                     outcome = json!({"state":"Uncertain"});
                 }
                 return Ok(outcome);
+            }
+            if op == "mark_read" {
+                params["message_id"]
+                    .as_str()
+                    .filter(|id| !id.is_empty() && id.len() <= 256)
+                    .ok_or("읽음 커서 없음")?;
+                let mut backend = slot.take_backend();
+                drop(slot);
+                let result = call_account(
+                    &entry.config,
+                    &mut backend,
+                    &entry.schedule,
+                    &request,
+                    self.run_worker,
+                )
+                .await;
+                let mut slot = entry.slot.lock().await;
+                if result.is_ok() {
+                    slot.backend = Some(backend);
+                }
+                return result;
             }
             if op == "search"
                 && params["query"]
@@ -583,7 +696,7 @@ fn validate_chats(config: &AccountConfig, result: &Value) -> Result<Vec<Value>, 
             .chars()
             .take(200)
             .collect::<String>();
-        unique.insert(id.to_owned(),json!({"platform":config.platform,"account":config.account,"chat_id":id,"display_name":title,"latest_ts":item["latest_ts"],"preview":preview,"can_send":item["can_send"]==true,"unread_count":item["unread"]}));
+        unique.insert(id.to_owned(),json!({"platform":config.platform,"account":config.account,"chat_id":id,"display_name":title,"latest_ts":item["latest_ts"],"preview":preview,"can_send":item["can_send"]==true,"unread_count":item["unread"],"read_through":if matches!(config.platform.as_str(),"kakao"|"telegram") {item["read_through"].clone()} else {Value::Null}}));
     }
     Ok(unique.into_values().collect())
 }
@@ -669,6 +782,9 @@ impl WorkerProcess {
         }
         let value: Value = serde_json::from_slice(&response).map_err(|_| "워커 응답 오류")?;
         if value["ok"] != true {
+            if matches!(value["error"].as_str(), Some("KakaoTalk 인증이 만료되었습니다. inboxd connect kakao로 다시 연결하세요." | "Slack 인증이 만료되었습니다. inboxd connect slack으로 다시 연결하세요." | "Telegram 세션이 해제되었습니다. inboxd connect telegram으로 다시 연결하세요.")) {
+                return Err(value["error"].as_str().unwrap().into());
+            }
             return Err("메신저 요청 실패".into());
         }
         Ok(value["result"].clone())
@@ -1146,6 +1262,26 @@ mod tests {
         assert_eq!(chats[0]["platform"], "slack");
         assert_eq!(chats[0]["account"], "account");
     }
+    #[test]
+    fn directory_carries_own_read_evidence_from_supported_providers() {
+        let mut config = AccountConfig {
+            platform: "kakao".into(),
+            account: "owner".into(),
+            config: Zeroizing::new("{}".into()),
+        };
+        let result = json!({"chats":[{"chat_id":"r","title":"room","unread":0,"read_through":"9007199254740993"}]});
+        assert_eq!(
+            validate_chats(&config, &result).unwrap()[0]["read_through"],
+            "9007199254740993"
+        );
+        config.platform = "telegram".into();
+        assert_eq!(
+            validate_chats(&config, &result).unwrap()[0]["read_through"],
+            "9007199254740993"
+        );
+        config.platform = "slack".into();
+        assert!(validate_chats(&config, &result).unwrap()[0]["read_through"].is_null());
+    }
     fn failing<'a>(
         _: &'a AccountConfig,
         _: &'a Value,
@@ -1167,6 +1303,8 @@ mod tests {
         let cached = service.list(&json!({})).await.unwrap();
         assert_eq!(cached["chats"].as_array().unwrap().len(), 1);
         assert_eq!(cached["errors"].as_array().unwrap().len(), 1);
+        assert_eq!(cached["errors"][0]["message"], "offline");
+        assert_eq!(service.query("messages", &json!({"platform":"telegram","account":"personal","chat_id":"room"})).await.unwrap_err(), "offline");
         assert!(service.query("send",&json!({"platform":"telegram","account":"personal","chat_id":"room","body":"hello","request_id":"another-request-1234"})).await.is_err());
         service.run_worker = Some(fake);
         assert!(
@@ -1175,5 +1313,6 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        assert!(service.query("messages", &json!({"platform":"telegram","account":"personal","chat_id":"room"})).await.is_ok());
     }
 }

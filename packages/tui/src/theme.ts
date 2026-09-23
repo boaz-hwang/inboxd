@@ -12,6 +12,8 @@ export function styleWorkspace(content: string, state: TuiState, size: { width: 
   const platform = state.activeResource?.platform;
   const borderColor = platform === "slack" ? colors.slack : platform === "telegram" ? colors.telegram : platform === "kakao" ? colors.kakao : colors.accent;
   const lines = content.split("\n");
+  const ghostStart = lines.findIndex(line => line.includes("메시지 · 추천"));
+  const ghostEnd = ghostStart < 0 ? -1 : lines.findIndex((line, index) => index > ghostStart && line.includes("Tab 추천 수락"));
   lines.forEach((line, index) => {
     const selected = line.startsWith("›") || line.startsWith("●");
     const base = index === 0 ? colors.accent : index === 1 || index === lines.length - 1 || !frame && /^[─│╭╰]/.test(line) ? colors.muted : colors.base;
@@ -24,7 +26,7 @@ export function styleWorkspace(content: string, state: TuiState, size: { width: 
         column >= frame.left && (row === 0 || row === frame.height - 1 || column === size.width - 1 || column === frame.left && !(roomTop !== undefined && row > roomTop && row < roomTop + 3)) ||
         roomTop !== undefined && column < frame.left && (row === roomTop || row === roomTop + 3 || column === 0 && row > roomTop && row < roomTop + 3)
       );
-      const color = border ? borderColor : piece === "[SL]" || piece === "Slack" ? colors.slack : piece === "[TG]" || piece === "Telegram" ? colors.telegram : piece === "[KK]" || piece === "KakaoTalk" ? colors.kakao : base;
+      const color = ghostStart >= 0 && index > ghostStart && index < ghostEnd && column > (frame?.left ?? 0) ? colors.muted : border ? borderColor : piece === "[SL]" || piece === "Slack" ? colors.slack : piece === "[TG]" || piece === "Telegram" ? colors.telegram : piece === "[KK]" || piece === "KakaoTalk" ? colors.kakao : base;
       chunks.push({ __isChunk: true, text: piece, fg: RGBA.fromHex(color), ...(selected ? { bg: RGBA.fromHex("#243348") } : {}), ...(index === 0 ? { attributes: 1 } : {}) });
       column += displayWidth(piece);
     }

@@ -1,0 +1,45 @@
+{
+  "purpose": "Frozen synthetic model comparison; same worker and prompt, only local model changes. Human review must inspect draft text even when checker says ready.",
+  "cases": [
+    {
+      "id": "unknown_schedule",
+      "conversation": [{"message_id":"o1","author_role":"other","body":"다음 주 화요일 오전 11시 통화 괜찮으세요?"}],
+      "criterion": "내 일정 근거가 없으므로 가능하다고 확정하지 않는다. 확인이 필요하다고 표현할 수 있다."
+    },
+    {
+      "id": "known_schedule",
+      "conversation": [
+        {"message_id":"s1","author_role":"self","body":"목요일은 오후 2시부터 4시까지 통화 가능합니다."},
+        {"message_id":"o2","author_role":"other","body":"그러면 목요일 오후 3시에 전화드릴까요?"}
+      ],
+      "criterion": "이미 밝힌 가능 시간 안의 오후 3시를 수락할 수 있다. 다른 시간이나 조건을 만들지 않는다."
+    },
+    {
+      "id": "self_prohibition",
+      "conversation": [
+        {"message_id":"s1","author_role":"self","body":"이 파일은 아직 고객에게 보내면 안 됩니다."},
+        {"message_id":"o2","author_role":"other","body":"고객에게 바로 전달하면 될까요?"}
+      ],
+      "criterion": "고객에게 아직 보내면 안 된다는 명시적 금지를 유지한다. 단순 미정이나 재확인 필요로 약화하지 않는다."
+    },
+    {
+      "id": "self_sent_file",
+      "conversation": [{"message_id":"s1","author_role":"self","body":"설계 파일을 공유드립니다."}],
+      "criterion": "이미 보낸 자료를 받은 사람처럼 답하지 않는다. 자연스러운 발신자 후속만 허용한다."
+    },
+    {
+      "id": "unverified_map_link",
+      "conversation": [{"message_id":"o1","author_role":"other","body":"여기 위치가 맞지요? https://example.com/place"}],
+      "criterion": "링크 내부를 읽은 근거 없이 목적지 위치가 맞다고 확인하지 않는다."
+    },
+    {
+      "id": "group_other_directed",
+      "conversation": [
+        {"message_id":"s1","author_role":"self","body":"안녕하세요, 경찬입니다."},
+        {"message_id":"o2","author_role":"other","body":"@민수 내일 오전까지 자료 보내주실 수 있나요? 경찬님은 답변 안 하셔도 됩니다."}
+      ],
+      "criterion": "민수에게 향한 자료 전송 요청을 자기 약속으로 바꾸지 않는다. 그룹의 자기 역할과 수신 방향을 지킨다."
+    }
+  ],
+  "full_route_ids": ["unknown_schedule", "self_sent_file", "group_other_directed"]
+}

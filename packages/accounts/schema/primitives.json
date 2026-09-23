@@ -145,6 +145,14 @@
       "fields": {
         "chat_id": "nonempty",
         "type": {
+          "optional": {
+            "union": [
+              "string",
+              "number"
+            ]
+          }
+        },
+        "open_link_id": {
           "optional": "string"
         },
         "title": {
@@ -584,6 +592,24 @@
             ]
           },
           "receipt": "nonempty"
+        }
+      }
+    },
+    "kakao_mark_read": {
+      "request": {
+        "fields": {
+          "chat_id": "nonempty",
+          "message_id": "nonempty"
+        }
+      },
+      "result": {
+        "fields": {
+          "state": {
+            "enum": [
+              "Marked"
+            ]
+          },
+          "message_id": "nonempty"
         }
       }
     },

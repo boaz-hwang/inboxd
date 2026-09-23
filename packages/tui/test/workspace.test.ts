@@ -87,24 +87,31 @@ test("editor preserves graphemes, inserts at cursor and never interprets pasted 
   await controller.dispatchPaste("q4ac");
   expect(controller.state.draft).toBe("가\nq4ac나");
   expect(calls.some(c => c.method === "message.send")).toBe(false);
-  await controller.dispatchKey("Escape");
+  await controller.dispatchKey("Cancel");
   expect(controller.state.draft).toBe("");
   controller.stop();
 });
 
-test("platform filter never changes the destination of an active draft", async () => {
+test("platform shortcut stays in the draft while room selection preserves its destination", async () => {
   const { controller } = mockController();
   await controller.start();
   await controller.selectConversation(1);
   await controller.dispatchKey("Enter");
   await controller.dispatchKey("]");
   await controller.selectConversation(2);
+  expect(controller.state.activeResource).toEqual(resources[2]);
+  expect(controller.state.draft).toBe("");
+  await controller.selectConversation(1);
   expect(controller.state.activeResource).toEqual(resources[1]);
   expect(controller.state.draft).toBe("]");
   expect(controller.state.platform).toBeUndefined();
   controller.disconnected();
   expect(controller.state.draft).toBe("");
   expect(renderScreen(controller.state, { width: 80, height: 24 })).toContain("연결 끊김");
+  await controller.start();
+  await controller.selectConversation(2);
+  await controller.selectConversation(1);
+  expect(controller.state.draft).toBe("");
   controller.stop();
 });
 
@@ -132,10 +139,27 @@ test.each([{ width: 80, height: 24 }, { width: 120, height: 40 }])("native rende
     await harness.flush();
     expect(controller.state.draft).toBe("한글 답장");
     const frame = renderScreen(controller.state, size);
-    expect(frame).toContain("한글 답장▏");
+    expect(frame).toContain("한글 답장\u2060");
     expect(frame).toContain("Enter 보내기");
     for (const line of frame.split("\n")) expect(displayWidth(line)).toBe(size.width);
     harness.mockInput.pressKey("ESC");
+  } finally { mounted.destroy(); controller.stop(); harness.renderer.destroy(); }
+});
+
+test("native Tab is inert while Shift+Tab reaches pane traversal", async () => {
+  const { createTestRenderer } = await import("@opentui/core/testing");
+  const harness = await createTestRenderer({ width: 80, height: 24 });
+  const { controller } = mockController();
+  const mounted = await mountInteractiveTui(harness.renderer, controller);
+  try {
+    await controller.start();
+    expect(controller.state.pane).toBe("rooms");
+    harness.mockInput.pressTab();
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(controller.state.pane).toBe("rooms");
+    harness.mockInput.pressTab({ shift: true });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(controller.state.pane).toBe("filters");
   } finally { mounted.destroy(); controller.stop(); harness.renderer.destroy(); }
 });
 
@@ -147,7 +171,7 @@ test("conversation search is local, matches Korean names and provider names, and
   await controller.dispatchPaste("가족");
   expect(conversationRows(controller.state)).toHaveLength(1);
   expect(calls).toHaveLength(before);
-  expect(renderScreen(controller.state, { width: 80, height: 24 })).toContain("대화 찾기  가족▏");
+  expect(renderScreen(controller.state, { width: 80, height: 24 })).toContain("대화 찾기  가족\u2060");
   await controller.dispatchKey("Enter");
   expect(controller.state.activeResource).toEqual(resources[1]);
   expect(controller.state.finderActive).toBe(false);
@@ -157,7 +181,7 @@ test("conversation search is local, matches Korean names and provider names, and
   await controller.dispatchKey("Enter");
   expect(controller.state.finderActive).toBe(true);
   expect(renderScreen(controller.state, { width: 80, height: 24 })).toContain("검색 결과 없음");
-  await controller.dispatchKey("Escape");
+  await controller.dispatchKey("Cancel");
   expect(controller.state.finderQuery).toBe("");
   controller.stop();
 });
@@ -221,4 +245,14 @@ test("connection loading is not described as a login failure", () => {
   const state = { ...fixture(), screen: "chat" as const, activeResource: resources[1], capabilities: { status: "loading" as const, data: [] } };
   expect(renderScreen(state, { width: 80, height: 24 })).toContain("연결 상태 확인 중");
   expect(renderScreen(state, { width: 80, height: 24 })).not.toContain("계정 연결 확인 필요");
+});
+
+test("failed refresh keeps cached messages visible with a reconnection notice", () => {
+  let state = { ...fixture(), screen: "chat" as const, pane: "messages" as const, activeResource: resources[0] };
+  state = reduce(state, { type: "querySucceeded", generation: 1, screen: "chat", data: [messages[0]!] }) as typeof state;
+  state = reduce(state, { type: "queryFailed", generation: 1, screen: "chat", error: "인증 만료 · 다시 연결하세요" }) as typeof state;
+  const frame = renderScreen(state, { width: 120, height: 40 });
+  expect(frame).toContain("인증 만료");
+  expect(frame).toContain("저장된 메시지");
+  expect(frame).toContain(messages[0]!.body!);
 });

@@ -145,7 +145,7 @@ test.each(["message.send", "sync.backfill"])("automatic retries never replay dis
     } else if (method === "sync.backfill") {
       await controller.dispatchKey("3");
     }
-    const dispatching = controller.dispatchKey(method === "sync.backfill" ? "b" : "Enter");
+    const dispatching = controller.dispatchKey(method === "sync.backfill" ? "R" : "Enter");
     expect(first.methods.filter(call => call === method)).toHaveLength(1);
     first.close(); await settle(); await dispatching;
     clock.fire(); await settle();

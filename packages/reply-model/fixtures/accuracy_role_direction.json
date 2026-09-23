@@ -1,0 +1,74 @@
+{
+  "purpose": "Holdout for participant-role and requested-actor direction. Expected verdicts were fixed before checker evaluation.",
+  "cases": [
+    {
+      "id": "recipient_request_reversed_invalid",
+      "conversation": [
+        {"message_id": "o1", "author_role": "other", "body": "안녕하세요. 혹시 어제 수업 내용이나 피드백 중 추가로 공유해 주실 내용은 없으실까요?"},
+        {"message_id": "o2", "author_role": "other", "body": "오늘 일찍 업무를 마칠 것 같아서 있다면 미리 공유해 두려고 합니다."}
+      ],
+      "evidence": [],
+      "reply_mode": "reply_other",
+      "draft": "네, 알겠습니다. 어제 수업 내용이나 추가 피드백이 있다면 미리 공유해 주시면 감사하겠습니다.",
+      "expected": {"supported": false, "reasonCode": "role_confusion"},
+      "rationale": "other는 self에게 자료 제공을 요청했는데 초안은 반대로 other에게 자료를 보내 달라고 요청한다."
+    },
+    {
+      "id": "recipient_request_uncertainty_valid",
+      "conversation": [
+        {"message_id": "o1", "author_role": "other", "body": "혹시 어제 수업 내용이나 피드백 중 추가로 공유해 주실 내용은 없으실까요?"}
+      ],
+      "evidence": [],
+      "reply_mode": "reply_other",
+      "draft": "추가로 공유드릴 내용이 있는지는 확인이 필요합니다.",
+      "expected": {"supported": true, "reasonCode": "grounded"},
+      "rationale": "요청받은 주체가 self라는 방향을 유지하며, 미확인 상태를 사실대로 표현한다."
+    },
+    {
+      "id": "document_sender_reversed_invalid",
+      "conversation": [
+        {"message_id": "o3", "author_role": "other", "body": "오늘 중으로 계약서 초안을 보내주실 수 있을까요?"}
+      ],
+      "evidence": [],
+      "reply_mode": "reply_other",
+      "draft": "계약서 초안을 보내주시면 검토하겠습니다.",
+      "expected": {"supported": false, "reasonCode": "role_confusion"},
+      "rationale": "other가 self에게 계약서를 보내 달라고 했는데 초안은 other가 보내는 것으로 역할을 뒤집는다."
+    },
+    {
+      "id": "sender_followup_question_valid",
+      "conversation": [
+        {"message_id": "s1", "author_role": "self", "body": "수업 자료와 피드백 정리본을 공유드렸습니다."}
+      ],
+      "evidence": [],
+      "reply_mode": "continue_self",
+      "draft": "추가로 궁금하신 부분이 있으실까요?",
+      "expected": {"supported": true, "reasonCode": "grounded"},
+      "rationale": "자료를 보낸 self가 같은 입장에서 상대에게 후속 질문을 한다."
+    },
+    {
+      "id": "known_contact_answer_valid",
+      "conversation": [
+        {"message_id": "s2", "author_role": "self", "body": "자료는 class@example.com으로 받고 있습니다."},
+        {"message_id": "o4", "author_role": "other", "body": "자료 받을 이메일 주소가 어디인가요?"}
+      ],
+      "evidence": [],
+      "reply_mode": "reply_other",
+      "draft": "class@example.com으로 보내주세요.",
+      "expected": {"supported": true, "reasonCode": "grounded"},
+      "rationale": "self가 앞서 명시한 연락처를 사용해 other의 질문에 self 관점으로 답한다."
+    },
+    {
+      "id": "known_format_answer_valid",
+      "conversation": [
+        {"message_id": "s3", "author_role": "self", "body": "최종본은 PDF 형식으로 부탁드립니다."},
+        {"message_id": "o5", "author_role": "other", "body": "최종 자료는 어떤 형식으로 드릴까요?"}
+      ],
+      "evidence": [],
+      "reply_mode": "reply_other",
+      "draft": "PDF 형식으로 부탁드립니다.",
+      "expected": {"supported": true, "reasonCode": "grounded"},
+      "rationale": "self의 기존 선호를 그대로 답하며 요청 방향을 바꾸지 않는다."
+    }
+  ]
+}

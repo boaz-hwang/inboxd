@@ -6,6 +6,7 @@ import { createTelegramAccount } from "../../../platforms/telegram/src/account.t
 import { createKakaoAccount } from "../../../contrib/kakao/src/account.ts";
 import type { AccountAdapter } from "./contracts.ts";
 import { liveEmitter } from "./live.ts";
+import { accountErrorMessage } from "./errors.ts";
 
 if (!process.env.INBOXD_ACCOUNT_CONFIG) {
   process.stderr.write("Account worker: configuration required\n");
@@ -41,11 +42,11 @@ async function execute(text: string): Promise<string> {
     const output = JSON.stringify({ ok: true, result });
     if (Buffer.byteLength(output) > 12_000_000) throw new Error("response limit");
     return output;
-  } catch {
+  } catch (error) {
     unlisten?.(); unlisten = undefined;
     if (live) events.emit({ event: "state", state: "disconnected" });
     await adapter?.close(); adapter = undefined;
-    return JSON.stringify({ ok: false, error: "메신저 요청 실패. 연결 상태나 요청 제한을 확인하세요." });
+    return JSON.stringify({ ok: false, error: accountErrorMessage(error) });
   }
 }
 try {

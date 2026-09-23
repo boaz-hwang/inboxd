@@ -9,6 +9,8 @@ DETAIL (in place)
 Evidence rail: partial · 3 chats / 1 gaps / 1 limits · connected                
 Detail — Inbox                                                                  
 Context: 1 of 1 · partial · 3 chats / 1 gaps / 1 limits                         
+한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 
+é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é messag
 e 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글  
 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é mes
 sage 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한 
@@ -18,7 +20,5 @@ message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 �
 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é messag
 e 한글 👩‍💻 é message                                                             
 END-OF-MESSAGE                                                                  
-Back: Esc · PgUp/PgDn scroll · Home top (41–49/49)                              
-! inbox detail opened                                                           
-                                                                                
-1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply s-status Esc ? q            
+Back: Ctrl+C · PgUp/PgDn scroll · Home top (39–49/49)                           
+1–5 j/k ↑↓ Enter-open / Shift+R c r-reply s-status Ctrl+C ?                     

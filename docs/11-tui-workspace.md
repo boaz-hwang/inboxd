@@ -5,7 +5,7 @@ the main pane shows recent messages across providers or the selected conversatio
 A provider mark (`SL`, `TG`, `KK`) and color distinguish services without repeating
 account IDs. Conversation and sender names come from the messenger's account
 adapter. All directory pages are loaded and rooms are sorted by latest message
-time. A missing unread count is not shown as zero. Coverage details remain in `d`.
+time. A missing unread count is not shown as zero.
 
 ## Interaction
 
@@ -16,10 +16,21 @@ time. A missing unread count is not shown as zero. Coverage details remain in `d
   section is focused; `[`, `]` also cycle filters. `1` restores all messengers.
 - Enter opens the highlighted room, then starts composing. Enter while composing
   sends directly for personal accounts. Agent proposals retain separate approvals.
-- Shift+Enter inserts a newline; bracketed paste never submits. Left/right,
-  Home/End, Delete and Backspace edit on grapheme boundaries.
-- Escape cancels input. `b` refreshes the account directory and selected chat;
-  `n` continues pages; `d` opens details; `5` manages connections; `?` shows help.
+- Shift+Enter inserts a newline (Kitty keyboard protocol); Alt+Enter and Ctrl+J
+  are alternatives for terminals that cannot distinguish Shift+Enter. Bracketed
+  paste never submits. Option/Alt+left/right (or Alt+B/F) moves by word;
+  Option/Alt+Backspace and Ctrl+W delete the previous word. Ctrl+A/E and Home/End
+  move to the line boundaries; Ctrl+U/K deletes to those boundaries. Ctrl+B/F,
+  Ctrl+P/N, Delete and Backspace edit on grapheme boundaries. Inside the composer,
+  Ctrl+K/F are editing keys. A blue native blinking block cursor follows input.
+- Mouse wheel, Page Up/Down and Shift+Up/Down scroll the conversation by visible
+  lines. Scrolling to the top loads older history, retaining the reading position.
+  There is no next-page key; successful sends return to the latest messages.
+- Ctrl+C exits immediately when filters or the room list has focus. In the
+  chat pane it cancels input; a consecutive Ctrl+C exits. Any other input resets
+  the exit sequence. Escape and `q` no longer cancel/quit. Shift+R refreshes the
+  account directory and selected chat. The `b` refresh and `d` detail shortcuts
+  are removed; `5` manages connections; `?` shows help.
 - At 80 columns, open chats use the full width; Tab can return to the sidebar.
   At 100+ columns, the sidebar and conversation remain visible together.
 
@@ -51,5 +62,5 @@ Interaction references, not copied implementations:
   content with a bottom composer and contextual input/confirmation states.
 
 Remote retention and API limits apply. Account-wide push updates are not yet
-subscribed; `b` refreshes the current directory. See
+subscribed; Shift+R refreshes the current directory. See
 [account adapter architecture](12-account-workspace.md) for paging and send semantics.

@@ -9,7 +9,8 @@ LIST 40%                                        │DETAIL 60%
 Evidence rail: partial · 3 chats / 1 gaps / 1 l…│Context rail: INBOX · focus 1/1                                        
 Status rail: connected · generation 1/1         │Detail — Inbox                                                         
 Inbox                                           │Context: 1 of 1 · partial · 3 chats / 1 gaps / 1 limits                
-> ● 민수 한글 👩‍💻 é message 한글 👩‍💻 é message 한…│sage 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é me
+> ● 민수 한글 👩‍💻 é message 한글 👩‍💻 é message 한…│age 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é mes
+                                                │sage 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é me
                                                 │ssage 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é m
                                                 │essage 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é 
                                                 │message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é
@@ -35,6 +36,5 @@ Inbox                                           │Context: 1 of 1 · partial ·
                                                 │ 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한 
                                                 │글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message 한글 👩‍💻 é message  
                                                 │END-OF-MESSAGE                                                         
-                                                │Back: Esc · PgUp/PgDn scroll · Home top (29–54/54)                     
-! inbox detail opened                                                                                                   
-1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply s-status Esc ? q                                                    
+                                                │Back: Ctrl+C · PgUp/PgDn scroll · Home top (28–54/54)                  
+1–5 j/k ↑↓ Enter-open / Shift+R c r-reply s-status Ctrl+C ?                                                             

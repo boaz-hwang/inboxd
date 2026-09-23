@@ -14,8 +14,7 @@ Coverage: partial · 3 chats / 1 gaps / 1 limits │ID: m-search
 Results                                         │Author: 민수                                                           
 > ● slack › work › chat:ops 민수 09:41 검색 결… │Time: 09:41                                                            
                                                 │Message: 검색 결과와 증거 범위                                         
-                                                │Back: Esc · PgUp/PgDn scroll · Home top (1–5/5)                        
-! search detail opened                                                                                                  
+                                                │Back: Ctrl+C · PgUp/PgDn scroll · Home top (1–5/5)                     
                                                                                                                         
                                                                                                                         
                                                                                                                         
@@ -37,4 +36,5 @@ Results                                         │Author: 민수
                                                                                                                         
                                                                                                                         
                                                                                                                         
-1–5 j/k ↑↓ Enter-open d-detail / n-more b c r-reply s-status Esc ? q                                                    
+                                                                                                                        
+1–5 j/k ↑↓ Enter-open / Shift+R c r-reply s-status Ctrl+C ?                                                             

@@ -3,9 +3,27 @@ use serde_json::{Map, Value, json};
 use crate::domain;
 use crate::{CoreError, CoreResult, Host, SqlHost};
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 6;
 
 pub const OWNER_SEND_SCHEMA: &str = "CREATE TABLE owner_sends (request_id TEXT NOT NULL PRIMARY KEY, platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, body TEXT NOT NULL, envelope_json TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN ('Pending', 'Sent', 'Verified', 'Failed', 'Uncertain')), outcome_json TEXT NOT NULL) WITHOUT ROWID";
+
+pub const RESPONSE_SCHEMA: &str = r#"
+CREATE TABLE response_seen (platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, msg_id TEXT NOT NULL, seen_at REAL NOT NULL, PRIMARY KEY(platform,account,chat_id,msg_id)) WITHOUT ROWID;
+CREATE TABLE provider_read_sync (platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, operation_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0), cursor TEXT NOT NULL, confirmed_cursor TEXT, rollback_ids_json TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','synced','failed')), attempts INTEGER NOT NULL DEFAULT 0, updated_at REAL NOT NULL, PRIMARY KEY(platform,account,chat_id)) WITHOUT ROWID;
+CREATE TABLE response_unseen (platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, msg_id TEXT NOT NULL, observed_at REAL NOT NULL, PRIMARY KEY(platform,account,chat_id,msg_id)) WITHOUT ROWID;
+CREATE TABLE response_baselines (platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, observed_at REAL NOT NULL, PRIMARY KEY(platform,account,chat_id)) WITHOUT ROWID;
+CREATE TABLE reply_suggestions (suggestion_id TEXT NOT NULL PRIMARY KEY, platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, context_version TEXT NOT NULL, source_json TEXT NOT NULL, context_json TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('queued','generating','ready','abstained','failed','stale')), text TEXT, model_version TEXT, prompt_version TEXT NOT NULL, error TEXT, generation_epoch INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, generated_at REAL) WITHOUT ROWID;
+CREATE UNIQUE INDEX reply_suggestions_context ON reply_suggestions(platform,account,chat_id,context_version,prompt_version);
+CREATE TABLE response_sessions (session_id TEXT NOT NULL PRIMARY KEY, platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, incoming_version TEXT NOT NULL, source_json TEXT NOT NULL, suggestion_id TEXT, state TEXT NOT NULL CHECK(state IN ('open','sent','failed','uncertain','closed')), created_at REAL NOT NULL, closed_at REAL, send_request_id TEXT, send_outcome_json TEXT) WITHOUT ROWID;
+CREATE TABLE response_trajectory (event_id TEXT NOT NULL PRIMARY KEY, session_id TEXT, suggestion_id TEXT, event TEXT NOT NULL, payload_json TEXT NOT NULL, created_at REAL NOT NULL) WITHOUT ROWID;
+CREATE TABLE trajectory_runs (suggestion_id TEXT NOT NULL PRIMARY KEY, platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, context_version TEXT NOT NULL, trigger TEXT NOT NULL, input_snapshot_json TEXT NOT NULL, route_plan_json TEXT, output_status TEXT NOT NULL, suggested_text TEXT, versions_json TEXT NOT NULL, personal_adapter_version TEXT, cost_json TEXT, created_at REAL NOT NULL, completed_at REAL NOT NULL) WITHOUT ROWID;
+CREATE TABLE trajectory_steps (step_id TEXT NOT NULL PRIMARY KEY, suggestion_id TEXT NOT NULL, parent_step_id TEXT, node_type TEXT NOT NULL, input_refs_json TEXT NOT NULL, decision_json TEXT, action_json TEXT, observation_json TEXT, outcome_json TEXT, state_json TEXT, model_input_json TEXT, status TEXT NOT NULL, duration_ms REAL, versions_json TEXT NOT NULL, ordinal INTEGER NOT NULL) WITHOUT ROWID;
+CREATE INDEX trajectory_steps_run ON trajectory_steps(suggestion_id,ordinal);
+CREATE TABLE trajectory_evidence (suggestion_id TEXT NOT NULL, evidence_id TEXT NOT NULL, source_id TEXT NOT NULL, source_key TEXT, source_version TEXT, excerpt TEXT, ts REAL, observed_at REAL, PRIMARY KEY(suggestion_id,evidence_id)) WITHOUT ROWID;
+CREATE INDEX trajectory_evidence_source ON trajectory_evidence(source_id,source_key,source_version);
+CREATE TABLE response_settings (id INTEGER NOT NULL PRIMARY KEY CHECK(id=1), recording INTEGER NOT NULL CHECK(recording IN (0,1)), retention_days INTEGER NOT NULL CHECK(retention_days BETWEEN 1 AND 3650), updated_at REAL NOT NULL);
+INSERT OR IGNORE INTO response_settings(id,recording,retention_days,updated_at) VALUES(1,1,90,0);
+"#;
 
 pub const INITIAL_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS chats (
@@ -217,6 +235,79 @@ const CANONICAL_SCHEMA_AUTO_INDEXES: &[(&str, &str)] = &[
     ("sqlite_autoindex_sync_limits_1", "sync_limits"),
 ];
 
+const RESPONSE_SCHEMA_DEFINITIONS: &[(&str, &str, &str)] = &[
+    (
+        "table",
+        "response_seen",
+        "CREATE TABLE response_seen (platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, msg_id TEXT NOT NULL, seen_at REAL NOT NULL, PRIMARY KEY(platform,account,chat_id,msg_id)) WITHOUT ROWID",
+    ),
+    (
+        "table",
+        "provider_read_sync",
+        "CREATE TABLE provider_read_sync (platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, operation_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0), cursor TEXT NOT NULL, confirmed_cursor TEXT, rollback_ids_json TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','synced','failed')), attempts INTEGER NOT NULL DEFAULT 0, updated_at REAL NOT NULL, PRIMARY KEY(platform,account,chat_id)) WITHOUT ROWID",
+    ),
+    (
+        "table",
+        "response_unseen",
+        "CREATE TABLE response_unseen (platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, msg_id TEXT NOT NULL, observed_at REAL NOT NULL, PRIMARY KEY(platform,account,chat_id,msg_id)) WITHOUT ROWID",
+    ),
+    (
+        "table",
+        "response_baselines",
+        "CREATE TABLE response_baselines (platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, observed_at REAL NOT NULL, PRIMARY KEY(platform,account,chat_id)) WITHOUT ROWID",
+    ),
+    (
+        "table",
+        "reply_suggestions",
+        "CREATE TABLE reply_suggestions (suggestion_id TEXT NOT NULL PRIMARY KEY, platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, context_version TEXT NOT NULL, source_json TEXT NOT NULL, context_json TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('queued','generating','ready','abstained','failed','stale')), text TEXT, model_version TEXT, prompt_version TEXT NOT NULL, error TEXT, generation_epoch INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, generated_at REAL) WITHOUT ROWID",
+    ),
+    (
+        "index",
+        "reply_suggestions_context",
+        "CREATE UNIQUE INDEX reply_suggestions_context ON reply_suggestions(platform,account,chat_id,context_version,prompt_version)",
+    ),
+    (
+        "table",
+        "response_sessions",
+        "CREATE TABLE response_sessions (session_id TEXT NOT NULL PRIMARY KEY, platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, incoming_version TEXT NOT NULL, source_json TEXT NOT NULL, suggestion_id TEXT, state TEXT NOT NULL CHECK(state IN ('open','sent','failed','uncertain','closed')), created_at REAL NOT NULL, closed_at REAL, send_request_id TEXT, send_outcome_json TEXT) WITHOUT ROWID",
+    ),
+    (
+        "table",
+        "response_trajectory",
+        "CREATE TABLE response_trajectory (event_id TEXT NOT NULL PRIMARY KEY, session_id TEXT, suggestion_id TEXT, event TEXT NOT NULL, payload_json TEXT NOT NULL, created_at REAL NOT NULL) WITHOUT ROWID",
+    ),
+    (
+        "table",
+        "trajectory_runs",
+        "CREATE TABLE trajectory_runs (suggestion_id TEXT NOT NULL PRIMARY KEY, platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, context_version TEXT NOT NULL, trigger TEXT NOT NULL, input_snapshot_json TEXT NOT NULL, route_plan_json TEXT, output_status TEXT NOT NULL, suggested_text TEXT, versions_json TEXT NOT NULL, personal_adapter_version TEXT, cost_json TEXT, created_at REAL NOT NULL, completed_at REAL NOT NULL) WITHOUT ROWID",
+    ),
+    (
+        "table",
+        "trajectory_steps",
+        "CREATE TABLE trajectory_steps (step_id TEXT NOT NULL PRIMARY KEY, suggestion_id TEXT NOT NULL, parent_step_id TEXT, node_type TEXT NOT NULL, input_refs_json TEXT NOT NULL, decision_json TEXT, action_json TEXT, observation_json TEXT, outcome_json TEXT, state_json TEXT, model_input_json TEXT, status TEXT NOT NULL, duration_ms REAL, versions_json TEXT NOT NULL, ordinal INTEGER NOT NULL) WITHOUT ROWID",
+    ),
+    (
+        "index",
+        "trajectory_steps_run",
+        "CREATE INDEX trajectory_steps_run ON trajectory_steps(suggestion_id,ordinal)",
+    ),
+    (
+        "table",
+        "trajectory_evidence",
+        "CREATE TABLE trajectory_evidence (suggestion_id TEXT NOT NULL, evidence_id TEXT NOT NULL, source_id TEXT NOT NULL, source_key TEXT, source_version TEXT, excerpt TEXT, ts REAL, observed_at REAL, PRIMARY KEY(suggestion_id,evidence_id)) WITHOUT ROWID",
+    ),
+    (
+        "index",
+        "trajectory_evidence_source",
+        "CREATE INDEX trajectory_evidence_source ON trajectory_evidence(source_id,source_key,source_version)",
+    ),
+    (
+        "table",
+        "response_settings",
+        "CREATE TABLE response_settings (id INTEGER NOT NULL PRIMARY KEY CHECK(id=1), recording INTEGER NOT NULL CHECK(recording IN (0,1)), retention_days INTEGER NOT NULL CHECK(retention_days BETWEEN 1 AND 3650), updated_at REAL NOT NULL)",
+    ),
+];
+
 fn object<'a>(value: &'a Value, label: &str) -> CoreResult<&'a Map<String, Value>> {
     value
         .as_object()
@@ -374,10 +465,30 @@ fn event_key(event: &Map<String, Value>) -> Value {
 }
 
 fn apply_event(sql: &SqlHost<'_>, host: &dyn Host, event: &Value) -> CoreResult<()> {
-    let event = domain::normalize_message_event(event)?;
-    let event = object(&event, "message event")?;
+    let mut normalized = domain::normalize_message_event(event)?;
+    let event = object(&normalized, "message event")?;
     let kind = field(event, "kind").as_str().unwrap();
     let key = event_key(event);
+    if kind == "create" || kind == "edit" {
+        let body = if kind == "create" {
+            &event["message"]["body"]
+        } else {
+            &event["body"]
+        };
+        let Some(body) = crate::message_body(
+            key["platform"].as_str().unwrap_or(""),
+            body.as_str().unwrap_or(""),
+        ) else {
+            return Ok(());
+        };
+        if kind == "create" {
+            normalized["message"]["body"] = json!(body);
+        } else {
+            normalized["body"] = json!(body);
+        }
+    }
+    let event = object(&normalized, "message event")?;
+    let kind = field(event, "kind").as_str().unwrap();
     ensure_chat(sql, &key)?;
     let existing = existing_message(sql, &key)?;
     if existing
@@ -623,11 +734,16 @@ fn schema_is_valid_version(sql: &SqlHost<'_>, version: i64) -> CoreResult<bool> 
     if objects.len()
         != CANONICAL_SCHEMA_DEFINITIONS.len()
             + CANONICAL_SCHEMA_AUTO_INDEXES.len()
-            + usize::from(version == 4)
+            + usize::from(version >= 4)
+            + if version >= 5 {
+                RESPONSE_SCHEMA_DEFINITIONS.len() - usize::from(version == 5)
+            } else {
+                0
+            }
     {
         return Ok(false);
     }
-    if version == 4 {
+    if version >= 4 {
         let Some(owner) = objects.iter().find(|row| {
             row["name"] == "owner_sends"
                 && row["type"] == "table"
@@ -639,6 +755,34 @@ fn schema_is_valid_version(sql: &SqlHost<'_>, version: i64) -> CoreResult<bool> 
             != Some(normalized_schema_sql(OWNER_SEND_SCHEMA))
         {
             return Ok(false);
+        }
+    }
+    if version >= 5 {
+        for (kind, name, expected) in RESPONSE_SCHEMA_DEFINITIONS {
+            if version == 5 && *name == "provider_read_sync" {
+                continue;
+            }
+            let expected_table = match *name {
+                "reply_suggestions_context" => "reply_suggestions",
+                "trajectory_steps_run" => "trajectory_steps",
+                "trajectory_evidence_source" => "trajectory_evidence",
+                _ => *name,
+            };
+            let Some(actual) = objects.iter().find(|row| {
+                row.get("type").and_then(Value::as_str) == Some(*kind)
+                    && row.get("name").and_then(Value::as_str) == Some(*name)
+                    && row.get("tbl_name").and_then(Value::as_str) == Some(expected_table)
+            }) else {
+                return Ok(false);
+            };
+            if actual
+                .get("sql")
+                .and_then(Value::as_str)
+                .map(normalized_schema_sql)
+                != Some(normalized_schema_sql(expected))
+            {
+                return Ok(false);
+            }
         }
     }
     for (kind, name, expected) in CANONICAL_SCHEMA_DEFINITIONS {
@@ -705,11 +849,20 @@ fn migrate(host: &dyn Host) -> CoreResult<Value> {
         };
     }
     sql.transaction(|sql| {
-        if version == 3 && !schema_is_valid_version(sql, 3)? {
+        if matches!(version, 3 | 4 | 5) && !schema_is_valid_version(sql, version)? {
             return Err(invalid_schema());
         }
         sql.exec(INITIAL_SCHEMA)?;
-        sql.exec(OWNER_SEND_SCHEMA)?;
+        if version < 4 {
+            sql.exec(OWNER_SEND_SCHEMA)?;
+        }
+        if version < 5 {
+            sql.exec(RESPONSE_SCHEMA)?;
+        } else if version < 6 {
+            sql.exec("CREATE TABLE provider_read_sync (platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, operation_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0), cursor TEXT NOT NULL, confirmed_cursor TEXT, rollback_ids_json TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','synced','failed')), attempts INTEGER NOT NULL DEFAULT 0, updated_at REAL NOT NULL, PRIMARY KEY(platform,account,chat_id)) WITHOUT ROWID")?;
+        }
+        // Existing retained history is the upgrade baseline, never fresh unread.
+        sql.exec("INSERT OR IGNORE INTO response_baselines(platform,account,chat_id,observed_at) SELECT DISTINCT platform,account,chat_id,CAST(strftime('%s','now') AS REAL) FROM messages")?;
         sql.run(&format!("PRAGMA user_version = {SCHEMA_VERSION}"), &[])?;
         if !schema_is_valid_version(sql, SCHEMA_VERSION)? {
             return Err(invalid_schema());
@@ -1305,7 +1458,7 @@ fn send_status(host: &dyn Host, input: &Value) -> CoreResult<Value> {
 pub fn dispatch(op: &str, input: &Value, host: &dyn Host) -> Option<CoreResult<Value>> {
     Some(match op {
         "store.schema" => Ok(
-            json!({ "version": SCHEMA_VERSION, "sql": format!("{};{};", INITIAL_SCHEMA, OWNER_SEND_SCHEMA) }),
+            json!({ "version": SCHEMA_VERSION, "sql": format!("{};{};{};", INITIAL_SCHEMA, OWNER_SEND_SCHEMA, RESPONSE_SCHEMA) }),
         ),
         "store.migrate" => migrate(host),
         "store.diagnose" => diagnose(host),

@@ -33,6 +33,7 @@ const executableNames = [
   "inboxd-kakao-local-worker",
   "inboxd-kakao-message-worker",
 ] as const;
+const replyRuntimeNames = ["inboxd-reply-worker.py", "context_intelligence.py", "policy.py", "evaluation.py", "personalization.py"];
 const expectedSources = new Map<string, string>([
   ["inboxd-daemon", "crates/inboxd-daemon/src/main.rs"],
   ["inboxd-keychain", "crates/inboxd-keychain/src/main.rs"],
@@ -47,6 +48,7 @@ const expectedSources = new Map<string, string>([
   ["inboxd-kakao-message-worker", "platforms/kakao-message/src/bin.ts"],
   [telegramTdjsonName, "@prebuilt-tdlib/darwin-arm64/libtdjson.dylib"],
   [telegramTdlAddonName, "tdl/prebuilds/darwin-arm64/tdl.node"],
+  ...replyRuntimeNames.map(name => [name, `packages/reply-model/${name === "inboxd-reply-worker.py" ? "worker.py" : name}`] as [string, string]),
 ]);
 
 interface ProductManifest {
@@ -276,6 +278,7 @@ describe("atomic production product artifacts", () => {
 
     const expectedInventory = [
       ...executableNames,
+      ...replyRuntimeNames,
       telegramAppCredentialsName,
       telegramTdjsonName,
       telegramTdlAddonDirectory,
@@ -306,6 +309,7 @@ describe("atomic production product artifacts", () => {
     });
     expect(manifest.files.map((file) => file.name)).toEqual([
       ...executableNames,
+      ...replyRuntimeNames,
       telegramTdjsonName,
       telegramTdlAddonName,
       telegramAppCredentialsName,
@@ -414,7 +418,7 @@ describe("atomic production product artifacts", () => {
     expect(sha256(join(productDirectory, "inboxd-keychain"))).toBe(helperHash);
     expect(inventory(productDirectory)).toEqual(expectedInventory);
     expect(JSON.parse(readFileSync(manifestPath, "utf8")).files.map((file: { name: string }) => file.name))
-      .toEqual([...executableNames, telegramTdjsonName, telegramTdlAddonName, telegramAppCredentialsName]);
+      .toEqual([...executableNames, ...replyRuntimeNames, telegramTdjsonName, telegramTdlAddonName, telegramAppCredentialsName]);
 
     const tdjsonPath = join(productDirectory, telegramTdjsonName);
     const aclAdded = Bun.spawnSync({

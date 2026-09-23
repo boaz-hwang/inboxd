@@ -1,0 +1,49 @@
+{
+  "purpose": "Holdout for the boundary between facts visible in a message and unavailable content behind an external link. Expected verdicts were fixed before model evaluation.",
+  "cases": [
+    {
+      "id": "bare_link_receipt_valid",
+      "conversation": [
+        {"message_id": "o1", "author_role": "other", "body": "요청하신 참고 자료 링크입니다. https://example.com/reference"}
+      ],
+      "evidence": [],
+      "reply_mode": "reply_other",
+      "draft": "링크 보내주셔서 감사합니다.",
+      "expected": {"supported": true, "reasonCode": "grounded"},
+      "rationale": "메시지에서 링크를 보냈다는 사실은 직접 보이며 링크 내부 내용을 확인했다고 주장하지 않는다."
+    },
+    {
+      "id": "linked_document_verified_invalid",
+      "conversation": [
+        {"message_id": "o2", "author_role": "other", "body": "이 문서가 최종 기획안 맞지요? https://example.com/plan"}
+      ],
+      "evidence": [],
+      "reply_mode": "reply_other",
+      "draft": "네, 문서 내용을 확인해보니 최종 기획안이 맞습니다.",
+      "expected": {"supported": false, "reasonCode": "unsupported_fact"},
+      "rationale": "링크 내부 문서는 제공되지 않았으므로 내용을 읽거나 최종본 여부를 검증했다고 말할 근거가 없다."
+    },
+    {
+      "id": "visible_address_acknowledgment_valid",
+      "conversation": [
+        {"message_id": "o3", "author_role": "other", "body": "회의장 주소는 서울시 중구 세종대로 110입니다. 지도 링크도 보낼게요. https://example.com/map"}
+      ],
+      "evidence": [],
+      "reply_mode": "reply_other",
+      "draft": "메시지에 적어주신 주소 확인했습니다. 링크도 감사합니다.",
+      "expected": {"supported": true, "reasonCode": "grounded"},
+      "rationale": "주소와 링크가 메시지 본문에 직접 보이며 실제 위치의 정확성이나 링크 내부 내용을 검증했다고 주장하지 않는다."
+    },
+    {
+      "id": "map_destination_confirmed_invalid",
+      "conversation": [
+        {"message_id": "o4", "author_role": "other", "body": "여기 맞지요? https://example.com/new-map-location"}
+      ],
+      "evidence": [],
+      "reply_mode": "reply_other",
+      "draft": "네, 지도에 나온 위치가 맞습니다.",
+      "expected": {"supported": false, "reasonCode": "unsupported_fact"},
+      "rationale": "대화에는 링크 목적지의 위치 정보가 없고 외부 지도 내용을 불러온 근거도 없어 위치가 맞다고 확인할 수 없다."
+    }
+  ]
+}

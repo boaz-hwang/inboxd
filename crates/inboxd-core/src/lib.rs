@@ -2,6 +2,8 @@
 mod descriptor;
 mod domain;
 mod host;
+mod message_body;
+pub use message_body::message_body;
 mod safety;
 mod store;
 
@@ -17,6 +19,7 @@ pub use host::{
     CallbackHost, Host, HostCallback, SqlHost, wire_cmp, wire_code_unit_len, wire_from_utf16_units,
     wire_utf16_units,
 };
+pub use store::{OWNER_SEND_SCHEMA, RESPONSE_SCHEMA};
 
 pub type CoreResult<T> = Result<T, CoreError>;
 pub const ABI_VERSION: u32 = 1;

@@ -95,11 +95,13 @@ test("loads every directory page, keeps provider names and sorts by latest activ
   controller.stop();
 });
 
-test("Tab cycles rooms, messages and filters; arrows select a messenger", async () => {
+test("only Shift+Tab cycles rooms, filters and messages", async () => {
   const { controller } = setup();
   await controller.start();
   await controller.dispatchKey("Tab");
-  expect(controller.state.pane).toBe("messages");
+  expect(controller.state.pane).toBe("rooms");
+  await controller.dispatchKey("ShiftTab");
+  expect(controller.state.pane).toBe("filters");
   await controller.dispatchKey("Tab");
   expect(controller.state.pane).toBe("filters");
   await controller.dispatchKey("ArrowRight");
@@ -109,7 +111,11 @@ test("Tab cycles rooms, messages and filters; arrows select a messenger", async 
       (r) => r.resource.platform === "slack",
     ),
   ).toBe(true);
+  await controller.dispatchKey("ShiftTab");
+  expect(controller.state.pane).toBe("messages");
   await controller.dispatchKey("Tab");
+  expect(controller.state.pane).toBe("messages");
+  await controller.dispatchKey("ShiftTab");
   expect(controller.state.pane).toBe("rooms");
   controller.stop();
 });
@@ -261,7 +267,7 @@ test("account search renders local evidence before remote completes and keeps it
   expect(controller.state.views.search.data[0]?.body).toBe("saved needle");
   expect(controller.state.notice).toContain("원격 확인 실패");
   expect(controller.state.views.search.nextCursor).toBeDefined();
-  await controller.dispatchKey("n");
+  await controller.dispatchKey(controller.state.screen === "chat" ? "PageUp" : "PageDown");
   expect(controller.state.views.search.data.some(row => row.body === "saved second")).toBe(true);
   controller.stop();
 });

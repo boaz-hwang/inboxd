@@ -240,3 +240,78 @@ fn authoritative_deletions_are_atomic_scoped_durable_and_prevent_resurrection() 
     assert_eq!(found["messages"].as_array().unwrap().len(), 1);
     assert_eq!(found["messages"][0]["chat_id"], "30");
 }
+
+#[test]
+fn semantic_observation_changes_stale_reply_cache_but_identical_repolls_do_not() {
+    use inboxd_core::SqlHost;
+    let dir = tempfile::tempdir().unwrap();
+    let host = NativeHost::open_development(&dir.path().join("reply-stale.db"), &[49; 32]).unwrap();
+    host.execute("store.migrate", &Value::Null).unwrap();
+    host.execute(
+        "store.recordAccountIdentity",
+        &json!({"platform":"test","account":"a","status":"known","source":"authenticated_adapter","self_id":"me","observed_at":1}),
+    )
+    .unwrap();
+    host.execute(
+        "observations.store",
+        &page(1, json!([message("old", "20", "older context")])),
+    )
+    .unwrap();
+    host.execute(
+        "response.observe",
+        &json!({"platform":"test","account":"a","chat_id":"20","message_ids":["old"]}),
+    )
+    .unwrap();
+    host.execute(
+        "observations.store",
+        &page(2, json!([message("new", "20", "new message")])),
+    )
+    .unwrap();
+    host.execute(
+        "response.observe",
+        &json!({"platform":"test","account":"a","chat_id":"20","message_ids":["new"]}),
+    )
+    .unwrap();
+    let prepared = host
+        .execute(
+            "response.prepare",
+            &json!({"platform":"test","account":"a","chat_id":"20","runtime_version":"test"}),
+        )
+        .unwrap();
+    let suggestion_id = prepared["suggestion_id"].as_str().unwrap();
+    host.execute(
+        "response.generationClaim",
+        &json!({"suggestion_id":suggestion_id}),
+    )
+    .unwrap();
+
+    host.execute(
+        "observations.store",
+        &page(3, json!([message("old", "20", "older context")])),
+    )
+    .unwrap();
+    assert_eq!(
+        SqlHost::new(&host)
+            .get(
+                "SELECT status FROM reply_suggestions WHERE suggestion_id=?",
+                &[json!(suggestion_id)],
+            )
+            .unwrap()["status"],
+        "generating"
+    );
+
+    host.execute(
+        "observations.store",
+        &page(4, json!([message("old", "20", "edited older context")])),
+    )
+    .unwrap();
+    assert_eq!(
+        SqlHost::new(&host)
+            .get(
+                "SELECT status FROM reply_suggestions WHERE suggestion_id=?",
+                &[json!(suggestion_id)],
+            )
+            .unwrap()["status"],
+        "stale"
+    );
+}

@@ -129,10 +129,19 @@ pub(crate) struct KakaoLatest {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub(crate) enum KakaoRoomType {
+    V0(String),
+    V1(f64),
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct KakaoRoom {
     pub(crate) chat_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) r#type: Option<String>,
+    pub(crate) r#type: Option<KakaoRoomType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) open_link_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -443,6 +452,18 @@ pub(crate) struct KakaoSendResult {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) enum KakaoMarkReadResultState {
+    #[serde(rename = "Marked")]
+    Marked,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct KakaoMarkReadResult {
+    pub(crate) state: KakaoMarkReadResultState,
+    pub(crate) message_id: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum TelegramLoadDirectoryParamsList {
     #[serde(rename = "main")]
     Main,
@@ -667,6 +688,8 @@ pub(crate) enum PrimitiveRequest {
     KakaoSelfMembers { chat_id: String },
     #[serde(rename = "kakao_send")]
     KakaoSend { chat_id: String, body: String },
+    #[serde(rename = "kakao_mark_read")]
+    KakaoMarkRead { chat_id: String, message_id: String },
     #[serde(rename = "telegram_load_directory")]
     TelegramLoadDirectory {
         params: TelegramLoadDirectoryParams,
@@ -734,6 +757,7 @@ pub(crate) enum PrimitiveResult {
     KakaoMembers(KakaoMembersResult),
     KakaoSelfMembers(KakaoSelfMembersResult),
     KakaoSend(KakaoSendResult),
+    KakaoMarkRead(KakaoMarkReadResult),
     TelegramLoadDirectory(TelegramLoadDirectoryResult),
     TelegramListDirectory(TelegramListDirectoryResult),
     TelegramChat(TelegramChatResult),
@@ -791,6 +815,9 @@ impl PrimitiveRequest {
                 PrimitiveResult::KakaoSelfMembers(serde_json::from_value(value)?)
             }
             Self::KakaoSend { .. } => PrimitiveResult::KakaoSend(serde_json::from_value(value)?),
+            Self::KakaoMarkRead { .. } => {
+                PrimitiveResult::KakaoMarkRead(serde_json::from_value(value)?)
+            }
             Self::TelegramLoadDirectory { .. } => {
                 PrimitiveResult::TelegramLoadDirectory(serde_json::from_value(value)?)
             }
