@@ -3,7 +3,7 @@ use serde_json::{Map, Value, json};
 use crate::domain;
 use crate::{CoreError, CoreResult, Host, SqlHost};
 
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 pub const OWNER_SEND_SCHEMA: &str = "CREATE TABLE owner_sends (request_id TEXT NOT NULL PRIMARY KEY, platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, body TEXT NOT NULL, envelope_json TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN ('Pending', 'Sent', 'Verified', 'Failed', 'Uncertain')), outcome_json TEXT NOT NULL) WITHOUT ROWID";
 
@@ -305,6 +305,28 @@ const RESPONSE_SCHEMA_DEFINITIONS: &[(&str, &str, &str)] = &[
         "table",
         "response_settings",
         "CREATE TABLE response_settings (id INTEGER NOT NULL PRIMARY KEY CHECK(id=1), recording INTEGER NOT NULL CHECK(recording IN (0,1)), retention_days INTEGER NOT NULL CHECK(retention_days BETWEEN 1 AND 3650), updated_at REAL NOT NULL)",
+    ),
+];
+
+// Version 7 owns resumable history and immutable local archive provenance.
+// Rowid definitions also preserve the exact pre-migration v6 collector tables.
+pub const ACCOUNT_HISTORY_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS account_history(platform TEXT NOT NULL,account TEXT NOT NULL,chat_id TEXT NOT NULL,state_json TEXT NOT NULL,PRIMARY KEY(platform,account,chat_id));
+CREATE TABLE IF NOT EXISTS local_archive_pages(platform TEXT NOT NULL,account TEXT NOT NULL,source_id TEXT NOT NULL,page_id TEXT NOT NULL,digest TEXT NOT NULL,event_count INTEGER NOT NULL,inserted_count INTEGER NOT NULL,observed_at INTEGER NOT NULL,PRIMARY KEY(platform,account,source_id,page_id));
+CREATE TABLE IF NOT EXISTS local_archive_records(platform TEXT NOT NULL,account TEXT NOT NULL,chat_id TEXT NOT NULL,msg_id TEXT NOT NULL,source_id TEXT NOT NULL,page_id TEXT NOT NULL,message_json TEXT NOT NULL,source_json TEXT NOT NULL,PRIMARY KEY(platform,account,chat_id,msg_id,source_id));
+"#;
+const ACCOUNT_HISTORY_SCHEMA_DEFINITIONS: &[(&str, &str)] = &[
+    (
+        "account_history",
+        "CREATE TABLE account_history(platform TEXT NOT NULL,account TEXT NOT NULL,chat_id TEXT NOT NULL,state_json TEXT NOT NULL,PRIMARY KEY(platform,account,chat_id))",
+    ),
+    (
+        "local_archive_pages",
+        "CREATE TABLE local_archive_pages(platform TEXT NOT NULL,account TEXT NOT NULL,source_id TEXT NOT NULL,page_id TEXT NOT NULL,digest TEXT NOT NULL,event_count INTEGER NOT NULL,inserted_count INTEGER NOT NULL,observed_at INTEGER NOT NULL,PRIMARY KEY(platform,account,source_id,page_id))",
+    ),
+    (
+        "local_archive_records",
+        "CREATE TABLE local_archive_records(platform TEXT NOT NULL,account TEXT NOT NULL,chat_id TEXT NOT NULL,msg_id TEXT NOT NULL,source_id TEXT NOT NULL,page_id TEXT NOT NULL,message_json TEXT NOT NULL,source_json TEXT NOT NULL,PRIMARY KEY(platform,account,chat_id,msg_id,source_id))",
     ),
 ];
 
@@ -727,12 +749,49 @@ fn normalized_schema_sql(source: &str) -> String {
 }
 
 fn schema_is_valid_version(sql: &SqlHost<'_>, version: i64) -> CoreResult<bool> {
+    Ok(schema_definitions_valid(sql, version)? && integrity_is_ok(sql)?)
+}
+
+fn schema_definitions_valid(sql: &SqlHost<'_>, version: i64) -> CoreResult<bool> {
     let objects = sql.all(
         "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE type IN ('table', 'index', 'view', 'trigger')",
         &[],
     )?;
+    // Only v6 may have the collector's exact known transitional tables.
+    // Validate definitions and implicit indexes before migration, never waive
+    // validation for arbitrary extra tables or drifted history schemas.
+    let mut history_objects = 0;
+    if version >= 6 {
+        for (name, definition) in ACCOUNT_HISTORY_SCHEMA_DEFINITIONS {
+            let table = objects
+                .iter()
+                .find(|r| r["name"] == *name && r["type"] == "table");
+            if table.is_none() && version == 6 {
+                continue;
+            }
+            let Some(table) = table else { return Ok(false) };
+            if table["tbl_name"] != *name
+                || table["sql"].as_str().map(normalized_schema_sql)
+                    != Some(normalized_schema_sql(definition))
+            {
+                return Ok(false);
+            }
+            let index_name = format!("sqlite_autoindex_{name}_1");
+            let Some(index) = objects.iter().find(|r| {
+                r["name"] == index_name
+                    && r["type"] == "index"
+                    && r["tbl_name"] == *name
+                    && r["sql"].is_null()
+            }) else {
+                return Ok(false);
+            };
+            let _ = index;
+            history_objects += 2;
+        }
+    }
     if objects.len()
-        != CANONICAL_SCHEMA_DEFINITIONS.len()
+        != history_objects
+            + CANONICAL_SCHEMA_DEFINITIONS.len()
             + CANONICAL_SCHEMA_AUTO_INDEXES.len()
             + usize::from(version >= 4)
             + if version >= 5 {
@@ -813,6 +872,12 @@ fn schema_is_valid_version(sql: &SqlHost<'_>, version: i64) -> CoreResult<bool> 
             return Ok(false);
         }
     }
+    Ok(true)
+}
+
+/// Full-database page scan; expensive on large stores, so long-lived hosts
+/// run it once and pass the cached result to `store.diagnose`.
+fn integrity_is_ok(sql: &SqlHost<'_>) -> CoreResult<bool> {
     let check = sql.get("PRAGMA quick_check", &[])?;
     Ok(check
         .as_object()
@@ -849,7 +914,7 @@ fn migrate(host: &dyn Host) -> CoreResult<Value> {
         };
     }
     sql.transaction(|sql| {
-        if matches!(version, 3 | 4 | 5) && !schema_is_valid_version(sql, version)? {
+        if matches!(version, 3 | 4 | 5 | 6) && !schema_is_valid_version(sql, version)? {
             return Err(invalid_schema());
         }
         sql.exec(INITIAL_SCHEMA)?;
@@ -861,6 +926,7 @@ fn migrate(host: &dyn Host) -> CoreResult<Value> {
         } else if version < 6 {
             sql.exec("CREATE TABLE provider_read_sync (platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL, operation_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0), cursor TEXT NOT NULL, confirmed_cursor TEXT, rollback_ids_json TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','synced','failed')), attempts INTEGER NOT NULL DEFAULT 0, updated_at REAL NOT NULL, PRIMARY KEY(platform,account,chat_id)) WITHOUT ROWID")?;
         }
+        if version < 7 {sql.exec(ACCOUNT_HISTORY_SCHEMA)?;}
         // Existing retained history is the upgrade baseline, never fresh unread.
         sql.exec("INSERT OR IGNORE INTO response_baselines(platform,account,chat_id,observed_at) SELECT DISTINCT platform,account,chat_id,CAST(strftime('%s','now') AS REAL) FROM messages")?;
         sql.run(&format!("PRAGMA user_version = {SCHEMA_VERSION}"), &[])?;
@@ -871,7 +937,7 @@ fn migrate(host: &dyn Host) -> CoreResult<Value> {
     })
 }
 
-fn diagnose(host: &dyn Host) -> CoreResult<Value> {
+fn diagnose(host: &dyn Host, input: &Value) -> CoreResult<Value> {
     let sql = SqlHost::new(host);
     let cipher = sql.get("PRAGMA cipher_version", &[])?;
     let cipher_version = cipher
@@ -884,8 +950,12 @@ fn diagnose(host: &dyn Host) -> CoreResult<Value> {
         .get("user_version")
         .and_then(Value::as_i64)
         .unwrap_or(0);
-    let schema_valid =
-        schema_version == SCHEMA_VERSION && schema_is_valid_version(&sql, SCHEMA_VERSION)?;
+    let schema_valid = schema_version == SCHEMA_VERSION
+        && schema_definitions_valid(&sql, SCHEMA_VERSION)?
+        && match input.get("integrity_ok").and_then(Value::as_bool) {
+            Some(cached) => cached,
+            None => integrity_is_ok(&sql)?,
+        };
     Ok(json!({
         "cipher_version": cipher_version,
         "schema_version": schema_version,
@@ -1458,10 +1528,10 @@ fn send_status(host: &dyn Host, input: &Value) -> CoreResult<Value> {
 pub fn dispatch(op: &str, input: &Value, host: &dyn Host) -> Option<CoreResult<Value>> {
     Some(match op {
         "store.schema" => Ok(
-            json!({ "version": SCHEMA_VERSION, "sql": format!("{};{};{};", INITIAL_SCHEMA, OWNER_SEND_SCHEMA, RESPONSE_SCHEMA) }),
+            json!({ "version": SCHEMA_VERSION, "sql": format!("{};{};{};{};", INITIAL_SCHEMA, OWNER_SEND_SCHEMA, RESPONSE_SCHEMA, ACCOUNT_HISTORY_SCHEMA) }),
         ),
         "store.migrate" => migrate(host),
-        "store.diagnose" => diagnose(host),
+        "store.diagnose" => diagnose(host, input),
         "store.applySyncBatch" => apply_sync_batch(host, input),
         "store.readSyncState" => read_sync_state(host, input),
         "store.coverageFor" => coverage_for(host, input),

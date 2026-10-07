@@ -24,6 +24,17 @@ pub(crate) fn observations(platform: &str, rows: &[Value]) -> Vec<Value> {
                     row["chat_id"] = json!(chat(platform, room));
                     row["id"] = json!(id);
                 }
+                if let Some(parent) = row["parent_id"]
+                    .as_str()
+                    .filter(|s| !s.starts_with("telegram:message:"))
+                {
+                    let room = row["chat_id"]
+                        .as_str()
+                        .unwrap_or("")
+                        .strip_prefix("telegram:chat:")
+                        .unwrap_or("");
+                    row["parent_id"] = json!(format!("telegram:message:{room}:{parent}"));
+                }
                 if let Some(author) = row["author_id"]
                     .as_str()
                     .filter(|s| !s.starts_with("telegram:"))

@@ -72,6 +72,8 @@ export async function runCli(
     case "daemon start": result = await handlers.daemonStart(); break;
     case "daemon status": result = await handlers.daemonStatus(); break;
     case "chat list": result = await handlers.chatList(); break;
+    case "account list": result = await handlers.accountList(payload === undefined ? {} : jsonArgument(payload, "account list")); break;
+    case "account messages": result = await handlers.accountMessages(jsonArgument(payload, "account messages")); break;
     case "message inbox": result = await handlers.inbox(jsonArgument(payload, "message inbox") as unknown as Parameters<CliHandlers["inbox"]>[0]); break;
     case "message recent": result = await handlers.recent(jsonArgument(payload, "message recent") as unknown as Parameters<CliHandlers["recent"]>[0]); break;
     case "message evidence": result = await handlers.evidence(jsonArgument(payload, "message evidence") as unknown as Parameters<CliHandlers["evidence"]>[0]); break;

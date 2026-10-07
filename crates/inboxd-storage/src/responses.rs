@@ -1,3 +1,4 @@
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use inboxd_core::{CoreError, CoreResult};
 use rusqlite::{Connection, OptionalExtension, named_params, params};
 use serde_json::{Value, json};
@@ -8,7 +9,9 @@ use std::{
 };
 use uuid::Uuid;
 
-const PROMPT_VERSION: &str = "reply-v2";
+const PROMPT_VERSION: &str = "reply-v4";
+const HISTORY_VERSION: &str = "history-v1";
+type ContextRow = (String, Option<String>, f64, String, Option<String>);
 
 fn fail(message: impl Into<String>) -> CoreError {
     CoreError::new("ResponseStorageError", message)
@@ -247,14 +250,27 @@ fn reply_context_version(context: &str, runtime: &str, sources: &[String]) -> Co
     Ok(format!("{:x}", hash.finalize()))
 }
 
-pub(crate) fn prepare(connection: &Connection, scope: &Value) -> CoreResult<Value> {
-    let (platform, account, chat_id) = chat(scope)?;
-    let own = self_id(connection, platform, account)?;
-    let mut statement = connection.prepare(
-        "SELECT msg_id,author_id,ts,body,parent_msg_id FROM messages WHERE platform=? AND account=? AND chat_id=? AND deleted_at IS NULL ORDER BY ts DESC,msg_id DESC LIMIT 40"
-    ).map_err(sql)?;
+// The same read-only selection is used by live prepare and historical export.
+// Historical boundaries are exclusive by timestamp: equal-time ordering is not
+// reliable across providers, so ties cannot enter the prompt.
+fn context_snapshot(
+    connection: &Connection,
+    platform: &str,
+    account: &str,
+    chat_id: &str,
+    before: Option<f64>,
+    own: Option<&str>,
+) -> CoreResult<(Vec<ContextRow>, Vec<Value>)> {
+    // The optional-argument OR prevented an indexed timestamp range seek for
+    // historical snapshots. Keep live/recent and historical predicates explicit.
+    let query = if before.is_some() {
+        "SELECT msg_id,author_id,ts,body,parent_msg_id FROM messages WHERE platform=? AND account=? AND chat_id=? AND deleted_at IS NULL AND ts<?4 ORDER BY ts DESC,msg_id DESC LIMIT 40"
+    } else {
+        "SELECT msg_id,author_id,ts,body,parent_msg_id FROM messages WHERE platform=? AND account=? AND chat_id=? AND deleted_at IS NULL AND ?4 IS NULL ORDER BY ts DESC,msg_id DESC LIMIT 40"
+    };
+    let mut statement = connection.prepare(query).map_err(sql)?;
     let mut rows = statement
-        .query_map(params![platform, account, chat_id], |r| {
+        .query_map(params![platform, account, chat_id, before], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, Option<String>>(1)?,
@@ -267,6 +283,48 @@ pub(crate) fn prepare(connection: &Connection, scope: &Value) -> CoreResult<Valu
         .collect::<Result<Vec<_>, _>>()
         .map_err(sql)?;
     rows.reverse();
+    let mut context_rows = rows.clone();
+    let mut parent = rows.last().and_then(|row| row.4.clone());
+    for _ in 0..8 {
+        let Some(id) = parent.take() else { break };
+        if context_rows.iter().any(|row| row.0 == id) {
+            break;
+        }
+        let found = connection.query_row(
+            "SELECT msg_id,author_id,ts,body,parent_msg_id FROM messages WHERE platform=? AND account=? AND chat_id=? AND msg_id=? AND deleted_at IS NULL AND (?5 IS NULL OR ts<?5)",
+            params![platform, account, chat_id, id, before], |r| Ok((
+                r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?,
+                r.get::<_, f64>(2)?, r.get::<_, String>(3)?, r.get::<_, Option<String>>(4)?
+            ))).optional().map_err(sql)?;
+        let Some(found) = found else { break };
+        parent = found.4.clone();
+        context_rows.push(found);
+    }
+    context_rows.sort_by(|a, b| a.2.total_cmp(&b.2).then_with(|| a.0.cmp(&b.0)));
+    let mut context = Vec::new();
+    for (id, author, ts, body, parent) in &context_rows {
+        let visible_parent = if let (Some(boundary), Some(parent_id)) = (before, parent.as_deref())
+        {
+            let exists: bool=connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE platform=? AND account=? AND chat_id=? AND msg_id=? AND deleted_at IS NULL AND ts<?)",
+                params![platform,account,chat_id,parent_id,boundary],|r|r.get(0)).map_err(sql)?;
+            if exists { parent.clone() } else { None }
+        } else {
+            parent.clone()
+        };
+        context.push(json!({
+            "message_id":id,"author_role":match (own,author.as_deref()) { (Some(a),Some(b)) if a==b=>"self", (Some(_),Some(_))=>"other", _=>"unknown" },
+            "author_id":author,"body":body,"ts":ts,"reply_to":visible_parent
+        }));
+    }
+    Ok((rows, context))
+}
+
+pub(crate) fn prepare(connection: &Connection, scope: &Value) -> CoreResult<Value> {
+    let (platform, account, chat_id) = chat(scope)?;
+    let own = self_id(connection, platform, account)?;
+    let (rows, context) =
+        context_snapshot(connection, platform, account, chat_id, None, own.as_deref())?;
     if rows.is_empty() {
         return Ok(json!({"status":"abstained","reason":"no_context"}));
     }
@@ -291,30 +349,6 @@ pub(crate) fn prepare(connection: &Connection, scope: &Value) -> CoreResult<Valu
         )
         .map_err(sql)?
         .unwrap_or(0.0);
-    // Resolve the latest explicit reply chain before inference, within the same
-    // account/chat only. Keep unread accounting on the original recent window.
-    let mut context_rows = rows.clone();
-    let mut parent = rows.last().and_then(|row| row.4.clone());
-    for _ in 0..8 {
-        let Some(id) = parent.take() else { break };
-        if context_rows.iter().any(|row| row.0 == id) {
-            break;
-        }
-        let found = connection.query_row(
-            "SELECT msg_id,author_id,ts,body,parent_msg_id FROM messages WHERE platform=? AND account=? AND chat_id=? AND msg_id=? AND deleted_at IS NULL",
-            params![platform, account, chat_id, id], |r| Ok((
-                r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?,
-                r.get::<_, f64>(2)?, r.get::<_, String>(3)?, r.get::<_, Option<String>>(4)?
-            ))).optional().map_err(sql)?;
-        let Some(found) = found else { break };
-        parent = found.4.clone();
-        context_rows.push(found);
-    }
-    context_rows.sort_by(|a, b| a.2.total_cmp(&b.2).then_with(|| a.0.cmp(&b.0)));
-    let context: Vec<Value> = context_rows.iter().map(|(id,author,ts,body,parent)| json!({
-        "message_id":id,"author_role":match (own.as_deref(),author.as_deref()) { (Some(a),Some(b)) if a==b=>"self", (Some(_),Some(_))=>"other", _=>"unknown" },
-        "author_id":author,"body":body,"ts":ts,"reply_to":parent
-    })).collect();
     let evidence = provider_evidence(connection, platform, account, chat_id)?;
     let cursor = read_through(&evidence);
     let provider_count = (evidence["status"] == "known")
@@ -427,8 +461,8 @@ pub(crate) fn prepare(connection: &Connection, scope: &Value) -> CoreResult<Valu
         status
     };
     connection.execute("UPDATE reply_suggestions SET status='stale' WHERE platform=? AND account=? AND chat_id=? AND context_version<>? AND status IN ('queued','generating','ready')",params![platform,account,chat_id,context_version]).map_err(sql)?;
-    connection.execute("INSERT OR IGNORE INTO reply_suggestions(suggestion_id,platform,account,chat_id,context_version,source_json,context_json,status,prompt_version,created_at) VALUES(?,?,?,?,?,?,?,?,'reply-v2',?)",
-        params![suggestion_id,platform,account,chat_id,context_version,source_json,context_json,status,now()?]).map_err(sql)?;
+    connection.execute("INSERT OR IGNORE INTO reply_suggestions(suggestion_id,platform,account,chat_id,context_version,source_json,context_json,status,prompt_version,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        params![suggestion_id,platform,account,chat_id,context_version,source_json,context_json,status,PROMPT_VERSION,now()?]).map_err(sql)?;
     Ok(
         json!({"status":status,"suggestion_id":suggestion_id,"generation_epoch":generation_epoch,"chat":scope,"context_version":context_version,"source_message_ids":sources,"context":context,"prompt_version":PROMPT_VERSION,"unread":unread(connection,&scope)?,"latest_incoming_ts":latest_incoming_ts}),
     )
@@ -1258,8 +1292,496 @@ fn trajectory_summary(run: Value) -> Value {
         "completed_at":run["completed_at"],"versions":run["versions"],"steps":steps,"summary":true})
 }
 
+fn message_key(p: &str, a: &str, c: &str, id: &str) -> String {
+    json!([p, a, c, id]).to_string()
+}
+
+fn history_cursor(input: &Value, position: Option<&Value>) -> String {
+    URL_SAFE_NO_PAD.encode(
+        json!({"version":HISTORY_VERSION,
+        "scope":[input["platform"],input["account"],input["chat_id"]],
+        "position":position})
+        .to_string(),
+    )
+}
+
+fn archive_content_metadata(
+    connection: &Connection,
+    p: &str,
+    a: &str,
+    c: &str,
+    id: &str,
+) -> CoreResult<Option<Value>> {
+    type ArchiveRow = (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let row:Option<ArchiveRow>=connection.query_row("SELECT r.message_json,m.parent_msg_id,m.parent_platform,m.parent_account,m.parent_chat_id FROM local_archive_records r LEFT JOIN messages m ON m.platform=r.platform AND m.account=r.account AND m.chat_id=r.chat_id AND m.msg_id=r.msg_id WHERE r.platform=? AND r.account=? AND r.chat_id=? AND r.msg_id=? ORDER BY r.rowid DESC LIMIT 1",params![p,a,c,id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(sql)?;
+    row.map(|(raw,parent,pp,pa,pc)|{
+        let raw:Value=serde_json::from_str(&raw).map_err(|_|fail("invalid archive metadata"))?;
+        let native_parent=crate::archive::explicit_parent(&raw);
+        let linkage_unrecoverable=native_parent.as_ref().is_some_and(|expected|parent.as_ref()!=Some(expected)||pp.as_deref()!=Some(p)||pa.as_deref()!=Some(a)||pc.as_deref()!=Some(c));
+        Ok(json!({"content_kind":crate::archive::native_content_kind(raw["type"].as_i64()),"type":raw["type"],"status":raw["archive_metadata"]["status"],"revision":raw["archive_metadata"]["revision"],"parent_id":native_parent,"linkage_unrecoverable":linkage_unrecoverable,"source":"owner_local_archive","edit_state":"unknown"}))
+    }).transpose()
+}
+fn historical_candidate(
+    connection: &Connection,
+    p: &str,
+    a: &str,
+    c: &str,
+    id: &str,
+    ts: f64,
+    body: &str,
+    parent: Option<&str>,
+    own: &str,
+) -> CoreResult<Value> {
+    let (recent_rows, mut context) = context_snapshot(connection, p, a, c, Some(ts), Some(own))?;
+    let archive_available:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='local_archive_records')",[],|r|r.get(0)).map_err(sql)?;
+    let mut external_content = false;
+    let mut archive_type_unverified = false;
+    let mut archive_deleted_context = false;
+    let mut archive_revision_unrecoverable = false;
+    let mut archive_linkage_unrecoverable = false;
+    let target_content = if archive_available {
+        archive_content_metadata(connection, p, a, c, id)?
+    } else {
+        None
+    };
+    if archive_available {
+        for message in &mut context {
+            if let Some(mid) = message["message_id"].as_str() {
+                if let Some(metadata) = archive_content_metadata(connection, p, a, c, mid)? {
+                    external_content |= metadata["content_kind"] != "text";
+                    archive_linkage_unrecoverable |= metadata["linkage_unrecoverable"] == true;
+                    archive_revision_unrecoverable |=
+                        metadata["revision"].as_i64().is_some_and(|v| v > 0);
+                    archive_type_unverified |= metadata["content_kind"] == "unknown";
+                    archive_deleted_context |= metadata["content_kind"] == "deleted";
+                    message["content_kind"] = metadata["content_kind"].clone();
+                    message["archive_source"] = metadata;
+                }
+            }
+        }
+    }
+    let model_target = context
+        .iter()
+        .rev()
+        .find(|m| m["author_role"] == "other")
+        .and_then(|m| m["message_id"].as_str());
+    let actual_target = parent.or(model_target);
+    let tied: i64 = connection.query_row(
+        "SELECT count(*) FROM messages WHERE platform=? AND account=? AND chat_id=? AND ts=? AND msg_id<>?",
+        params![p,a,c,ts,id],|r|r.get(0)).map_err(sql)?;
+    let authors: i64 = connection.query_row(
+        "SELECT count(DISTINCT author_id) FROM messages WHERE platform=? AND account=? AND chat_id=? AND deleted_at IS NULL AND ts<=? AND author_id IS NOT NULL",
+        params![p,a,c,ts],|r|r.get(0)).map_err(sql)?;
+    let mut coverage = connection.prepare(
+        "SELECT from_ts,to_ts,kind,collected_at,mutations_verified_at FROM sync_coverage WHERE platform=? AND account=? AND chat_id=? AND from_ts<=? AND to_ts>=? ORDER BY from_ts"
+    ).map_err(sql)?;
+    let start = context.first().and_then(|m| m["ts"].as_f64()).unwrap_or(ts);
+    let coverage_rows = coverage.query_map(params![p,a,c,ts,start], |r| Ok(json!({
+        "from_ts":r.get::<_,f64>(0)?,"to_ts":r.get::<_,f64>(1)?,"kind":r.get::<_,String>(2)?,
+        "collected_at":r.get::<_,f64>(3)?,"mutations_verified_at":r.get::<_,Option<f64>>(4)?
+    }))).map_err(sql)?.collect::<Result<Vec<_>,_>>().map_err(sql)?;
+    let mut limits = connection.prepare(
+        "SELECT from_ts,to_ts,reason FROM sync_limits WHERE platform=? AND account=? AND chat_id=? AND resolved_at IS NULL AND from_ts<=? AND to_ts>=? ORDER BY from_ts"
+    ).map_err(sql)?;
+    let limit_rows = limits.query_map(params![p,a,c,ts,start], |r| Ok(json!({
+        "from_ts":r.get::<_,f64>(0)?,"to_ts":r.get::<_,f64>(1)?,"reason":r.get::<_,String>(2)?
+    }))).map_err(sql)?.collect::<Result<Vec<_>,_>>().map_err(sql)?;
+    // A deletion after the answer can shift the surviving recent window. Test
+    // membership in the 40-message window as it existed at answer time.
+    let mut deleted_stmt=connection.prepare("SELECT msg_id FROM messages WHERE platform=? AND account=? AND chat_id=? AND deleted_at>? AND msg_id IN (SELECT msg_id FROM messages WHERE platform=? AND account=? AND chat_id=? AND ts<? AND (deleted_at IS NULL OR deleted_at>?) ORDER BY ts DESC,msg_id DESC LIMIT 40) ORDER BY ts,msg_id").map_err(sql)?;
+    let mut deleted_context_ids: Vec<String> = deleted_stmt
+        .query_map(params![p, a, c, ts, p, a, c, ts, ts], |r| {
+            r.get::<_, String>(0)
+        })
+        .map_err(sql)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql)?;
+    // Also inspect reply ancestors outside that recent window.
+    let mut parent_id = recent_rows.last().and_then(|row| row.4.clone());
+    for _ in 0..8 {
+        let Some(parent) = parent_id.take() else {
+            break;
+        };
+        if recent_rows.iter().any(|row| row.0 == parent) {
+            break;
+        }
+        let found: Option<(Option<String>,Option<f64>)> = connection.query_row(
+            "SELECT parent_msg_id,deleted_at FROM messages WHERE platform=? AND account=? AND chat_id=? AND msg_id=? AND ts<?",
+            params![p,a,c,parent,ts],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(sql)?;
+        let Some((next, deleted_at)) = found else {
+            break;
+        };
+        if deleted_at.is_some_and(|deleted_at| deleted_at > ts)
+            && !deleted_context_ids.contains(&parent)
+        {
+            deleted_context_ids.push(parent.clone());
+        }
+        parent_id = next;
+    }
+    deleted_context_ids.sort();
+    let full_span_verified = limit_rows.is_empty()
+        && deleted_context_ids.is_empty()
+        && coverage_rows.iter().any(|range| {
+            range["kind"] == "backfill"
+                && range["from_ts"].as_f64().is_some_and(|from| from <= start)
+                && range["to_ts"].as_f64().is_some_and(|to| to >= ts)
+                && range["mutations_verified_at"]
+                    .as_f64()
+                    .is_some_and(|verified| verified >= ts)
+        });
+    let mut edited_context_ids = Vec::new();
+    let mut edited_stmt = connection.prepare(
+        "SELECT edited_at FROM messages WHERE platform=? AND account=? AND chat_id=? AND msg_id=?"
+    ).map_err(sql)?;
+    for message in &context {
+        let Some(context_id) = message["message_id"].as_str() else {
+            continue;
+        };
+        let edited_at: Option<f64> = edited_stmt
+            .query_row(params![p, a, c, context_id], |r| r.get(0))
+            .optional()
+            .map_err(sql)?
+            .flatten();
+        if edited_at.is_some_and(|edited_at| edited_at > ts) {
+            edited_context_ids.push(context_id.to_owned());
+        }
+    }
+    let edited = !edited_context_ids.is_empty();
+    let target_edited_at: Option<f64> = edited_stmt
+        .query_row(params![p, a, c, id], |r| r.get(0))
+        .optional()
+        .map_err(sql)?
+        .flatten();
+    let target_edited_after_send = target_edited_at.is_some_and(|edited_at| edited_at > ts);
+    let target_key = message_key(p, a, c, id);
+    let mut source_keys: Vec<String> = context
+        .iter()
+        .filter_map(|m| m["message_id"].as_str())
+        .map(|mid| message_key(p, a, c, mid))
+        .collect();
+    source_keys.push(target_key.clone());
+    let receipt: Option<(String,String)> = connection.query_row(
+        "SELECT s.session_id,os.state FROM response_sessions s JOIN owner_sends os ON os.request_id=s.send_request_id WHERE s.platform=? AND s.account=? AND s.chat_id=? AND s.state='sent' AND os.state IN ('Sent','Verified') AND (json_extract(s.send_outcome_json,'$.message_id')=? OR json_extract(s.send_outcome_json,'$.id')=? OR json_extract(os.outcome_json,'$.message_id')=? OR json_extract(os.outcome_json,'$.id')=? OR json_extract(s.send_outcome_json,'$.receipt')=? OR json_extract(os.outcome_json,'$.receipt')=?) LIMIT 1",
+        params![p,a,c,id,id,id,id,id,id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(sql)?;
+    let flags = json!({"tied_timestamp":tied>0,"self_identity_unknown":false,
+        "reply_target_mismatch":actual_target.is_some() && actual_target!=model_target,
+        "context_edited_after_target":edited,"context_deleted_after_target":!deleted_context_ids.is_empty(),
+        "target_edited_after_send":target_edited_after_send,
+        "coverage_unverified":!full_span_verified,
+        "authorship_unknown":receipt.is_none(),"group_without_explicit_reply":authors>2 && parent.is_none()});
+    let mut row = json!({"id":format!("hist:{}",target_key),"source":"history",
+        "chat":{"platform":p,"account":a,"chat_id":c},"context":context,
+        "targets":[{"message_id":id,"ts":ts,"body":body,"reply_to":parent,
+            "edited_at":target_edited_at,"edit_state":{"state":if target_edited_after_send{"edited_after_target"}else{"unknown"}},
+            "authorship":{"state":"unknown","session_id":receipt.as_ref().map(|r|&r.0)}}],
+        "timestamp":ts,"source_message_keys":source_keys,
+        "reply_linkage":{"kind":if parent.is_some(){"explicit_reply"}else{"adjacent_turn"},
+            "actual_target_id":actual_target,"model_target_id":model_target,
+            "target_matches":actual_target.is_some() && actual_target==model_target},
+        "unseen_state":"unknown","incoming_message_ids":null,
+        "context_edit_state":{"state":if edited || !deleted_context_ids.is_empty(){"edited_after_target"}else{"unknown"},
+            "edited_message_ids":edited_context_ids,"deleted_message_ids":deleted_context_ids},
+        "coverage":{"state":if full_span_verified{"verified"}else if coverage_rows.is_empty(){"unverified"}else{"partial_evidence"},
+            "full_span_verified":full_span_verified,"ranges":coverage_rows,"limits":limit_rows},
+        "authorship":{"state":"unknown","session_id":receipt.as_ref().map(|r|&r.0),
+            "receipt_state":receipt.as_ref().map(|r|&r.1)},
+        "self_identity":{"state":"known","author_id":own},"author_count":authors,
+        "flags":flags,"versions":{"history":HISTORY_VERSION,"prompt":PROMPT_VERSION}});
+    if let Some(metadata) = target_content {
+        archive_linkage_unrecoverable |= metadata["linkage_unrecoverable"] == true;
+        archive_revision_unrecoverable |= metadata["revision"].as_i64().is_some_and(|v| v > 0);
+        row["targets"][0]["content_kind"] = metadata["content_kind"].clone();
+        row["targets"][0]["archive_source"] = metadata;
+    }
+    if external_content {
+        row["flags"]["external_content_likely"] = json!(true);
+    }
+    if archive_type_unverified {
+        row["flags"]["archive_type_unverified"] = json!(true);
+    }
+    if archive_deleted_context {
+        row["flags"]["archive_deleted_context_unrecoverable"] = json!(true);
+    }
+    if archive_revision_unrecoverable {
+        row["flags"]["archive_revision_unrecoverable"] = json!(true);
+    }
+    if archive_linkage_unrecoverable {
+        row["flags"]["archive_linkage_unrecoverable"] = json!(true);
+    }
+    let hash = Sha256::digest(row.to_string().as_bytes());
+    row["review_hash"] = json!(format!("{hash:x}"));
+    Ok(row)
+}
+
+fn history_candidates(connection: &Connection, input: &Value) -> CoreResult<Value> {
+    let scope = json!([input["platform"], input["account"], input["chat_id"]]);
+    let position = if let Some(cursor) = input["cursor"].as_str() {
+        let decoded = URL_SAFE_NO_PAD
+            .decode(cursor)
+            .map_err(|_| fail("invalid history cursor"))?;
+        let value: Value =
+            serde_json::from_slice(&decoded).map_err(|_| fail("invalid history cursor"))?;
+        if value["version"] != HISTORY_VERSION || value["scope"] != scope {
+            return Err(fail("history cursor scope or version changed"));
+        }
+        value["position"]
+            .as_array()
+            .cloned()
+            .ok_or_else(|| fail("invalid history cursor"))?
+    } else {
+        vec![json!(""), json!(""), json!(""), json!(-1.0), json!("")]
+    };
+    if position.len() != 5 {
+        return Err(fail("invalid history cursor"));
+    }
+    let (cp, ca, cc, ct, ci) = (
+        position[0]
+            .as_str()
+            .ok_or_else(|| fail("invalid history cursor"))?,
+        position[1]
+            .as_str()
+            .ok_or_else(|| fail("invalid history cursor"))?,
+        position[2]
+            .as_str()
+            .ok_or_else(|| fail("invalid history cursor"))?,
+        position[3]
+            .as_f64()
+            .ok_or_else(|| fail("invalid history cursor"))?,
+        position[4]
+            .as_str()
+            .ok_or_else(|| fail("invalid history cursor"))?,
+    );
+    let limit = input["limit"].as_u64().unwrap_or(10).clamp(1, 25) as usize;
+    let mut statement = connection.prepare(
+        "SELECT m.platform,m.account,m.chat_id,m.msg_id,m.ts,m.body,m.parent_msg_id,json_extract(a.evidence_json,'$.self_id') FROM messages m JOIN account_self a ON a.platform=m.platform AND a.account=m.account WHERE m.deleted_at IS NULL AND json_extract(a.evidence_json,'$.status')='known' AND m.author_id=json_extract(a.evidence_json,'$.self_id') AND (?1 IS NULL OR m.platform=?1) AND (?2 IS NULL OR m.account=?2) AND (?3 IS NULL OR m.chat_id=?3) AND (m.platform,m.account,m.chat_id,m.ts,m.msg_id)>(?4,?5,?6,?7,?8) AND EXISTS(SELECT 1 FROM messages x WHERE x.platform=m.platform AND x.account=m.account AND x.chat_id=m.chat_id AND x.deleted_at IS NULL AND x.ts<m.ts AND x.author_id IS NOT NULL AND x.author_id<>m.author_id) ORDER BY m.platform,m.account,m.chat_id,m.ts,m.msg_id LIMIT ?9"
+    ).map_err(sql)?;
+    let rows = statement
+        .query_map(
+            params![
+                input["platform"].as_str(),
+                input["account"].as_str(),
+                input["chat_id"].as_str(),
+                cp,
+                ca,
+                cc,
+                ct,
+                ci,
+                (limit + 1) as i64
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, f64>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                    r.get::<_, String>(7)?,
+                ))
+            },
+        )
+        .map_err(sql)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql)?;
+    let mut candidates = Vec::new();
+    let mut omitted = Vec::new();
+    let mut last = None;
+    let mut more = rows.len() > limit;
+    for (p, a, c, id, ts, body, parent, own) in rows.iter().take(limit) {
+        let candidate =
+            historical_candidate(connection, p, a, c, id, *ts, body, parent.as_deref(), own)?;
+        let next = json!([p, a, c, ts, id]);
+        let next_cursor = history_cursor(input, Some(&next));
+        let test = json!({"candidates":candidates.iter().chain(std::iter::once(&candidate)).collect::<Vec<_>>(),
+            "omitted":omitted,"next_cursor":next_cursor});
+        if test.to_string().len() > 48_000 {
+            if candidates.is_empty() {
+                let omission = json!({"id":candidate["id"],"reason":"candidate_too_large"});
+                let test = json!({"candidates":candidates,"omitted":omitted.iter().chain(std::iter::once(&omission)).collect::<Vec<_>>(),"next_cursor":next_cursor});
+                if test.to_string().len() <= 48_000 {
+                    omitted.push(omission);
+                    last = Some(next);
+                    continue;
+                }
+            }
+            more = true;
+            break;
+        }
+        candidates.push(candidate);
+        last = Some(next);
+    }
+    Ok(json!({"candidates":candidates,"omitted":omitted,
+        "next_cursor":if more {last.as_ref().map(|pos|history_cursor(input,Some(pos)))} else {None}}))
+}
+
+fn history_inventory(connection: &Connection, input: &Value) -> CoreResult<Value> {
+    let scope = json!([input["platform"], input["account"]]);
+    let offset = if let Some(cursor) = input["cursor"].as_str() {
+        let bytes = URL_SAFE_NO_PAD
+            .decode(cursor)
+            .map_err(|_| fail("invalid inventory cursor"))?;
+        let value: Value =
+            serde_json::from_slice(&bytes).map_err(|_| fail("invalid inventory cursor"))?;
+        if value["version"] != HISTORY_VERSION || value["scope"] != scope {
+            return Err(fail("inventory cursor scope or version changed"));
+        }
+        value["offset"]
+            .as_u64()
+            .ok_or_else(|| fail("invalid inventory cursor"))?
+    } else {
+        0
+    };
+    let page = input["limit"].as_u64().unwrap_or(100).clamp(1, 500);
+    let mut stmt=connection.prepare("SELECT c.platform,c.account,c.chat_id,count(m.msg_id),sum(CASE WHEN json_extract(a.evidence_json,'$.status')='known' AND m.author_id=json_extract(a.evidence_json,'$.self_id') THEN 1 ELSE 0 END),count(DISTINCT m.author_id),min(m.ts),max(m.ts),json_extract(a.evidence_json,'$.status'),sum(CASE WHEN m.parent_msg_id IS NOT NULL THEN 1 ELSE 0 END),(SELECT count(*) FROM sync_coverage sc WHERE sc.platform=c.platform AND sc.account=c.account AND sc.chat_id=c.chat_id),(SELECT count(*) FROM sync_limits sl WHERE sl.platform=c.platform AND sl.account=c.account AND sl.chat_id=c.chat_id AND sl.resolved_at IS NULL),(SELECT count(*) FROM messages d WHERE d.platform=c.platform AND d.account=c.account AND d.chat_id=c.chat_id AND d.deleted_at IS NOT NULL) FROM chats c LEFT JOIN messages m ON m.platform=c.platform AND m.account=c.account AND m.chat_id=c.chat_id AND m.deleted_at IS NULL LEFT JOIN account_self a ON a.platform=c.platform AND a.account=c.account WHERE (?1 IS NULL OR c.platform=?1) AND (?2 IS NULL OR c.account=?2) GROUP BY c.platform,c.account,c.chat_id ORDER BY c.platform,c.account,c.chat_id LIMIT ?3 OFFSET ?4").map_err(sql)?;
+    let mut rooms=stmt.query_map(params![input["platform"].as_str(),input["account"].as_str(),(page+1) as i64,offset as i64],|r|Ok(json!({
+        "chat":{"platform":r.get::<_,String>(0)?,"account":r.get::<_,String>(1)?,"chat_id":r.get::<_,String>(2)?},
+        "message_count":r.get::<_,i64>(3)?,"self_message_count":r.get::<_,Option<i64>>(4)?.unwrap_or(0),
+        "author_count":r.get::<_,i64>(5)?,"earliest_ts":r.get::<_,Option<f64>>(6)?,"latest_ts":r.get::<_,Option<f64>>(7)?,
+        "self_identity_state":r.get::<_,Option<String>>(8)?.unwrap_or_else(||"unknown".into()),
+        "reply_reference_count":r.get::<_,Option<i64>>(9)?.unwrap_or(0),
+        "coverage_range_count":r.get::<_,i64>(10)?,"active_limit_count":r.get::<_,i64>(11)?,
+        "deleted_count":r.get::<_,i64>(12)?
+    }))).map_err(sql)?.collect::<Result<Vec<_>,_>>().map_err(sql)?;
+    let available = rooms.len();
+    rooms.truncate(page as usize);
+    let mut bounded = Vec::new();
+    for mut room in rooms {
+        let p = room["chat"]["platform"].as_str().unwrap_or("");
+        let a = room["chat"]["account"].as_str().unwrap_or("");
+        let c = room["chat"]["chat_id"].as_str().unwrap_or("");
+        let mut intervals=connection.prepare("SELECT from_ts,to_ts,kind,mutations_verified_at FROM sync_coverage WHERE platform=? AND account=? AND chat_id=? ORDER BY from_ts,to_ts LIMIT 4").map_err(sql)?;
+        let coverage=intervals.query_map(params![p,a,c],|r|Ok(json!({"from_ts":r.get::<_,f64>(0)?,"to_ts":r.get::<_,f64>(1)?,"kind":r.get::<_,String>(2)?,"mutations_verified_at":r.get::<_,Option<f64>>(3)?}))).map_err(sql)?.collect::<Result<Vec<_>,_>>().map_err(sql)?;
+        let mut limit_stmt=connection.prepare("SELECT from_ts,to_ts,reason FROM sync_limits WHERE platform=? AND account=? AND chat_id=? AND resolved_at IS NULL ORDER BY from_ts,to_ts LIMIT 4").map_err(sql)?;
+        let limits=limit_stmt.query_map(params![p,a,c],|r|Ok(json!({"from_ts":r.get::<_,f64>(0)?,"to_ts":r.get::<_,f64>(1)?,"reason":r.get::<_,String>(2)?}))).map_err(sql)?.collect::<Result<Vec<_>,_>>().map_err(sql)?;
+        room["coverage_intervals"] = json!(coverage);
+        room["active_limits"] = json!(limits);
+        let mut trial = bounded.clone();
+        trial.push(room.clone());
+        let cursor = URL_SAFE_NO_PAD.encode(
+            json!({"version":HISTORY_VERSION,"scope":scope,"offset":offset+trial.len() as u64})
+                .to_string(),
+        );
+        if json!({"rooms":trial,"version":HISTORY_VERSION,"next_cursor":cursor})
+            .to_string()
+            .len()
+            > 48_000
+        {
+            if bounded.is_empty() {
+                return Err(fail("inventory room too large"));
+            }
+            break;
+        }
+        bounded.push(room);
+    }
+    let more = available > bounded.len();
+    let next = more.then(|| {
+        URL_SAFE_NO_PAD.encode(
+            json!({"version":HISTORY_VERSION,"scope":scope,"offset":offset+bounded.len() as u64})
+                .to_string(),
+        )
+    });
+    Ok(json!({"rooms":bounded,"version":HISTORY_VERSION,"next_cursor":next}))
+}
+
+// Owner-only candidate export. A successful send is an observation, not a
+// correctness label: the consumer must review linkage and external knowledge.
+fn training_candidates(connection: &Connection, input: &Value) -> CoreResult<Value> {
+    let limit = input["limit"].as_u64().unwrap_or(10).clamp(1, 25) as usize;
+    let after = input["after_event_id"].as_str().unwrap_or("");
+    let mut statement = connection.prepare(
+        "SELECT e.event_id,e.session_id,e.suggestion_id,e.created_at,e.payload_json,s.platform,s.account,s.chat_id,r.context_json,t.input_snapshot_json,t.suggested_text,\
+         EXISTS(SELECT 1 FROM response_trajectory i WHERE i.session_id=e.session_id AND i.event='first_input'),\
+         EXISTS(SELECT 1 FROM response_trajectory i WHERE i.session_id=e.session_id AND i.event='inserted'),\
+         EXISTS(SELECT 1 FROM response_trajectory i WHERE i.session_id=e.session_id AND i.event='shown'),s.source_json,s.send_outcome_json,os.outcome_json,\
+         (SELECT m.msg_id FROM messages m JOIN account_self a ON a.platform=m.platform AND a.account=m.account WHERE m.platform=s.platform AND m.account=s.account AND m.chat_id=s.chat_id AND m.deleted_at IS NULL AND json_extract(a.evidence_json,'$.status')='known' AND m.author_id=json_extract(a.evidence_json,'$.self_id') AND m.msg_id IN (json_extract(s.send_outcome_json,'$.message_id'),json_extract(s.send_outcome_json,'$.id'),json_extract(s.send_outcome_json,'$.receipt'),json_extract(os.outcome_json,'$.message_id'),json_extract(os.outcome_json,'$.id'),json_extract(os.outcome_json,'$.receipt')) ORDER BY m.ts DESC LIMIT 1) \
+         FROM response_trajectory e JOIN response_sessions s ON s.session_id=e.session_id \
+         LEFT JOIN reply_suggestions r ON r.suggestion_id=e.suggestion_id \
+         LEFT JOIN trajectory_runs t ON t.suggestion_id=e.suggestion_id \
+         LEFT JOIN owner_sends os ON os.request_id=s.send_request_id \
+         WHERE e.event='send_outcome' AND e.event_id>? ORDER BY e.event_id LIMIT ?"
+    ).map_err(sql)?;
+    let rows = statement.query_map(params![after, limit as i64 + 1], |r| {
+        let payload = decode(r.get::<_, Option<String>>(4)?);
+        let snapshot = decode(r.get::<_, Option<String>>(9)?);
+        let context = if snapshot["context"].is_array() { snapshot["context"].clone() }
+            else { decode(r.get::<_, Option<String>>(8)?) };
+        let p: String=r.get(5)?; let a: String=r.get(6)?; let c: String=r.get(7)?;
+        let source_json=decode(r.get::<_,Option<String>>(14)?);
+        let send_outcome=decode(r.get::<_,Option<String>>(15)?);
+        let receipt=decode(r.get::<_,Option<String>>(16)?);
+        let receipt_message_id:Option<String>=r.get(17)?;
+        let target_message_id=receipt_message_id.as_deref();
+        let target_ts=if let Some(target_id)=target_message_id {
+            connection.query_row("SELECT ts FROM messages WHERE platform=? AND account=? AND chat_id=? AND msg_id=? AND deleted_at IS NULL",params![p,a,c,target_id],|row|row.get::<_,f64>(0)).optional()?
+        } else {None};
+        let event_ts:f64=r.get(3)?;
+        let sent_keys:Vec<String>=target_message_id.map(|id|vec![message_key(&p,&a,&c,id)]).unwrap_or_default();
+        let mut source_keys:Vec<String>=context.as_array().into_iter().flatten()
+            .filter_map(|m|m["message_id"].as_str()).map(|id|message_key(&p,&a,&c,id)).collect();
+        source_keys.extend(sent_keys.iter().cloned());
+        Ok(json!({"id":r.get::<_,String>(0)?,"session_id":r.get::<_,String>(1)?,
+            "suggestion_id":r.get::<_,Option<String>>(2)?,"timestamp":target_ts.unwrap_or(event_ts),
+            "timestamp_source":if target_ts.is_some(){"target_message"}else{"send_event"},
+            "source":"session","chat":{"platform":p,"account":a,"chat_id":c},
+            "context":context,"model_input":snapshot["model_input"],
+            "suggested_text":r.get::<_,Option<String>>(10)?,"final_text":payload["final_text"],
+            "outcome":payload["state"],"send_state":payload["send_state"],
+            "first_input":r.get::<_,bool>(11)?,"inserted":r.get::<_,bool>(12)?,"shown":r.get::<_,bool>(13)?,
+            "source_json":source_json,"incoming_message_ids":source_json,
+            "unseen_state":if source_json.is_array(){"known"}else{"unknown"},
+            "target_message_id":target_message_id,"sent_message_keys":sent_keys,
+            "target_source_keys":sent_keys,"source_message_keys":source_keys,
+            "receipt":{"session_outcome":send_outcome,"owner_outcome":receipt,
+                "target_identity_state":if target_message_id.is_some(){"linked"}else{"unknown"}},
+            "authorship":{"state":"unknown","evidence":"session_send"},
+            "review_required":true}))
+    }).map_err(sql)?.collect::<Result<Vec<_>,_>>().map_err(sql)?;
+    let mut candidates = Vec::new();
+    let mut omitted = Vec::new();
+    let mut bytes = 0;
+    let mut last = None;
+    let mut more = rows.len() > limit;
+    for row in rows.iter().take(limit) {
+        let size = serde_json::to_vec(row)
+            .map_err(|_| fail("invalid training candidate"))?
+            .len();
+        if size > 48_000 {
+            omitted.push(json!({"id":row["id"],"reason":"candidate_too_large"}));
+            last = Some(row["id"].clone());
+            continue;
+        }
+        if bytes + size > 48_000 {
+            more = true;
+            break;
+        }
+        bytes += size;
+        last = Some(row["id"].clone());
+        candidates.push(row.clone());
+    }
+    Ok(json!({"candidates":candidates,"omitted":omitted,
+        "next_after_event_id":if more {last} else {None}}))
+}
+
 fn list_trajectories(connection: &Connection, input: &Value) -> CoreResult<Value> {
+    // Canonical historical exports are read-only. Retention is for recorded
+    // trajectories and must not scan/mutate their tables on each history page.
+    if input["history_candidates"] == true {
+        return history_candidates(connection, input);
+    }
+    if input["history_inventory"] == true {
+        return history_inventory(connection, input);
+    }
     let purged = apply_retention(connection)?;
+    if input["training_candidates"] == true {
+        return training_candidates(connection, input);
+    }
     let limit = input["limit"].as_u64().unwrap_or(10).clamp(1, 25) as i64;
     let suggestion_id = input["suggestion_id"].as_str();
     let status = input["status"].as_str();
@@ -1469,7 +1991,7 @@ mod tests {
 
     fn database() -> Connection {
         let connection = Connection::open_in_memory().unwrap();
-        connection.execute_batch("CREATE TABLE messages(platform TEXT NOT NULL,account TEXT NOT NULL,chat_id TEXT NOT NULL,msg_id TEXT NOT NULL,author_id TEXT,ts REAL NOT NULL,body TEXT,parent_msg_id TEXT,deleted_at REAL,PRIMARY KEY(platform,account,chat_id,msg_id));CREATE TABLE account_self(platform TEXT NOT NULL,account TEXT NOT NULL,evidence_json TEXT NOT NULL,observed_at REAL NOT NULL,PRIMARY KEY(platform,account));CREATE TABLE unread_evidence(platform TEXT NOT NULL,account TEXT NOT NULL,chat_id TEXT NOT NULL,evidence_json TEXT NOT NULL,observed_at REAL NOT NULL,PRIMARY KEY(platform,account,chat_id));CREATE TABLE chats(platform TEXT NOT NULL,account TEXT NOT NULL,chat_id TEXT NOT NULL,PRIMARY KEY(platform,account,chat_id));").unwrap();
+        connection.execute_batch("CREATE TABLE messages(platform TEXT NOT NULL,account TEXT NOT NULL,chat_id TEXT NOT NULL,msg_id TEXT NOT NULL,author_id TEXT,ts REAL NOT NULL,body TEXT,parent_msg_id TEXT,deleted_at REAL,PRIMARY KEY(platform,account,chat_id,msg_id));CREATE TABLE account_self(platform TEXT NOT NULL,account TEXT NOT NULL,evidence_json TEXT NOT NULL,observed_at REAL NOT NULL,PRIMARY KEY(platform,account));CREATE TABLE unread_evidence(platform TEXT NOT NULL,account TEXT NOT NULL,chat_id TEXT NOT NULL,evidence_json TEXT NOT NULL,observed_at REAL NOT NULL,PRIMARY KEY(platform,account,chat_id));CREATE TABLE chats(platform TEXT NOT NULL,account TEXT NOT NULL,chat_id TEXT NOT NULL,PRIMARY KEY(platform,account,chat_id));CREATE TABLE sync_coverage(platform TEXT,account TEXT,chat_id TEXT,from_ts REAL,to_ts REAL,kind TEXT,collected_at REAL,mutations_verified_at REAL);CREATE TABLE sync_limits(platform TEXT,account TEXT,chat_id TEXT,from_ts REAL,to_ts REAL,reason TEXT,resolved_at REAL);").unwrap();
         connection
             .execute_batch(inboxd_core::RESPONSE_SCHEMA)
             .unwrap();
@@ -1492,6 +2014,530 @@ mod tests {
     }
     fn scope() -> Value {
         json!({"platform":"p","account":"a","chat_id":"c"})
+    }
+
+    #[test]
+    fn historical_snapshot_matches_live_at_boundary_and_excludes_future_references() {
+        let connection = database();
+        connection
+            .execute(
+                "INSERT INTO messages VALUES('p','a','c','old','other',1,'old',NULL,NULL)",
+                [],
+            )
+            .unwrap();
+        connection.execute("INSERT INTO messages VALUES('p','a','c','incoming','other',2,'question','future',NULL)",[]).unwrap();
+        let live = prepare(&connection, &scope()).unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages VALUES('p','a','c','answer','me',3,'answer','incoming',NULL)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages VALUES('p','a','c','future','other',4,'future',NULL,NULL)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute_batch("ALTER TABLE messages ADD COLUMN edited_at REAL")
+            .unwrap();
+        let history = history_candidates(&connection, &json!({"history_candidates":true})).unwrap();
+        let candidate = &history["candidates"][0];
+        let expected = live["context"].as_array().unwrap();
+        let actual = candidate["context"].as_array().unwrap();
+        assert_eq!(expected.len(), actual.len());
+        assert_eq!(actual[1]["message_id"], "incoming");
+        assert_eq!(actual[1]["reply_to"], Value::Null);
+        assert!(
+            actual
+                .iter()
+                .all(|row| row["message_id"] != "answer" && row["message_id"] != "future")
+        );
+        assert_eq!(candidate["reply_linkage"]["actual_target_id"], "incoming");
+        assert_eq!(candidate["reply_linkage"]["model_target_id"], "incoming");
+    }
+
+    #[test]
+    fn historical_and_live_snapshots_are_identical_for_the_same_observed_prefix() {
+        let connection = database();
+        for i in 0..42 {
+            connection
+                .execute(
+                    "INSERT INTO messages VALUES('p','a','c',?,'other',?,'text',NULL,NULL)",
+                    params![format!("m{i:02}"), i as f64],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "UPDATE messages SET parent_msg_id='m00' WHERE msg_id='m41'",
+                [],
+            )
+            .unwrap();
+        let live = prepare(&connection, &scope()).unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages VALUES('p','a','c','answer','me',42,'yes','m41',NULL)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute_batch("ALTER TABLE messages ADD COLUMN edited_at REAL")
+            .unwrap();
+        let history = history_candidates(&connection, &json!({"limit":1})).unwrap();
+        assert_eq!(history["candidates"][0]["context"], live["context"]);
+    }
+
+    #[test]
+    fn history_routes_preserve_exact_pages_without_retention_mutations() {
+        let connection = database();
+        message(&connection, "incoming", 1.0);
+        generating_suggestion(&connection, "expired", now().unwrap());
+        finish(&connection, &generation_payload("expired")).unwrap();
+        connection.execute_batch("UPDATE reply_suggestions SET created_at=0;UPDATE trajectory_runs SET created_at=0,completed_at=0;UPDATE response_trajectory SET created_at=0;ALTER TABLE messages ADD COLUMN edited_at REAL").unwrap();
+        for i in 0..4 {
+            connection.execute("INSERT INTO messages VALUES('p','a','c',?,'me',?,'answer','incoming',NULL,NULL)",params![format!("answer{i}"),(i+2) as f64]).unwrap();
+        }
+        let before = connection.total_changes();
+        let mut query = json!({"history_candidates":true,"limit":1});
+        let mut ids = Vec::new();
+        loop {
+            let expected = history_candidates(&connection, &query).unwrap();
+            let actual = list_trajectories(&connection, &query).unwrap();
+            // Whole wire value equality includes candidate review hashes,
+            // ordering, omissions and cursor scope/position.
+            assert_eq!(actual, expected);
+            assert!(actual.to_string().len() <= 48_000);
+            ids.extend(
+                actual["candidates"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r["targets"][0]["message_id"].as_str().unwrap().to_owned()),
+            );
+            if actual["next_cursor"].is_null() {
+                break;
+            }
+            query["cursor"] = actual["next_cursor"].clone();
+        }
+        assert_eq!(ids, vec!["answer0", "answer1", "answer2", "answer3"]);
+        let query = json!({"history_inventory":true,"limit":1});
+        assert_eq!(
+            list_trajectories(&connection, &query).unwrap(),
+            history_inventory(&connection, &query).unwrap()
+        );
+        assert_eq!(connection.total_changes(), before);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM reply_suggestions WHERE suggestion_id='expired'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        let ordinary = list_trajectories(&connection, &json!({})).unwrap();
+        assert!(ordinary["purged"].as_u64().unwrap() > 0);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM reply_suggestions WHERE suggestion_id='expired'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM trajectory_runs WHERE suggestion_id='expired'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            5
+        );
+    }
+
+    #[test]
+    fn context_range_seek_matches_optional_predicate_for_live_history_and_ties() {
+        let connection = database();
+        for i in 0..60 {
+            message(&connection, &format!("m{i:02}"), (i / 2) as f64);
+        }
+        connection
+            .execute(
+                "UPDATE messages SET parent_msg_id='m00' WHERE msg_id='m59'",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE messages SET deleted_at=100,body=NULL WHERE msg_id='m10'",
+                [],
+            )
+            .unwrap();
+        for boundary in [None, Some(0.0), Some(5.0), Some(25.0), Some(30.0)] {
+            let mut stmt=connection.prepare("SELECT msg_id,author_id,ts,body,parent_msg_id FROM messages WHERE platform=? AND account=? AND chat_id=? AND deleted_at IS NULL AND (?4 IS NULL OR ts<?4) ORDER BY ts DESC,msg_id DESC LIMIT 40").unwrap();
+            let mut expected = stmt
+                .query_map(params!["p", "a", "c", boundary], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, f64>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            expected.reverse();
+            let (actual, _) =
+                context_snapshot(&connection, "p", "a", "c", boundary, Some("me")).unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn historical_edit_state_only_checks_selected_context() {
+        let connection = database();
+        for i in 0..45 {
+            connection
+                .execute(
+                    "INSERT INTO messages VALUES('p','a','c',?,'other',?,'text',NULL,NULL)",
+                    params![format!("m{i:02}"), i as f64],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO messages VALUES('p','a','c','answer','me',45,'yes','m44',NULL)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute_batch("ALTER TABLE messages ADD COLUMN edited_at REAL")
+            .unwrap();
+        connection
+            .execute("UPDATE messages SET edited_at=46 WHERE msg_id='m00'", [])
+            .unwrap();
+        let first = history_candidates(&connection, &json!({"limit":1})).unwrap();
+        assert_eq!(
+            first["candidates"][0]["context_edit_state"]["state"],
+            "unknown"
+        );
+        assert!(
+            first["candidates"][0]["context_edit_state"]["edited_message_ids"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        connection
+            .execute("UPDATE messages SET edited_at=46 WHERE msg_id='m44'", [])
+            .unwrap();
+        let second = history_candidates(&connection, &json!({"limit":1})).unwrap();
+        assert_eq!(
+            second["candidates"][0]["context_edit_state"]["state"],
+            "edited_after_target"
+        );
+        assert_eq!(
+            second["candidates"][0]["context_edit_state"]["edited_message_ids"],
+            json!(["m44"])
+        );
+        assert_ne!(
+            first["candidates"][0]["review_hash"],
+            second["candidates"][0]["review_hash"]
+        );
+        connection
+            .execute(
+                "INSERT INTO sync_coverage VALUES('p','a','c',10,20,'backfill',50,50)",
+                [],
+            )
+            .unwrap();
+        let partial = history_candidates(&connection, &json!({"limit":1})).unwrap();
+        assert_eq!(
+            partial["candidates"][0]["coverage"]["state"],
+            "partial_evidence"
+        );
+        assert_eq!(
+            partial["candidates"][0]["coverage"]["ranges"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        connection
+            .execute(
+                "INSERT INTO sync_coverage VALUES('p','a','c',0,46,'backfill',50,50)",
+                [],
+            )
+            .unwrap();
+        let verified = history_candidates(&connection, &json!({"limit":1})).unwrap();
+        assert_eq!(verified["candidates"][0]["coverage"]["state"], "verified");
+        connection
+            .execute(
+                "INSERT INTO sync_limits VALUES('p','a','c',40,46,'retention',NULL)",
+                [],
+            )
+            .unwrap();
+        let limited = history_candidates(&connection, &json!({"limit":1})).unwrap();
+        assert_eq!(
+            limited["candidates"][0]["coverage"]["state"],
+            "partial_evidence"
+        );
+        connection
+            .execute("UPDATE messages SET edited_at=47 WHERE msg_id='answer'", [])
+            .unwrap();
+        let changed_target = history_candidates(&connection, &json!({"limit":1})).unwrap();
+        assert_eq!(
+            changed_target["candidates"][0]["targets"][0]["edit_state"]["state"],
+            "edited_after_target"
+        );
+        assert_eq!(
+            changed_target["candidates"][0]["flags"]["target_edited_after_send"],
+            true
+        );
+        connection.execute("DELETE FROM sync_limits", []).unwrap();
+        connection
+            .execute(
+                "UPDATE messages SET body=NULL,deleted_at=46 WHERE msg_id='m00'",
+                [],
+            )
+            .unwrap();
+        let unrelated_delete = history_candidates(&connection, &json!({"limit":1})).unwrap();
+        assert_eq!(
+            unrelated_delete["candidates"][0]["flags"]["context_deleted_after_target"],
+            false
+        );
+        assert_eq!(
+            unrelated_delete["candidates"][0]["coverage"]["full_span_verified"],
+            true
+        );
+        connection
+            .execute(
+                "UPDATE messages SET body=NULL,deleted_at=46 WHERE msg_id='m20'",
+                [],
+            )
+            .unwrap();
+        let deleted_context = history_candidates(&connection, &json!({"limit":1})).unwrap();
+        assert_eq!(
+            deleted_context["candidates"][0]["flags"]["context_deleted_after_target"],
+            true
+        );
+        assert_eq!(
+            deleted_context["candidates"][0]["context_edit_state"]["deleted_message_ids"],
+            json!(["m20"])
+        );
+        assert_eq!(
+            deleted_context["candidates"][0]["coverage"]["full_span_verified"],
+            false
+        );
+    }
+
+    #[test]
+    fn deletion_after_answer_is_found_even_before_surviving_window_start() {
+        let connection = database();
+        message(&connection, "m0", 1.0);
+        message(&connection, "m1", 2.0);
+        connection
+            .execute(
+                "INSERT INTO messages VALUES('p','a','c','answer','me',3,'yes','m1',NULL)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute_batch("ALTER TABLE messages ADD COLUMN edited_at REAL")
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE messages SET body=NULL,deleted_at=4 WHERE msg_id='m0'",
+                [],
+            )
+            .unwrap();
+        let candidate = history_candidates(&connection, &json!({"limit":1})).unwrap();
+        assert_eq!(
+            candidate["candidates"][0]["context_edit_state"]["deleted_message_ids"],
+            json!(["m0"])
+        );
+        assert_eq!(
+            candidate["candidates"][0]["context_edit_state"]["state"],
+            "edited_after_target"
+        );
+
+        let ancestor = database();
+        for i in 0..42 {
+            ancestor
+                .execute(
+                    "INSERT INTO messages VALUES('p','a','c',?,'other',?,'text',NULL,NULL)",
+                    params![format!("a{i:02}"), i as f64],
+                )
+                .unwrap();
+        }
+        ancestor
+            .execute(
+                "UPDATE messages SET parent_msg_id='a00' WHERE msg_id='a41'",
+                [],
+            )
+            .unwrap();
+        ancestor
+            .execute(
+                "INSERT INTO messages VALUES('p','a','c','answer','me',42,'yes','a41',NULL)",
+                [],
+            )
+            .unwrap();
+        ancestor
+            .execute_batch("ALTER TABLE messages ADD COLUMN edited_at REAL")
+            .unwrap();
+        ancestor
+            .execute(
+                "UPDATE messages SET body=NULL,deleted_at=43 WHERE msg_id='a00'",
+                [],
+            )
+            .unwrap();
+        let candidate = history_candidates(&ancestor, &json!({"limit":1})).unwrap();
+        assert_eq!(
+            candidate["candidates"][0]["context_edit_state"]["deleted_message_ids"],
+            json!(["a00"])
+        );
+    }
+
+    #[test]
+    fn history_ties_deleted_records_and_cursor_scope_are_conservative() {
+        let connection = database();
+        message(&connection, "first", 1.0);
+        connection
+            .execute(
+                "INSERT INTO messages VALUES('p','a','c','same','other',2,'same',NULL,NULL)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages VALUES('p','a','c','a1','me',2,'reply','first',NULL)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages VALUES('p','a','c','gone','other',1.5,NULL,NULL,3)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages VALUES('p','a','c','a2','me',3,'reply 2','same',NULL)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute_batch("ALTER TABLE messages ADD COLUMN edited_at REAL")
+            .unwrap();
+        connection
+            .execute("UPDATE messages SET edited_at=4 WHERE msg_id='first'", [])
+            .unwrap();
+        let first = history_candidates(&connection, &json!({"limit":1})).unwrap();
+        assert_eq!(first["candidates"][0]["targets"][0]["message_id"], "a1");
+        assert_eq!(first["candidates"][0]["flags"]["tied_timestamp"], true);
+        assert_eq!(
+            first["candidates"][0]["context_edit_state"]["state"],
+            "edited_after_target"
+        );
+        assert!(
+            first["candidates"][0]["context"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|m| m["message_id"] != "same" && m["message_id"] != "gone")
+        );
+        let cursor = &first["next_cursor"];
+        let second = history_candidates(&connection, &json!({"limit":1,"cursor":cursor})).unwrap();
+        assert_eq!(second["candidates"][0]["targets"][0]["message_id"], "a2");
+        assert!(
+            history_candidates(&connection, &json!({"cursor":cursor,"platform":"other"})).is_err()
+        );
+    }
+
+    #[test]
+    fn history_oversized_candidate_advances_and_inventory_pages() {
+        let connection = database();
+        message(&connection, "in", 1.0);
+        connection
+            .execute(
+                "INSERT INTO messages VALUES('p','a','c','large','me',2,?,'in',NULL)",
+                params!["x".repeat(50_000)],
+            )
+            .unwrap();
+        connection
+            .execute("INSERT INTO chats VALUES('p','a','d')", [])
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages VALUES('p','a','d','other','other',1,'hello',NULL,NULL)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages VALUES('p','a','d','small','me',3,'ok','other',NULL)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute_batch("ALTER TABLE messages ADD COLUMN edited_at REAL")
+            .unwrap();
+        let first = history_candidates(&connection, &json!({"limit":1})).unwrap();
+        assert_eq!(first["omitted"][0]["reason"], "candidate_too_large");
+        assert!(first.to_string().len() <= 48_000);
+        let second = history_candidates(
+            &connection,
+            &json!({"limit":1,"cursor":first["next_cursor"]}),
+        )
+        .unwrap();
+        assert_eq!(second["candidates"][0]["targets"][0]["message_id"], "small");
+        connection
+            .execute(
+                "INSERT INTO sync_coverage VALUES('p','a','c',0,5,'backfill',5,6)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO sync_limits VALUES('p','a','c',0,1,'retention',NULL)",
+                [],
+            )
+            .unwrap();
+        let inventory = history_inventory(&connection, &json!({"limit":1})).unwrap();
+        assert_eq!(inventory["rooms"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            inventory["rooms"][0]["coverage_intervals"][0]["kind"],
+            "backfill"
+        );
+        assert_eq!(
+            inventory["rooms"][0]["active_limits"][0]["reason"],
+            "retention"
+        );
+        assert!(inventory.to_string().len() <= 48_000);
+        assert!(inventory["next_cursor"].is_string());
+        let next = history_inventory(
+            &connection,
+            &json!({"limit":1,"cursor":inventory["next_cursor"]}),
+        )
+        .unwrap();
+        assert_eq!(next["rooms"].as_array().unwrap().len(), 1);
+        connection.execute("UPDATE account_self SET evidence_json='{\"status\":\"unknown\",\"self_id\":\"me\"}' WHERE platform='p' AND account='a'",[]).unwrap();
+        let uncertain = history_inventory(&connection, &json!({"limit":1})).unwrap();
+        assert_eq!(uncertain["rooms"][0]["self_identity_state"], "unknown");
+        assert_eq!(uncertain["rooms"][0]["self_message_count"], 0);
     }
 
     fn provider_read(connection: &Connection, cursor: &str, count: u64) {
@@ -2014,6 +3060,27 @@ mod tests {
     }
 
     #[test]
+    fn prior_prompt_version_cannot_reuse_ready_recommendation() {
+        let connection = database();
+        message(&connection, "10", 1.0);
+        provider_read(&connection, "0", 1);
+        let first = open(&connection, &json!({"chat":scope()})).unwrap();
+        let id = first["suggestion"]["id"].as_str().unwrap();
+        connection.execute("UPDATE reply_suggestions SET status='ready',text='old reply',prompt_version='reply-v3' WHERE suggestion_id=?", [id]).unwrap();
+        let reopened = open(&connection, &json!({"chat":scope()})).unwrap();
+        assert_eq!(reopened["status"], "queued");
+        assert_ne!(reopened["suggestion"]["id"], id);
+        let version: String = connection
+            .query_row(
+                "SELECT prompt_version FROM reply_suggestions WHERE suggestion_id=?",
+                [reopened["suggestion"]["id"].as_str().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "reply-v4");
+    }
+
+    #[test]
     fn retained_recommendation_is_not_reused_after_context_or_runtime_changes() {
         for change in ["message", "edit", "runtime"] {
             let connection = database();
@@ -2185,7 +3252,7 @@ mod tests {
     }
 
     fn generating_suggestion(connection: &Connection, id: &str, created_at: f64) {
-        connection.execute("INSERT INTO reply_suggestions(suggestion_id,platform,account,chat_id,context_version,source_json,context_json,status,prompt_version,created_at) VALUES(?,'p','a','c',?,'[\"m1\"]','[{\"message_id\":\"m1\"}]','generating','reply-v2',?)",params![id,id,created_at]).unwrap();
+        connection.execute("INSERT INTO reply_suggestions(suggestion_id,platform,account,chat_id,context_version,source_json,context_json,status,prompt_version,created_at) VALUES(?,'p','a','c',?,'[\"m1\"]','[{\"message_id\":\"m1\"}]','generating',?,?)",params![id,id,PROMPT_VERSION,created_at]).unwrap();
     }
 
     fn generation_payload(id: &str) -> Value {
@@ -2195,7 +3262,7 @@ mod tests {
             "status":"ready",
             "text":"답변",
             "model_version":"local-test",
-            "prompt_version":"reply-v2",
+            "prompt_version":PROMPT_VERSION,
             "personal_adapter_version":"adapter-v1",
             "model_input":[{"role":"user","content":"정확한 입력"}],
             "check_input":{"candidate":"답변"},
@@ -2397,7 +3464,7 @@ mod tests {
             "status":"failed",
             "text":null,
             "error":"invalid_policy_output",
-            "prompt_version":"reply-v2",
+            "prompt_version":PROMPT_VERSION,
             "model_version":"local-test",
             "state":{"intent":"unknown","confidence":0.1},
             "model_input":[{"role":"system","content":"system"},{"role":"user","content":"input"}],
@@ -2435,6 +3502,8 @@ mod tests {
     #[test]
     fn send_completion_closes_session_and_records_idempotent_outcome() {
         let connection = database();
+        message(&connection, "m1", 1.0);
+        connection.execute("INSERT INTO messages VALUES('p','a','c','sent-1','me',2,'사용자가 실제로 보낸 답변','m1',NULL)",[]).unwrap();
         generating_suggestion(&connection, "sent-suggestion", now().unwrap());
         connection
             .execute(
@@ -2444,7 +3513,12 @@ mod tests {
             .unwrap();
         connection.execute("INSERT INTO response_sessions(session_id,platform,account,chat_id,incoming_version,source_json,suggestion_id,state,created_at) VALUES('session-1','p','a','c','context-v','[\"m1\"]','sent-suggestion','open',1)",[]).unwrap();
         connection.execute("INSERT INTO owner_sends(request_id,platform,account,chat_id,body,envelope_json,state,outcome_json) VALUES('request-1','p','a','c','사용자가 실제로 보낸 답변','{}','Verified','{}')",[]).unwrap();
-        let input = json!({"response_session_id":"session-1","platform":"p","account":"a","chat_id":"c","request_id":"request-1","outcome":{"state":"Verified","provider_id":"provider-1"}});
+        feedback(
+            &connection,
+            &json!({"response_session_id":"session-1","event_id":"typing-1","event":"first_input"}),
+        )
+        .unwrap();
+        let input = json!({"response_session_id":"session-1","platform":"p","account":"a","chat_id":"c","request_id":"request-1","outcome":{"state":"Verified","receipt":"sent-1"}});
         let completed = complete_send(&connection, &input).unwrap();
         assert_eq!(completed["status"], "sent");
         assert_eq!(completed["send_outcome"]["state"], "Verified");
@@ -2468,6 +3542,52 @@ mod tests {
         assert_eq!(payload["final_text"], "사용자가 실제로 보낸 답변");
         assert_eq!(payload["send_state"], "Verified");
         assert_eq!(payload["review_required"], true);
+        let exported =
+            list_trajectories(&connection, &json!({"training_candidates":true,"limit":1})).unwrap();
+        let candidate = &exported["candidates"][0];
+        assert_eq!(candidate["final_text"], "사용자가 실제로 보낸 답변");
+        assert_eq!(candidate["send_state"], "Verified");
+        assert_eq!(candidate["first_input"], true);
+        assert_eq!(candidate["inserted"], false);
+        assert_eq!(candidate["review_required"], true);
+        assert!(candidate["context"].is_array());
+        assert_eq!(candidate["source_json"], json!(["m1"]));
+        assert_eq!(candidate["incoming_message_ids"], json!(["m1"]));
+        assert_eq!(candidate["unseen_state"], "known");
+        assert_eq!(candidate["target_message_id"], "sent-1");
+        assert_eq!(candidate["timestamp"], 2.0);
+        assert_eq!(candidate["timestamp_source"], "target_message");
+        assert_eq!(
+            candidate["sent_message_keys"],
+            json!([message_key("p", "a", "c", "sent-1")])
+        );
+        connection
+            .execute_batch("ALTER TABLE messages ADD COLUMN edited_at REAL")
+            .unwrap();
+        let historical = history_candidates(&connection, &json!({"limit":1})).unwrap();
+        assert_eq!(
+            historical["candidates"][0]["authorship"]["session_id"],
+            "session-1"
+        );
+        connection.execute("INSERT INTO response_trajectory(event_id,session_id,suggestion_id,event,payload_json,created_at) SELECT 'send:request-2',session_id,suggestion_id,event,payload_json,created_at FROM response_trajectory WHERE event_id='send:request-1'",[]).unwrap();
+        let first = training_candidates(&connection, &json!({"limit":1})).unwrap();
+        assert_eq!(first["next_after_event_id"], "send:request-1");
+        let second = training_candidates(
+            &connection,
+            &json!({"limit":1,"after_event_id":first["next_after_event_id"]}),
+        )
+        .unwrap();
+        assert_eq!(second["candidates"][0]["id"], "send:request-2");
+        assert!(second["next_after_event_id"].is_null());
+        connection.execute("UPDATE response_sessions SET send_outcome_json='{\"state\":\"Verified\",\"receipt\":\"opaque-receipt\"}' WHERE session_id='session-1'",[]).unwrap();
+        let opaque = training_candidates(&connection, &json!({"limit":1})).unwrap();
+        assert!(opaque["candidates"][0]["target_message_id"].is_null());
+        assert!(
+            opaque["candidates"][0]["sent_message_keys"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     fn kakao_sync_database() -> Connection {

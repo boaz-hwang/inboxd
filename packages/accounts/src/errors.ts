@@ -6,6 +6,7 @@ export const KAKAO_AUTH_EXPIRED = "KakaoTalk 인증이 만료되었습니다. in
 
 /** Only known error codes cross IPC; provider messages may contain secrets. */
 export function accountErrorMessage(error: unknown): string {
+  if (error !== null && typeof error === "object" && "code" in error && (error.code === "rate_limit" || error.code === 429)) return "provider_rate_limit";
   if (error !== null && typeof error === "object" && "code" in error && error.code === "invalid_access_token") return KAKAO_AUTH_EXPIRED;
   if (error !== null && typeof error === "object" && "code" in error) {
     if (error.code === "slack_auth_required") return SLACK_AUTH_EXPIRED;

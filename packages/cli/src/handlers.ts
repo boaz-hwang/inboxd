@@ -66,6 +66,8 @@ export interface CliHandlers {
   daemonStart(): Promise<JsonObject>;
   daemonStatus(): Promise<JsonObject>;
   chatList(): Promise<JsonObject>;
+  accountList(input: JsonObject): Promise<JsonObject>;
+  accountMessages(input: JsonObject): Promise<JsonObject>;
   inbox(chat: ChatKey): Promise<JsonObject>;
   recent(input: RecentMessagesParams): Promise<JsonObject>;
   evidence(input: RecentMessagesParams): Promise<JsonObject>;
@@ -125,6 +127,8 @@ export function createCliHandlers(options: CliHandlerOptions): CliHandlers {
     },
     daemonStatus: () => call("system.status", {}),
     chatList: () => call("chat.list", {}),
+    accountList: (input) => call("account.list", input),
+    accountMessages: (input) => call("account.messages", input),
     inbox: (chat) => call("message.inbox", { chat }),
     recent: (input) => call("message.recent", { ...input }),
     evidence: (input) => call("message.evidence", { ...input }),

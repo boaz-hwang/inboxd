@@ -121,6 +121,9 @@ protect against a process with the same user's unrestricted shell, file, or Keyc
 - [Roadmap and remaining live gates](docs/04-roadmap.md)
 - [Architecture](docs/06-architecture.md)
 - [Evidence and limitations](docs/07-evidence-ledger.md)
+- [Historical reply training data and pipeline design](docs/27-historical-reply-training-plan.md)
+- [Granite inference evaluation](docs/29-granite-reply-model-evaluation.md)
+- [Granite full-pool review and training](docs/30-granite-fullpool-training.md)
 
 ## License
 

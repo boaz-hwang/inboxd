@@ -35,7 +35,7 @@ fn data(response: &Value, method: &str) -> Result<Value, String> {
             "users.list" | "conversations.members" => value["members"].is_array(),
             "users.info" => value["user"].is_object(),
             "conversations.list" => value["channels"].is_array(),
-            "conversations.history" => value["messages"].is_array(),
+            "conversations.history" | "conversations.replies" => value["messages"].is_array(),
             "search.messages" => value["messages"]["matches"].is_array(),
             "chat.postMessage" => value["ts"].as_str().is_some_and(|s| !s.is_empty()),
             _ => true,
@@ -403,6 +403,77 @@ impl SlackBackend {
                     json!({"messages":self.messages(items(&result["messages"]["matches"]),"",io).await?,"next_cursor":if more{Some((page+1).to_string())}else{None},"complete":!more}),
                 )
             }
+            "history" => {
+                let mut state = if let Some(cursor) =
+                    req["cursor"].as_str().filter(|s| !s.is_empty())
+                {
+                    serde_json::from_str::<Value>(cursor)
+                        .map_err(|_| "invalid Slack history continuation")?
+                } else {
+                    json!({"channel_cursor":"", "channel_terminal":false, "threads":[], "thread_cursor":""})
+                };
+                let threads = state["threads"]
+                    .as_array()
+                    .ok_or("invalid Slack thread queue")?
+                    .clone();
+                let thread = threads.first().and_then(Value::as_str);
+                let method = if thread.is_some() {
+                    "conversations.replies"
+                } else {
+                    "conversations.history"
+                };
+                let mut params = json!({"channel":chat,"limit":100});
+                let cursor = if thread.is_some() {
+                    &state["thread_cursor"]
+                } else {
+                    &state["channel_cursor"]
+                };
+                if cursor.as_str().is_some_and(|s| !s.is_empty()) {
+                    params["cursor"] = cursor.clone();
+                }
+                if let Some(thread) = thread {
+                    params["ts"] = json!(thread);
+                }
+                let page = call(io, method, params).await?;
+                let rows = page["messages"]
+                    .as_array()
+                    .ok_or("invalid Slack history page")?
+                    .clone();
+                let next = string(&page["response_metadata"]["next_cursor"]);
+                if page["has_more"] == true && next.is_empty() {
+                    return Err("Slack history cursor missing".into());
+                }
+                let mut messages = self.messages(rows.clone(), chat, io).await?;
+                for (message, row) in messages.iter_mut().zip(&rows) {
+                    if let Some(parent) = row["thread_ts"]
+                        .as_str()
+                        .filter(|p| *p != string(&row["ts"]))
+                    {
+                        message["parent_id"] = json!(parent);
+                    }
+                }
+                if thread.is_some() {
+                    state["thread_cursor"] = json!(next);
+                    if next.is_empty() {
+                        state["threads"] = json!(&threads[1..]);
+                    }
+                } else {
+                    state["channel_cursor"] = json!(next);
+                    state["channel_terminal"] = json!(page["has_more"] != true && next.is_empty());
+                    state["threads"] = json!(
+                        rows.iter()
+                            .filter(|m| m["reply_count"].as_u64().unwrap_or(0) > 0)
+                            .map(|m| m["ts"].clone())
+                            .collect::<Vec<_>>()
+                    );
+                    state["thread_cursor"] = json!("");
+                }
+                let terminal = state["channel_terminal"] == true
+                    && state["threads"].as_array().is_some_and(Vec::is_empty);
+                Ok(
+                    json!({"messages":messages,"complete":terminal,"next_cursor":if terminal {Value::Null} else {json!(state.to_string())}}),
+                )
+            }
             "messages" => {
                 let mut params = json!({"channel":chat,"limit":30});
                 if req["cursor"].as_str().is_some_and(|s| !s.is_empty()) {
@@ -428,6 +499,64 @@ impl SlackBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn history_drains_all_thread_pages_before_next_channel_page() {
+        struct HistoryIo {
+            calls: Vec<Value>,
+        }
+        impl ProviderIo for HistoryIo {
+            async fn call(&mut self, r: Value) -> Result<Value, String> {
+                self.calls.push(r.clone());
+                let page = match string(&r["op"]) {
+                    "slack.conversations.history" if r["params"]["cursor"].is_null() => {
+                        json!({"messages":[{"ts":"2","user":"u","text":"root","reply_count":2}],"has_more":true,"response_metadata":{"next_cursor":"older"}})
+                    }
+                    "slack.conversations.history" => {
+                        assert_eq!(r["params"]["cursor"], "older");
+                        json!({"messages":[{"ts":"1","user":"u","text":"old"}],"has_more":false})
+                    }
+                    "slack.conversations.replies" if r["params"]["cursor"].is_null() => {
+                        json!({"messages":[{"ts":"2","user":"u","text":"root"},{"ts":"3","user":"u","text":"reply","thread_ts":"2"}],"has_more":true,"response_metadata":{"next_cursor":"thread-next"}})
+                    }
+                    "slack.conversations.replies" => {
+                        json!({"messages":[{"ts":"4","user":"u","text":"reply2","thread_ts":"2"}],"has_more":false})
+                    }
+                    _ => panic!("unexpected primitive"),
+                };
+                Ok(json!({"data":page}))
+            }
+        }
+        let mut b = SlackBackend::default();
+        b.names_epoch = Some(Instant::now());
+        b.names.insert("u".into(), "User".into());
+        let mut io = HistoryIo { calls: vec![] };
+        let mut cursor = Value::Null;
+        let mut ids = vec![];
+        loop {
+            let page = b
+                .run(
+                    &json!({"op":"history","chat_id":"r","cursor":cursor}),
+                    &mut io,
+                )
+                .await
+                .unwrap();
+            for m in page["messages"].as_array().unwrap() {
+                if m["id"] == "3" || m["id"] == "4" {
+                    assert_eq!(m["parent_id"], "2");
+                }
+                ids.push(m["id"].clone());
+            }
+            if page["complete"] == true {
+                break;
+            }
+            cursor = page["next_cursor"].clone();
+        }
+        assert_eq!(
+            ids,
+            json!(["2", "2", "3", "4", "1"]).as_array().unwrap().clone()
+        );
+        assert_eq!(io.calls.len(), 4);
+    }
     #[derive(Default)]
     struct Mock {
         calls: Vec<Value>,

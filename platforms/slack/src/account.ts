@@ -7,7 +7,7 @@ import type { AccountAdapter } from "../../../packages/accounts/src/contracts.ts
 // One provider operation per request. All traversal and cache policy lives in Rust.
 const methods = new Set([
   "users.list", "users.info", "client.counts", "conversations.list",
-  "conversations.members", "conversations.history", "chat.postMessage", "search.messages",
+  "conversations.members", "conversations.history", "conversations.replies", "chat.postMessage", "search.messages",
 ]);
 export function createSlackAccount(config: {
   bot_token: string;
@@ -43,7 +43,7 @@ export function createSlackAccount(config: {
       ),
     });
     if (response.status === 429)
-      throw new Error("Slack 요청 제한 — 잠시 후 다시 시도하세요");
+      throw Object.assign(new Error("Slack 요청 제한 — 잠시 후 다시 시도하세요"), { code: "rate_limit" });
     if (!response.body) throw new Error("Slack 응답 없음");
     const text = await readBounded(response.body, 4_000_000);
     const result = JSON.parse(text);

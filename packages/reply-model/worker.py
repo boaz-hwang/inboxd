@@ -17,7 +17,7 @@ os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 os.environ["DO_NOT_TRACK"] = "1"
 
-PROMPT_VERSION = "reply-v2"
+PROMPT_VERSION = "reply-v4"
 SYSTEM = """메신저 대화를 보고 내가 다음에 직접 보낼 법한 짧은 답장 하나를 예측하세요.
 self는 나이고 other는 상대입니다. author_id와 reply_to로 발화자와 답장 대상을 구분하세요.
 내 기존 말투와 언어를 따르세요. 상대의 질문을 상대에게 그대로 돌려묻거나 AI 도우미처럼 답하지 마세요.
@@ -38,7 +38,11 @@ def compile_prompt(request):
     context = request.get("context")
     if not isinstance(context, list) or len(context) > 200:
         raise ValueError("invalid_context")
-    incoming = set(request.get("incoming_message_ids") or [])
+    incoming_ids = request.get("incoming_message_ids")
+    if incoming_ids is not None and not isinstance(incoming_ids, list):
+        raise ValueError("invalid_incoming_message_ids")
+    unseen_state = "known" if incoming_ids is not None else "unknown"
+    incoming = {str(mid) for mid in (incoming_ids or [])}
     messages = []
     omitted = []
     for message in context:
@@ -56,7 +60,8 @@ def compile_prompt(request):
             "author_id": str(message.get("author_id", "")),
             "ts": message.get("ts"), "body": message["body"],
             "reply_to": message.get("reply_to"),
-            "unseen": role != "self" and message.get("message_id") in incoming,
+            "unseen": (role != "self" and str(message.get("message_id")) in incoming)
+                      if unseen_state == "known" else None,
         })
     # Bound the snapshot before preflight; record omissions explicitly.
     # create_reply records the exact role-aligned tokenizer input separately.
@@ -80,6 +85,7 @@ def compile_prompt(request):
               and str(target["reply_to"]) not in ids else None)
     preflight = {"status": "ready" if reason is None else "abstained", "reason": reason,
                  "reply_target_id": target["message_id"] if target else None,
+                 "unseen_state": unseen_state,
                  "missing_reply_ids": missing, "context_truncated": bool(omitted),
                  "available_information": ["current_chat_snapshot", "self_style_from_history"],
                  "unavailable_information": ["calendar", "link_contents", "attachment_contents",
@@ -89,6 +95,37 @@ def compile_prompt(request):
         "omitted_message_ids": omitted,
     }, ensure_ascii=False, separators=(",", ":"))}]
     return compiled, omitted
+
+
+def build_generation_input(compiled):
+    payload = json.loads(compiled[-1]["content"])
+    # Alias only message identities inside model input. Raw snapshots and
+    # provenance retain original IDs; author IDs remain stable across examples.
+    aliases = {message['message_id']: index
+               for index, message in enumerate(payload['conversation'])}
+    def alias(value):
+        if value is None:
+            return None
+        key = str(value)
+        if key not in aliases:
+            aliases[key] = len(aliases)
+        return aliases[key]
+    fields = ['message_id', 'author_role', 'author_id', 'ts', 'reply_to', 'unseen']
+    metadata = [[alias(message['message_id']), message['author_role'], message['author_id'],
+                 message['ts'], alias(message['reply_to']), message['unseen']]
+                for message in payload['conversation']]
+    preflight = dict(payload['preflight'])
+    preflight['reply_target_id'] = alias(preflight['reply_target_id'])
+    preflight['missing_reply_ids'] = [alias(value) for value in preflight['missing_reply_ids']]
+    generation_input = [{"role": "system", "content": compiled[0]["content"] +
+        "\nturn_metadata 배열은 turn_fields 순서입니다. message_id, reply_to, reply_target_id, missing_reply_ids의 숫자는 이 입력 안의 동일 메시지 별칭입니다. author_id는 원본 발화자 식별자입니다." +
+        "\n사전 검증 결과 및 아래 발언 순서별 메타데이터: " + json.dumps({
+            "turn_fields": fields, "preflight": preflight, "turn_metadata": metadata,
+        }, ensure_ascii=False, separators=(',', ':'))}] + [
+        {"role": "assistant" if message["author_role"] == "self" else "user",
+         "content": message["body"]} for message in payload["conversation"]
+    ] + [{"role": "user", "content": "위 마지막 상대 발언에 내가 보낼 답장만 쓰세요. 나의 기존 승인·거절은 유지하세요. 대화에 내 결정이 없는 경우에만 확인이 필요하다고 답하세요. 상대의 제안만으로 내가 동의하거나 수행했다고 확정하지 마세요. 답장 내용은 현재 주제에 맞추세요."}]
+    return generation_input
 
 
 class ReplyWorker:
@@ -169,15 +206,7 @@ class ReplyWorker:
         adapter_path, adapter_version, adapter_status = self.personal_adapter(request)
         # One call sees the validated snapshot, speaker identities, references,
         # style examples (self turns), and explicit limits on available facts.
-        metadata = [{k: v for k, v in message.items() if k != "body"}
-                    for message in payload["conversation"]]
-        generation_input = [{"role": "system", "content": compiled[0]["content"] +
-            "\n사전 검증 결과 및 아래 발언 순서별 메타데이터: " + json.dumps({
-                "preflight": preflight, "turn_metadata": metadata,
-            }, ensure_ascii=False)}] + [
-            {"role": "assistant" if message["author_role"] == "self" else "user",
-             "content": message["body"]} for message in payload["conversation"]
-        ] + [{"role": "user", "content": "위 마지막 상대 발언에 내가 보낼 답장만 쓰세요. 나의 기존 승인·거절은 유지하세요. 대화에 내 결정이 없는 경우에만 확인이 필요하다고 답하세요. 상대의 제안만으로 내가 동의하거나 수행했다고 확정하지 마세요. 답장 내용은 현재 주제에 맞추세요."}]
+        generation_input = build_generation_input(compiled)
         text = self.generate_text(generation_input, adapter_path=adapter_path, temperature=0.0).strip()
         generation = {"step_id": str(uuid.uuid4()), "parent_step_id": None, "node_type": "generate",
             "input_refs": [preflight["reply_target_id"]], "action": {"strategy": "next_reply"},

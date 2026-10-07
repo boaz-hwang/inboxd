@@ -22,3 +22,7 @@ test("Slack and Telegram authentication errors survive batch IPC without secrets
     expect(accountErrorMessage(caught)).not.toContain("private");
   }
 });
+
+test("rate limits cross IPC only as a fixed safe classification", () => {
+  for (const code of ["rate_limit",429]) expect(accountErrorMessage(Object.assign(new Error("private response"),{code}))).toBe("provider_rate_limit");
+});

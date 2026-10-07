@@ -18,6 +18,44 @@ fn text<'a>(v: &'a Value, k: &str) -> CoreResult<&'a str> {
         .filter(|s| !s.is_empty() && s.len() <= 16000)
         .ok_or_else(|| error("invalid observation field"))
 }
+// Continuations live in the encrypted owner database, separately from coverage.
+pub(crate) fn history_state(connection: &Connection, input: &Value) -> CoreResult<Value> {
+    let state: Option<String> = connection
+        .query_row(
+            "SELECT state_json FROM account_history WHERE platform=? AND account=? AND chat_id=?",
+            params![
+                text(input, "platform")?,
+                text(input, "account")?,
+                text(input, "chat_id")?
+            ],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(sql_error)?;
+    state
+        .map(|s| serde_json::from_str(&s).map_err(|_| error("invalid history state")))
+        .unwrap_or(Ok(Value::Null))
+}
+/// Metadata-only source audit, independently counted from the encrypted raw ledger.
+pub(crate) fn archive_summary(connection: &Connection, input: &Value) -> CoreResult<Value> {
+    let platform = text(input, "platform")?;
+    let account = text(input, "account")?;
+    let source = text(input, "source_id")?;
+    let own = text(input, "self_user_id")?;
+    let raw = connection.query_row(
+        "SELECT COUNT(*),COUNT(DISTINCT chat_id),COALESCE(SUM(json_extract(message_json,'$.author_id')=?),0),COALESCE(SUM(json_extract(message_json,'$.author_id')=? AND json_extract(message_json,'$.type') IN (1,26)),0),MIN(json_extract(message_json,'$.ts')),MAX(json_extract(message_json,'$.ts')) FROM local_archive_records WHERE platform=? AND account=? AND source_id=?",
+        params![own,own,platform,account,source], |r| Ok(json!({"raw_records":r.get::<_,i64>(0)?,"rooms":r.get::<_,i64>(1)?,"self_records":r.get::<_,i64>(2)?,"self_exact_text_records":r.get::<_,i64>(3)?,"earliest_ts":r.get::<_,Option<f64>>(4)?,"latest_ts":r.get::<_,Option<f64>>(5)?}))).map_err(sql_error)?;
+    let pages = connection.query_row(
+        "SELECT COUNT(*),COALESCE(SUM(event_count),0),COALESCE(SUM(inserted_count),0) FROM local_archive_pages WHERE platform=? AND account=? AND source_id=?",
+        params![platform,account,source], |r| Ok(json!({"pages":r.get::<_,i64>(0)?,"acknowledged_events":r.get::<_,i64>(1)?,"canonical_inserted":r.get::<_,i64>(2)?}))).map_err(sql_error)?;
+    let mut result = raw;
+    result
+        .as_object_mut()
+        .unwrap()
+        .extend(pages.as_object().unwrap().clone());
+    result["source_id"] = json!(source);
+    Ok(result)
+}
 pub(crate) fn observe(connection: &Connection, input: &Value) -> CoreResult<Value> {
     let platform = text(input, "platform")?;
     let account = text(input, "account")?;
@@ -28,7 +66,17 @@ pub(crate) fn observe(connection: &Connection, input: &Value) -> CoreResult<Valu
         .as_array()
         .filter(|m| m.len() <= 1000)
         .ok_or_else(|| error("invalid observation page"))?;
+    let archive = input.get("local_archive");
     let tx = connection.unchecked_transaction().map_err(sql_error)?;
+    if let Some(archive) = archive {
+        let previous:Option<(String,i64,i64)>=tx.query_row("SELECT digest,event_count,inserted_count FROM local_archive_pages WHERE platform=? AND account=? AND source_id=? AND page_id=?",params![platform,account,text(&archive["source"],"snapshot_sha256")?,text(archive,"page_id")?],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(sql_error)?;
+        if let Some((digest, stored, _)) = previous {
+            if digest != text(archive, "digest")? {
+                return Err(error("local archive page replay conflict"));
+            }
+            return Ok(json!({"stored":stored,"changed":0,"inserted":[],"replayed":true}));
+        }
+    }
     let mut stored = 0;
     let mut changed = 0;
     let mut inserted = Vec::new();
@@ -43,7 +91,18 @@ pub(crate) fn observe(connection: &Connection, input: &Value) -> CoreResult<Valu
             .as_str()
             .filter(|s| s.len() <= 65536)
             .ok_or_else(|| error("body too large"))?;
-        let Some(body) = inboxd_core::message_body(platform, body) else {
+        if let Some(archive) = archive {
+            tx.execute("INSERT OR REPLACE INTO local_archive_records(platform,account,chat_id,msg_id,source_id,page_id,message_json,source_json) VALUES(?,?,?,?,?,?,?,?)",params![platform,account,chat,id,text(&archive["source"],"snapshot_sha256")?,text(archive,"page_id")?,row.to_string(),archive["source"].to_string()]).map_err(sql_error)?;
+        }
+        // Preserve media/service/deletion presence in the shared context. Only
+        // exact native TEXT/REPLY codes supply text; deleted-offset types never
+        // become text targets by masking flags. Raw payload stays encrypted.
+        let placeholder = if archive.is_some() {
+            crate::archive::native_placeholder(row["type"].as_i64())
+        } else {
+            None
+        };
+        let Some(body) = inboxd_core::message_body(platform, placeholder.unwrap_or(body)) else {
             continue;
         };
         let body = body.as_str();
@@ -56,6 +115,11 @@ pub(crate) fn observe(connection: &Connection, input: &Value) -> CoreResult<Valu
         let existing: Option<Existing> = tx.query_row(
             "SELECT deleted_at, revision_value, body, author_id, ts FROM messages WHERE platform=? AND account=? AND chat_id=? AND msg_id=?",
             params![platform,account,chat,id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(sql_error)?;
+        // A local snapshot supplements absent history. Existing canonical
+        // observations may contain later edits or confirmed deletion evidence.
+        if archive.is_some() && existing.is_some() {
+            continue;
+        }
         if let Some((deleted, revision, _, _, _)) = &existing {
             if deleted.is_some()
                 || revision
@@ -88,6 +152,9 @@ pub(crate) fn observe(connection: &Connection, input: &Value) -> CoreResult<Valu
         // A display projection may omit replies/attachments/edit metadata. Do
         // not erase richer fields previously collected by a bounded worker.
         tx.execute("INSERT INTO messages(platform,account,chat_id,msg_id,author_id,ts,body,revision_kind,revision_value) VALUES(?,?,?,?,?,?,?,'string',?) ON CONFLICT(platform,account,chat_id,msg_id) DO UPDATE SET author_id=excluded.author_id, ts=excluded.ts, body=excluded.body, revision_kind=excluded.revision_kind, revision_value=excluded.revision_value", params![platform,account,chat,id,author,ts,body,format!("observed:{observed}")]).map_err(sql_error)?;
+        if let Some(parent) = row["parent_id"].as_str().filter(|s| !s.is_empty()) {
+            tx.execute("UPDATE messages SET parent_msg_id=?,parent_platform=?,parent_account=?,parent_chat_id=? WHERE platform=? AND account=? AND chat_id=? AND msg_id=?",params![parent,platform,account,chat,platform,account,chat,id]).map_err(sql_error)?;
+        }
         tx.execute(
             "DELETE FROM messages_fts WHERE platform=? AND account=? AND chat_id=? AND msg_id=?",
             params![platform, account, chat, id],
@@ -102,12 +169,32 @@ pub(crate) fn observe(connection: &Connection, input: &Value) -> CoreResult<Valu
             tx.execute("INSERT INTO identities(platform,account,identity_id,display_name) VALUES(?,?,?,?) ON CONFLICT(platform,account,identity_id) DO UPDATE SET display_name=excluded.display_name",params![platform,account,author,name]).map_err(sql_error)?;
         }
     }
+    if let Some(archive) = archive {
+        tx.execute("INSERT INTO local_archive_pages(platform,account,source_id,page_id,digest,event_count,inserted_count,observed_at) VALUES(?,?,?,?,?,?,?,?)",params![platform,account,text(&archive["source"],"snapshot_sha256")?,text(archive,"page_id")?,text(archive,"digest")?,rows.len() as i64,inserted.len() as i64,observed as i64]).map_err(sql_error)?;
+        let evidence = json!({"status":"known","source":"authenticated_adapter","self_id":text(archive,"self_user_id")?,"observed_at":observed as f64/1_000_000.});
+        tx.execute("INSERT INTO account_self(platform,account,evidence_json,observed_at) VALUES(?,?,?,?) ON CONFLICT(platform,account) DO UPDATE SET evidence_json=excluded.evidence_json,observed_at=excluded.observed_at",params![platform,account,evidence.to_string(),observed as f64/1_000_000.]).map_err(sql_error)?;
+    }
     for chat in changed_chats {
         tx.execute(
             "UPDATE reply_suggestions SET status='stale' WHERE platform=? AND account=? AND chat_id=? AND status IN ('queued','generating','ready')",
             params![platform, account, chat],
         )
         .map_err(sql_error)?;
+    }
+    if let Some(checkpoint) = input.get("history_checkpoint") {
+        let room = text(input, "chat_id")?;
+        let current: Option<String> = tx.query_row("SELECT state_json FROM account_history WHERE platform=? AND account=? AND chat_id=?",params![platform,account,room],|r|r.get(0)).optional().map_err(sql_error)?;
+        let previous: Value = current
+            .map(|s| serde_json::from_str(&s).map_err(|_| error("invalid history state")))
+            .transpose()?
+            .unwrap_or(Value::Null);
+        if previous != input["expected_history_checkpoint"] {
+            return Err(error("history checkpoint conflict"));
+        }
+        if !checkpoint.is_object() || checkpoint.to_string().len() > 1_000_000 {
+            return Err(error("invalid history checkpoint"));
+        }
+        tx.execute("INSERT INTO account_history(platform,account,chat_id,state_json) VALUES(?,?,?,?) ON CONFLICT(platform,account,chat_id) DO UPDATE SET state_json=excluded.state_json",params![platform,account,room,checkpoint.to_string()]).map_err(sql_error)?;
     }
     tx.commit().map_err(sql_error)?;
     Ok(json!({"stored":stored,"changed":changed,"inserted":inserted}))

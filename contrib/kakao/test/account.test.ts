@@ -84,3 +84,10 @@ test("push and reconnect share the existing Kakao session and detach on stop", a
   expect(push).toBeUndefined();
   expect(state).toBeUndefined();
 });
+
+test("page preserves explicit quoted-reply source without copying attachment body", async () => {
+  const adapter=await createKakaoAccount({userId:"self"} as PersonalCredentials,{async getMessagePage(){return {messages:[{log_id:"2",type:26,author_id:7,message:"answer",sent_at:2,attachment:{src_logId:"1",src_message:"private source"}}],complete:true};},close(){}} as never);
+  const page=await dispatch(adapter,{op:"kakao_page",chat_id:"r"});
+  expect(page.messages[0]).toMatchObject({id:"2",parent_id:"1"});
+  expect(JSON.stringify(page)).not.toContain("private source");
+});

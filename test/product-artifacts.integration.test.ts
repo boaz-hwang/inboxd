@@ -33,7 +33,7 @@ const executableNames = [
   "inboxd-kakao-local-worker",
   "inboxd-kakao-message-worker",
 ] as const;
-const replyRuntimeNames = ["inboxd-reply-worker.py", "personalization.py"];
+const replyRuntimeNames = ["learning_role_review.json", "learning_evaluation_rubrics.json", "reply_safety_curriculum.json", "reply_safety_validation.json", "inboxd-reply-worker.py", "personalization.py", "training_runtime.py", "training_curriculum.py", "continual.py", "history.py", "history_collect.py", "learning_split.py", "learning_evaluation.py", "quality_review.py", "review_sensitive.py"];
 const expectedSources = new Map<string, string>([
   ["inboxd-daemon", "crates/inboxd-daemon/src/main.rs"],
   ["inboxd-keychain", "crates/inboxd-keychain/src/main.rs"],
@@ -48,7 +48,7 @@ const expectedSources = new Map<string, string>([
   ["inboxd-kakao-message-worker", "platforms/kakao-message/src/bin.ts"],
   [telegramTdjsonName, "@prebuilt-tdlib/darwin-arm64/libtdjson.dylib"],
   [telegramTdlAddonName, "tdl/prebuilds/darwin-arm64/tdl.node"],
-  ...replyRuntimeNames.map(name => [name, `packages/reply-model/${name === "inboxd-reply-worker.py" ? "worker.py" : name}`] as [string, string]),
+  ...replyRuntimeNames.map(name => [name, `packages/reply-model/${name === "inboxd-reply-worker.py" ? "worker.py" : name.endsWith(".json") ? `fixtures/${name}` : name}`] as [string, string]),
 ]);
 
 interface ProductManifest {
@@ -338,6 +338,13 @@ describe("atomic production product artifacts", () => {
       expect(readFileSync(path).includes(Buffer.from(secretSentinel)), file.name).toBeFalse();
     }
     expect(readFileSync(manifestPath).includes(Buffer.from(secretSentinel))).toBeFalse();
+
+    const learningImports = await run([
+      "python3", "-I", "-c",
+      "import sys; sys.path.insert(0, sys.argv[1]); import continual, review_sensitive",
+      productDirectory,
+    ]);
+    expect(learningImports.code, learningImports.stderr).toBe(0);
 
     const telegramStateDirectory = join(temporaryRoot, "telegram-state");
     const telegramDatabaseDirectory = join(telegramStateDirectory, "database");

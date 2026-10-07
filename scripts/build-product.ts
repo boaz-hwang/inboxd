@@ -38,8 +38,12 @@ const workerEntrypoints = [
   { name: "inboxd-kakao-message-worker", source: "platforms/kakao-message/src/bin.ts" },
 ] as const;
 const replyRuntimeFiles = [
+  { name: "learning_role_review.json", source: "packages/reply-model/fixtures/learning_role_review.json" },
+  { name: "learning_evaluation_rubrics.json", source: "packages/reply-model/fixtures/learning_evaluation_rubrics.json" },
+  { name: "reply_safety_curriculum.json", source: "packages/reply-model/fixtures/reply_safety_curriculum.json" },
+  { name: "reply_safety_validation.json", source: "packages/reply-model/fixtures/reply_safety_validation.json" },
   { name: "inboxd-reply-worker.py", source: "packages/reply-model/worker.py" },
-  ...["personalization.py"].map(name => ({ name, source: `packages/reply-model/${name}` })),
+  ...["personalization.py", "training_runtime.py", "parallel_chunk.py", "prefix_outside.py", "training_curriculum.py", "continual.py", "history.py", "history_collect.py", "learning_split.py", "learning_evaluation.py", "quality_review.py", "review_sensitive.py"].map(name => ({ name, source: `packages/reply-model/${name}` })),
 ];
 
 interface ManifestFile {

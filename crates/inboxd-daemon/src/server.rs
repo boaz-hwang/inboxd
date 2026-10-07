@@ -590,6 +590,43 @@ struct BackfillPagePlan {
 }
 
 impl BackfillPagePlan {
+    // Content-free durable progress. A completed checkpoint is not a claim that
+    // the provider supplied full coverage; coverage/limits remain separate.
+    fn progress(sync: &Value, interval: &Value, max_pages: u64) -> Value {
+        let checkpoint = sync["cursor"]
+            .as_str()
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .filter(|v| {
+                v.as_object().is_some_and(|object| object.len() == 6)
+                    && [
+                        "v",
+                        "kind",
+                        "interval",
+                        "provider_cursor",
+                        "committed_pages",
+                        "terminal",
+                    ]
+                    .iter()
+                    .all(|field| v.get(*field).is_some())
+                    && v["v"] == 1
+                    && v["kind"] == "backfill_job"
+                    && v["interval"] == *interval
+                    && v["committed_pages"].as_u64().is_some_and(|n| n > 0)
+                    && ((v["terminal"] == true && v["provider_cursor"].is_null())
+                        || (v["terminal"] == false
+                            && v["provider_cursor"].as_str().is_some_and(|s| {
+                                !s.is_empty() && s.len() <= inboxd_protocol::MAX_CURSOR_BYTES
+                            })))
+            });
+        let committed = checkpoint
+            .as_ref()
+            .and_then(|v| v["committed_pages"].as_u64())
+            .unwrap_or(0);
+        let terminal = checkpoint.as_ref().is_some_and(|v| v["terminal"] == true);
+        json!({"status":if terminal {"complete"} else if committed >= max_pages {"budget_exhausted"} else if committed > 0 {"pending"} else {"unstarted"},
+            "committed_pages":committed,"terminal":terminal,"max_pages":max_pages})
+    }
+
     fn for_request(
         sync: &Value,
         interval: &Value,
@@ -990,6 +1027,15 @@ async fn dispatch(
             if !session.trusted_sender {
                 assert_trusted_approver(session)?;
             }
+            for field in ["status_only", "resume"] {
+                if request
+                    .params
+                    .get(field)
+                    .is_some_and(|value| !value.is_boolean())
+                {
+                    return Err(RpcError::bad_request(format!("{field} must be a boolean")));
+                }
+            }
             let work = accounts
                 .work
                 .start(
@@ -1003,6 +1049,11 @@ async fn dispatch(
                 } else {
                     (flat_chat(&request.params)?, flat_interval(&request.params)?)
                 };
+                if let Some(reader) = request.params.get("reader") {
+                    if reader == "local_archive" {return accounts.import_local_archive(&chat,&Value::Object(request.params.clone())).await.map_err(RpcError::unsupported);}
+                    if reader != "connected_account" { return Err(RpcError::bad_request("unsupported history reader")); }
+                    return accounts.history(&chat,&interval,request.params.get("status_only")==Some(&json!(true))).await.map_err(RpcError::unsupported);
+                }
                 let resource = json!({
                     "v":1,
                     "kind":"chat",
@@ -1037,20 +1088,28 @@ async fn dispatch(
                 let max_pages = binding.claims["read"]["limits"]["max_pages"]
                     .as_u64()
                     .ok_or_else(|| RpcError::unsupported("configured page budget is invalid"))?;
+                let progress = BackfillPagePlan::progress(&sync, &interval, max_pages);
+                if request.params.get("status_only") == Some(&json!(true))
+                    || (request.params.get("resume") == Some(&json!(true))
+                        && (progress["status"] == "complete" || progress["status"] == "budget_exhausted"))
+                {
+                    return Ok(json!({"event_count":0,"progress":progress,"read_performed":false}));
+                }
                 let plan = BackfillPagePlan::for_request(&sync, &interval, max_pages)?;
                 let cursor = plan.provider_cursor.clone();
                 let page = worker
-                    .read_page(&binding.id, resource, interval, limit, cursor)
+                    .read_page(&binding.id, resource, interval.clone(), limit, cursor)
                     .await
                     .map_err(|error| RpcError::unsupported(error.to_string()))?;
                 let event_count = page.messages.len() + page.tombstones.len();
                 let authoritative = page.authoritative;
                 let batch = plan.into_apply_sync_batch(page, expected_page_sequence)?;
+                let progress = BackfillPagePlan::progress(&batch["sync"], &interval, max_pages);
                 actor_call(actor, StorageOperation::ApplySyncBatch, batch, false).await?;
                 // Notify only after durable commit, including empty-page coverage updates.
                 let _ = events.publish("message.upserted", json!({"chat":chat}));
                 let _ = events.publish("coverage.changed", json!({"chat":chat}));
-                Ok(json!({"event_count":event_count,"authoritative":authoritative}))
+                Ok(json!({"event_count":event_count,"authoritative":authoritative,"progress":progress,"read_performed":true}))
             }
             .await;
             work.finish(result.is_ok());
@@ -1252,6 +1311,58 @@ mod backfill_tests {
             next_cursor: Value::Null,
             authoritative: true,
             observed_at: 2.0,
+        }
+    }
+
+    #[test]
+    fn progress_is_interval_bound_and_never_returns_provider_cursor() {
+        let interval = json!({"from_ts":0,"to_ts":10});
+        let mut page = terminal_page(&interval);
+        page.next_cursor = json!("provider-secret");
+        let batch = BackfillPagePlan::for_request(&Value::Null, &interval, 2)
+            .unwrap_or_else(|error| panic!("{}", error.message))
+            .into_apply_sync_batch(page, 0)
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        let progress = BackfillPagePlan::progress(&batch["sync"], &interval, 2);
+        assert_eq!(progress["status"], "pending");
+        assert_eq!(progress["committed_pages"], 1);
+        assert!(!progress.to_string().contains("provider-secret"));
+        assert_eq!(
+            BackfillPagePlan::progress(&batch["sync"], &interval, 1)["status"],
+            "budget_exhausted"
+        );
+        assert_eq!(
+            BackfillPagePlan::progress(&batch["sync"], &json!({"from_ts":10,"to_ts":20}), 2)["status"],
+            "unstarted"
+        );
+        let terminal = BackfillPagePlan::for_request(&Value::Null, &interval, 2)
+            .unwrap_or_else(|error| panic!("{}", error.message))
+            .into_apply_sync_batch(terminal_page(&interval), 0)
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(
+            BackfillPagePlan::progress(&terminal["sync"], &interval, 2)["status"],
+            "complete"
+        );
+    }
+
+    #[test]
+    fn progress_rejects_checkpoints_the_reader_would_not_resume() {
+        let interval = json!({"from_ts":0,"to_ts":10});
+        let checkpoint = json!({"v":1,"kind":"backfill_job","interval":interval,
+            "provider_cursor":"cursor","committed_pages":1,"terminal":false});
+        let mut extra = checkpoint.clone();
+        extra["extra"] = json!(true);
+        let mut oversized = checkpoint;
+        oversized["provider_cursor"] = json!("x".repeat(inboxd_protocol::MAX_CURSOR_BYTES + 1));
+        for checkpoint in [extra, oversized] {
+            let sync = json!({"cursor":checkpoint.to_string()});
+            assert_eq!(
+                BackfillPagePlan::progress(&sync, &interval, 2)["status"],
+                "unstarted"
+            );
+            let plan = BackfillPagePlan::for_request(&sync, &interval, 2)
+                .unwrap_or_else(|error| panic!("{}", error.message));
+            assert_eq!(plan.committed_pages, 0);
         }
     }
 

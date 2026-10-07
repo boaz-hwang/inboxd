@@ -643,6 +643,30 @@ pub(crate) enum TelegramSendFileResult {
     V0(TelegramSendFileResultV0),
     V1(TelegramSendFileResultV1),
 }
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SlackConversationsRepliesParams {
+    pub(crate) channel: String,
+    pub(crate) ts: String,
+    pub(crate) limit: SafeInteger,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SlackConversationsRepliesResultData {
+    pub(crate) messages: Vec<SlackMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) has_more: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) response_metadata: Option<SlackMetadata>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SlackConversationsRepliesResult {
+    pub(crate) data: SlackConversationsRepliesResultData,
+}
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "op", deny_unknown_fields)]
 pub(crate) enum PrimitiveRequest {
@@ -737,6 +761,10 @@ pub(crate) enum PrimitiveRequest {
         chat_id: String,
         file: LocalAttachment,
     },
+    #[serde(rename = "slack.conversations.replies")]
+    SlackConversationsReplies {
+        params: SlackConversationsRepliesParams,
+    },
     #[serde(rename = "batch")]
     Batch { requests: Vec<PrimitiveRequest> },
 }
@@ -768,6 +796,7 @@ pub(crate) enum PrimitiveResult {
     SlackSendFile(SlackSendFileResult),
     KakaoSendFile(KakaoSendFileResult),
     TelegramSendFile(TelegramSendFileResult),
+    SlackConversationsReplies(SlackConversationsRepliesResult),
     Batch(Vec<PrimitiveResult>),
 }
 impl PrimitiveRequest {
@@ -847,6 +876,9 @@ impl PrimitiveRequest {
             }
             Self::TelegramSendFile { .. } => {
                 PrimitiveResult::TelegramSendFile(serde_json::from_value(value)?)
+            }
+            Self::SlackConversationsReplies { .. } => {
+                PrimitiveResult::SlackConversationsReplies(serde_json::from_value(value)?)
             }
             Self::Batch { requests } => {
                 #[derive(serde::Deserialize)]

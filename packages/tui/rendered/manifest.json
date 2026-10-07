@@ -1,15 +1,15 @@
 {
   "schema": "inboxd.tui.capture-manifest.v1",
   "repository": ".",
-  "base": "200ea2e6cfa1f34effa0712fa679579a37ce9770",
-  "working_tree_base": "eda8df69702e5e1e7f47900449349bcc8629f70c",
+  "base": "6afab78e2569cc6e3129a8d4db7288afa852e397",
+  "working_tree_base": "6afab78e2569cc6e3129a8d4db7288afa852e397",
   "runtime": "1.3.11",
   "source_hashes": {
     "workspace": "19c3a26a73479719dd0ee109e66bd06eb8ffaec4ae52c20845af7a3be8c29f2a",
     "model": "640c6cd7444fa5ee992f80a351a7cb8533cd1cfd28e984191536414d60d1c785",
     "theme": "d82153409c3c9c1c1a6c3132f043084e9146fe0217f77fb100dc85c06de9d757",
     "text": "ccdb724dd828fd647767e8238426b2cf3426213a10b0aa2fa3668c3ef58b81f4",
-    "renderer": "9391925f9a2bda1c01570b8a6483034517472b33bd452105b292734488f0c27f",
+    "renderer": "16269f927aa6e1f1cdf1bed87c5f870034ed9d181c7d4369d9cfda8e33bfcd07",
     "runtime": "09008a2725090b27a7cbf50e7ca6ecbad65572a7249678117c3b299607502db9",
     "generator": "13b7048bc5c2f54ad11ebc13ac34927cfdcb40727abf1444007cad938974043b"
   },

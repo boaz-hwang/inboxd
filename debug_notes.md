@@ -1,5 +1,25 @@
 # Debug Notes: Telegram connected but composer asks for connection
 
+## 2026-10-03 — reviewed history pilot and no-activation decision
+
+- 사용자 위임에 따라 현재 242후보를 승인 70/보류 146/제외 26으로 기록했다. 4K 분할은 28/12/22이며 원본 경계 중복 8건을 제외했다. 4K 첫 실행은 swap 증가 한도에서 중단됐다. 실제 train 최대는 2,791토큰이므로 설정값만 3K로 내려도 batch shape가 줄지 않는다는 것을 확인했다.
+- 학습의 2K 초과 6건만 제외한 22/12/22 실험은 22회 update와 최종 validation·파일 저장 뒤 RSS 한도에서 종료됐다. 원래 manifest의 failed를 유지했다. 동일한 22회차/최종 체크포인트의 해시·finite parameter를 검사한 사본은 `mode=checkpoint-recovery`로 한정했고 실제 activate 호출이 거부되는 것을 확인했다.
+- 오프라인 test loss는 3.528→2.970. 실제 대화 동일 22건의 익명 위임 평가에서 역할 실패 8→1(미확인 1), 사실 실패 9→0, 유용성 2.77→3.55였지만 새 역할 오류 1건도 있었다. production 입력으로 구성한 별도 합성 사례에서는 기존 거절을 발송 허용으로 뒤집는 회귀를 확인했다. 개선 신호와 적용 가능성을 구분해 운영에는 적용하지 않았다. 상세 분모·C 방식 생략 4건·평가 한계는 docs/27에 기록했다.
+- 실제 실패 산출물 점검에서 개별 파일 0644/runs 부모 0755가 남는 것을 발견했다. 상위 learning 디렉터리는 0700이었지만 개별 비공개 권한 계약을 맞추기 위해 기존 5개 항목을 정리하고 자식 `umask=077`, runs 0700을 적용했다. 실패한 자식의 파일·디렉터리 권한 회귀를 포함해 Python 161개가 통과했다.
+- 과거 `insufficient_evidence`와 `no_new_dataset`이 다음 cycle에도 남던 표시 오류를 수정했다. 최종 기본 2K cycle은 242후보, 길이 조건에 맞는 승인 32건, 분할 22/3/4와 temporal 0건에서 정상적으로 추가 학습을 보류했다. 모든 판단 출처는 사용자 위임으로 남기고 직접 사람 검토로 표시하지 않았다.
+
+## 2026-10-03 — compact reply metadata and isolated evaluation examples
+
+- 실제 224후보에서 반복 메타데이터가 평균 1,710.4토큰이었다. `reply-v4`는 메시지 ID만 입력 내부 별칭으로 바꾸고 고정 필드 배열·compact JSON을 사용한다. 발신자 원본 ID·본문·역할·절대 시각·답장 그래프·null과 false는 유지한다. 평균 전체 길이 2,947.6→1,983.7(-32.7%), 2K 길이 통과 79→124를 확인했다.
+- 실제 기본 모델의 합성 7사례 v3/v4 비교에서 양쪽 모두 이전 거절을 흐리는 문제가 남았다. 압축을 개인화 정확도 개선으로 보고하지 않는다. 설치 후 정상 재시작 1.573초를 확인했다.
+- A/B/C의 C 경로가 과거 예시의 턴을 현재 대화 앞에 붙여 현재 `turn_metadata` 위치를 어긋나게 할 수 있었다. 예시별 메타데이터와 전체 메시지를 별도 system 참고 영역으로 분리했다. 현재 실제 턴 순서가 변하지 않고 예시의 메타데이터가 보존되는 회귀를 추가했으며 전체 토큰 예산 검사를 유지했다. 기존 합성 A/B/C 실행은 파이프라인 실행 증거이며 품질 개선의 증거가 아니다.
+
+## 2026-10-03 — historical adjacency linkage integration
+
+- 실제 승인된 과거 후보 17건이 분할 전에 모두 `unreliable_linkage`로 탈락했다. Rust export의 `reply_linkage.kind=adjacent_turn`을 Python이 그대로 학습 linkage에 전달했으나 학습기는 `temporal_reply` 등 별도 어휘만 허용했다. 기존 테스트 fixture는 kind를 생략해 이 통합 오류를 발견하지 못했다.
+- `history.candidate_record`에서 `adjacent_turn`을 `temporal_reply`로 정규화하고 원래 `reply_linkage` 근거는 보존한다. 인접했다는 사실만으로 승인하지 않으며 기존 검토 해시·승인, 시점과 답장 대상 일치 검사를 유지한다. 정규화로 후보 해시가 바뀌므로 기존 승인도 현재 후보에 맞게 다시 검토해야 한다.
+- 실제 Rust linkage 모양의 승인 후보가 학습 준비를 통과하는 테스트와 미승인·대상 불일치·미래 맥락의 차단 회귀 테스트를 추가했다. 본문이나 실제 메시지 ID는 진단 기록에 남기지 않는다.
+
 ## Rust account backend refactor verification (2026-09-19)
 
 - Initial full suites failed four Rust worker trust tests and two Bun launcher
@@ -287,3 +307,108 @@ See docs/15-startup-optimization-results.md for measurements and remaining limit
 - 검증: Python 75개(legacy 포함), storage responses 33개, daemon lib 112개, TUI response 38개 통과. TS typecheck/boundary 및 설치 빌드 성공. 원문 인용 복구와 타 방 접근 차단을 회귀 검증했다.
 - 실제 Qwen3.5-9B 합성 실행으로 호출 1회 확인. 프롬프트 보완 중 특정 일정 예시가 무관한 답변을 지배하는 현상을 발견해 해당 예시를 제거했다. 최종 7사례에서는 검토 의향, 일정 미확정, 기존 거절 유지, URL 정보 부족시 abstain을 관찰했지만 피드백 요청의 역할 반전과 선물 감사의 역할 반전이 남았다. 정확도 개선을 달성했다고 주장하지 않는다.
 - 설치 후 실제 trajectory summary에서 새 pipeline과 generate만 있는 실행을 확인했다. 초기 설치와 재시작 사이 구 데몬/신 worker 버전 불일치 실패도 기록됐으며, 새 데몬 실행은 v2로 분리된다. 메시지 전송이나 읽음 조작은 수행하지 않았다.
+
+## 2026-10-01 — 직접 작성한 답장의 지속 학습 파이프라인
+- 기존 상태는 first_input/shown/inserted/send_outcome 기록과 수동 personalization 도구만 있었으며 자동 export/train 연결 및 활성 개인화 모델은 없었다. 사용자는 직접 입력한 데이터를 통한 개선 의도를 밝혔다.
+- owner-only trajectory.list에 training_candidates 페이지 export를 추가했다. response session별 전송 최종문, 당시 문맥, 입력/수락/노출 여부를 연결하며 원래 암호화 저장소에서 읽는다. 성공확인 Sent/Verified, 직접 입력 이벤트, 유효한 과거 문맥만 후보로 삼고 미전송/불확실/그대로 수락한 모델 출력은 제외한다. 직접 입력을 기존 추천의 오답 라벨로 추정하지 않는다.
+- continual.py에 status/show/review/cycle/schedule을 추가했다. 검토는 source+prompt hash에 묶고 본문 없는 review metadata만 저장한다. worker와 같은 build_generation_input으로 학습 예제를 만든다. 검토한 train100/valid20/test20 및 새 train25개가 모이면 전체 retained reviewed data로 base부터 LoRA를 학습한다. 고정 평가 partition을 유지하며 held-out chat의 새 예제를 학습에 섞지 않는다. 모델 손실과 8개 역할·사실 fixture의 base/adapter 실제 출력을 비교하고 사람 품질검토 대기에서 끝난다. 자동 활성화는 하지 않는다.
+- 소스 삭제/retention 후 데이터는 다음 export/train에 사용되지 않는다. 기존 weights에서의 unlearning과 artifact 암호화는 미구현이다. 학습 2048 token 초과 예제는 정답 잘림을 피하기 위해 오류로 중단한다. 원문 카톡/텔레그램 앱에서 직접 보낸 메시지의 자동 라벨 연결은 이번 범위가 아니다.
+- 실제 기록: first_input18, send_outcome3. 세 전송 모두 성공확인 조건 미충족으로 eligible0. 실제 cycle은 waiting_for_reviewed_data. 사용자가 자동 적용 질문에 답하지 않아 수동 적용 기본값을 유지했다.
+- Python84, storage responses33, product artifact3(246 assertions), typecheck/boundary 통과. 합성20예제로 실제 MLX LoRA 1 iteration 및 adapter evaluation complete를 확인했으며 테스트 산출물은 임시 경로에서 정리하고 활성화하지 않았다. 패키징 테스트 초기 실패는 rustc PATH 및 manifest fixture 순서였으며 수정 후 통과했다.
+- 설치 및 데몬 재시작 완료. 사용자 LaunchAgent page.boaz.inboxd.learning에 매일 로컬04:00 cycle을 등록했다. 데이터 부족시 학습하지 않고 상태만 기록한다. 추천 생성에는 별도 호출을 추가하지 않았다.
+
+## 2026-10-02 — 과거 답장 학습의 실제 실행 검증
+- 기대: owner 과거 후보 추출, 실제 tokenizer와 운영 prefix 일치, LoRA 학습·검증 체크포인트 선택·독립 평가의 실행. 실측 없는 품질 개선 주장은 하지 않는다.
+- 설치본 첫 조회: Kakao 62방/809메시지/내 발신290, Telegram16방/406메시지/내 발신94. 후보216, 2048토큰 초과139, 48KB 후보초과4. 모두 출처·수정·coverage 미확인이 남아 자동승인하지 않았다.
+- 실제 tokenizer에서 MLX 기본 ChatDataset prefix와 enable_thinking=False 운영 prefix 불일치를 발견했다. 임시 모델 view에 non-thinking template를 고정하고 실제 전체/마스킹 prefix 일치 검사 후 MLX에 전달하도록 수정했다. 원본 모델 파일은 수정하지 않는다.
+- 자동 플랫폼 p75만으로 묶으면 Telegram 4152초 차이의 발신도 묶였다. p75를 median+3MAD 및 잠정300초로 제한하고 선택값·묶음 검토 사유·해시를 추가했다. 후속4096토큰 집계는 후보222, 초과63, 선택간격 Kakao60초/Telegram115초였다.
+- 수집기의 --approver 비대화형 CLI 호출은 TTY 조건으로 실패했다. sync backfill을 기존 owner 인증 경로로 연결했다. Kakao 대표방30일/1페이지는10events/4.401초, Telegram은 capability adapter가 없어 connected account.messages fallback을 추가했다(coverage unknown, 예산·중복·cursor 만료 재개 구분). 최종 실제 fallback 검증은 진행 중이다.
+- 4K 합성 train 3684/prefix3668/loss16 토큰에서 첫 gradient 단계가 장시간 실행됐고 physical footprint peak19.3G, 시스템 swap36GB 수준을 관측했다. 자원 압박으로 중단 신호를 보냈고 이후 PID 소멸과 작은 Metal 연산 정상 종료를 확인했다. 성공한 학습으로 기록하지 않는다.
+- 후속1K 합성 train921/prefix905/loss16 토큰은 55.6초 후 Metal Insufficient Memory로 실패했다. 당시 validation894토큰은7.556초/손실3.603. 종료 후 메모리 여유90%가 관측되어 단순 입력 한도 축소만으로 해결됐다고 보지 않는다. 학습 경로의 메모리 원인을 조사 중이다.
+- 재부팅 후 설치 데몬 재시작이 readiness timeout으로 실패했다. timeout의 키체인 안내는 원인 확정이 아니므로 별도 startup 진단을 진행한다.
+
+- chunk checkpoint 1K 실험은 26.47초/MLX peak13.303GB로 성공했지만, padded batch의 upstream loss가 첫 padding 토큰까지 포함하는 경계 오류를 발견했다. 정답 끝 경계를 exclusive로 고치고 ChatDataset→CacheDataset→iterate_batches의 921/905→16 loss tokens를 검증했다.
+- chunk checkpoint 4K+동시 추천 실험은 validation 후 첫 gradient에서 system swap이 약2.95→14.74GiB로 증가하여 122초에 중단했다. idle 추천 3회는2.309/2.310/2.311초, 학습 중5.012/2.326/2.333초였다. 학습 자식과 자손의 소멸, 임시 staging 잔여0을 확인했다. ps RSS가 당시GPU/physical memory 압박을 충분히 반영하지 못해 단독hard limit으로 취급하지 않는다.
+- 재부팅 후 별도 실행한 daemon은 owner CLI status ready=true로 복구 확인했다. Telegram 지정1방30일/1페이지 probe는30건/0.984초,local_budget 종료이며 수집 완전성은unknown이다. 설치본 본문 없는100개검토표본을 준비했고 실제 승인기록은만들지않았다.
+
+- 최종target-position gather 경로는 전체context gradient를보존한채2K/4K합성훈련성공(58.85초/21.552GB,59.98초/37.976GB). 설치본에서검증체크포인트선택/독립test/ABC6사례/격리registry적용·롤백을완료했다. 정확도개선이나사람품질판정으로해석하지않는다.
+- daemon launcher readiness timeout 원인을확인: 같은reader hello+status의실제응답5회가221/233/253/255/258ms였으나probe는200ms마다연결을끊었다. STATUS_PROBE_TIMEOUT_MS를1000으로수정하고350ms정상응답을기존daemon으로인식하여중복spawn하지않는회귀4tests/typecheck통과. 전체deadline60초와경로·권한검사는유지한다.
+
+- 수정된정상launcher경로로설치daemon재시작1.539초ready확인. 최종cycle은225후보(history224/session1)/승인0으로waiting_for_reviewed_data,실제개인화학습·운영활성화없음. 매일04:00스케줄은2K,batch1,epoch2,시간7200초/RSS20GiB/swap증가4GiB,고정턴정책64/115초. source/install학습모듈일치·staging잔여0확인. 실제100건사람검토와실데이터ABC품질판정이남은운영단계다.
+
+
+## 2026-10-03 — 확장 데이터 학습의 swap 증가 조사
+
+- 기대: 실제 학습 88건 + 합성 64건으로 304회 업데이트와 저장 가중치 4개 검증을 완료한다. 학습 2K·검증 4K, batch 1, 기존 gradient checkpoint·정답 위치 loss, RSS 28GiB·swap 증가 4GiB 한도를 적용한다.
+- 실측: 첫 v1은 MLX 로더가 빈 미사용 test 파일을 읽어 업데이트 전에 실패했다. 빈 분할 파일을 생략하는 수정 및 실제 설치 로더 회귀를 포함한 검사 61개를 통과했다. 테스트 원문을 학습에 제공하지 않는 정책은 유지했다.
+- v2는 1,396.677초에 training_swap_limit으로 종료됐다. 마지막 학습 기록은 90회, 최대 프로세스 RSS 19.56GiB, MLX peak 22.959GB, 시스템 swap 추가 증가 최대 4.167GiB다. 76회 가중치 SHA 193402d2a6ae95ee8f08de207459dee64dd327ba467f00da482a71f373b1b28d는 보존했다. 학습 중 검증 손실은 2.855→2.553이며 저장된 76회 가중치의 재검증 값은 아니다.
+- 종료 후 실제 데몬·암호화 저장소·스키마 7 준비 상태를 확인했다. 활성 어댑터는 없다. 다른 앱의 프로세스를 종료하거나 실행 중 한도를 바꾸지 않았다.
+- H1: 서로 다른 배치 길이에 대한 컴파일 흔적이 누적된다. 설치된 MLX trainer는 32단위 길이와 stateful compiled step을 쓰며, 매 단계 allocator cache는 이미 정리한다. 따라서 일반 allocator cache 정리와 컴파일 흔적의 수명을 구분한다. 같은 버전의 [공개 이슈 4464](https://github.com/ml-explore/mlx/issues/4464)에 관련 보고가 있으나 닫힘 사유와 로컬 실험을 확인하기 전 확정 원인으로 취급하지 않는다.
+- H2: 긴 사례 또는 검증/학습 전환의 순간 최대 점유가 RSS·MLX 집계에 충분히 나타나지 않는다. 실제 배치 길이, active/cache/peak 메모리와 OS 지표를 함께 수집해 확인한다.
+- H3: 시스템 전체 swap 변화량이 해당 학습의 지속적인 물리 메모리 부족을 과대 표시한다. swap 증가 약 2GiB 당시 free 약 16.6GiB와 memory_pressure의 여유 60%가 관측됐으나, 이것만으로 순간 압박이 없었다고 결론 내리지 않는다. 다른 대형 경쟁 프로세스는 관측되지 않았다.
+- 한 번에 바꿀 후보는 전용 학습 프로세스의 compile 활성화 여부다. 예제·순서·길이·학습층·학습률·자원 한도를 동시에 바꾸지 않는다. CPU의 작은 loss/gradient 대조에서 compiled/eager 수치가 같음을 확인한 뒤, 실제 모델의 짧은 제한 실행에서 속도와 자원을 측정한다. 전체 재실행 및 원인 확정은 아직 하지 않았다.
+- 진단 결과: 동일 합성 길이·순서로 기본 컴파일 36회/600.811초 시간 한도, 컴파일 해제 56회/583.218초 완료. 같은 36회의 업데이트 시간은 587.308→363.468초, 실제 모델 손실 최대 차이 약 0.009. 최대 RSS 25.335→7.311GB, MLX peak 22.957→22.622GB, swap 증가 1.611→0GB다. 작은 모델의 손실·기울기·Adam 업데이트 대조와 관련 검사 66개가 통과했다. 보고서 `compile-diagnostic-v1/summary.json` 해시는 `b1f65e1b0fa6c46cf6ff812ab9aa4e7dbf3fb6797724ce16fc41de76a7d8cb87`이다.
+- 해석: 컴파일 해제는 재시도할 실측 근거가 있지만 H1의 메모리 인과는 확정하지 않았다. 순차 실행의 시작 swap은 3.285/4.896GB이며, 진단 시작 여유 메모리는 v2보다 약 14.2GB 많았다. active 메모리는 두 조건 모두 약 5.071GB로 안정적이었다. upstream 이슈의 buffer-count 한도 오류는 로컬 swap guard 종료와 다르며, [종료 설명](https://github.com/ml-explore/mlx/issues/4464#issuecomment-5595997328)도 로컬 원인 증거로 대체하지 않는다.
+- 다음 조치: 같은 198개 예제·304회 업데이트·기존 자원 한도로 `compile_mode=disabled`를 명시한 별도 v3 계획을 동결한다. 실패 v2 및 76회 가중치는 보존한다. 진단 후 최신 모듈 설치·10개 소스/설치 해시 일치·격리 import·데몬 스키마 7 복구를 확인했다. 전체 완주와 독립 품질 향상은 별도 미확인 상태다.
+- v3 실측 후속: 2026-10-03 19:11 KST에 학습 자식이 304회 업데이트와 저장 가중치 4개 생성을 정상 완료했다. 자식 실행 3,482.404초, 최대 RSS 7,378,223,104바이트, 시스템 swap 추가 증가 최대 0. 기존 한도를 유지한 전체 학습의 완주 증거이며, 시작 환경이 다른 v2와의 비교만으로 메모리 원인을 단정하지 않는다. 저장 가중치 4개 검증과 추천 품질 비교는 이어서 수행 중이다.
+- 19:27 KST 후속: 저장된 76/152/228/304회 가중치의 검증 손실은 각각 2.546/2.445/2.464/2.471, 검증 실행 합계 925.324초, 모두 자원 한도 내 정상 완료했다. 제어 프로세스 exit 0과 실제 데몬·암호화 저장소·스키마 7 복구를 확인했다. 운영 추론 변경 없이 전용 학습의 컴파일 해제 조건에서 전체 학습·저장 검증을 완주했으며, 품질 향상 판단은 이어지는 독립 평가에 맡긴다.
+
+## 2026-10-03 — 확장 v3 개발 품질 미달 조사
+
+- 같은 개발 24건의 5개 모델 답장 120개를 블라인드 판정 후 동결·매핑 확인했다. 선택된 152회 모델은 의미 오류 8→4건, 역할 오류 1→0건, 말투 3.50→3.75지만 유용성은 2.875→2.667로 낮아졌다. 228/304회는 의미 오류 10/11건으로 더 나빴다. 선택·판정 산출물은 보존한다.
+- H1: 실제 학습 예제의 마스킹·종료 토큰·생성 prefix 처리에 문제가 있어 일부 후보의 반복/태그 출력이 늘었다. 정확히 사용한 예제에서 CPU 토큰 경계와 종료 토큰 감독 여부를 확인한다. 아직 원인으로 확정하지 않는다.
+- H2: 실제 88건 중 인사·확인 47건이라는 구성과 2K 제한으로 기존 결정 보존·구체적인 응답보다 짧은 긍정/회피를 더 학습했다. 실제 정답 토큰 기여량과 추가 3K/4K 후보 분포를 확인하고, 자원 검증 뒤 필요한 행동을 보강한다. 사례 수만 늘리거나 전체 재학습 횟수만 늘리는 것으로 해결됐다고 주장하지 않는다.
+- H3: 입력에서 최신 내 결정·미정 상태를 충분히 구분하지 못한다. 선택 후보의 남은 개발 오류와 낮은 유용성 사례를 분류한 뒤, 데이터 보강 또는 공통 입력 표현 변경을 독립된 실험으로 설계한다. 사례별 정답을 코드에 넣지 않는다.
+- 실제·합성 최종 48+48건은 미사용 상태로 보존한다. 개발 개선 후 사전 고정한 최종 기준으로 확인하며, 현재 어댑터는 활성화하지 않는다.
+- H1 점검: 실제 사용한 198개 예제의 해시, 학습 prefix와 운영 토크나이저 경계가 모두 일치했다. 정답 뒤 종료 토큰과 줄바꿈도 전부 감독 대상이며 padding은 손실에서 빠진다. 학습 정답 토큰은 회차당 2,263개, 두 회차 4,526개로 실제 로그와 같다. 검사한 마스킹·종료 토큰 누락은 발견하지 못했다. 자유 생성 시 종료 확률은 측정하지 않아 반복 출력 원인까지 해결됐다고 판단하지 않는다.
+- H2 점검: 실제 88건은 정답 토큰의 55.3%, 합성 64건은 44.7%를 차지한다. 인사·확인 47건은 전체 152건의 30.9%, 전체 정답 토큰의 21.1%다. batch 1의 사례별 평균 손실이므로 사례 비중과 토큰 비중을 구분한다. 추가 4K 구조 후보 2,710건 중 입력 3,904 한도를 적용하면 2,704건이며, 이 수는 승인 수가 아니다.
+- H3 점검: 선택 후보의 남은 오류 4건은 모두 입력 621–685토큰이다. 따라서 문맥 한도 확대만으로 해결된다고 볼 근거는 없다. 기존 v4에도 결정 관련 지침이 있으므로 지침 부재를 원인으로 단정하지 않는다. 같은 개발 24건·고정 152회 가중치에 마지막 생성 지시만 바꾸는 2×2 비교를 준비했다. 최종 평가와 운영 프롬프트는 바꾸지 않았다.
+- 자원 진단 `4k-resource-probe-v2`: 2K/head65는 6회/100.536초, 최대 RSS 7.334GB, swap 증가 0으로 완료했다. 이어진 4K/head65는 34.137초에 첫 업데이트 완료 전 Metal `Insufficient Memory`로 실패했다. head188 조건은 실행하지 않았고 자동 재시도·한도 상향도 없다. 실제 데몬·암호화·스키마 7 복구와 타이머 해제를 확인했다.
+- 위 진단의 시작 조건 차이: 2K 시작 wired 3.74GB/free 27.92GB, 4K 시작 wired 21.74GB/free 12.28GB였다. 프로세스를 새로 시작해도 OS 메모리가 같은 상태로 돌아오지 않았다. 지연된 메모리 해제는 원인 후보일 뿐이며, 이 결과로 4K 자체가 불가능하다고 확정하지 않는다. 다음 자원 진단에는 조건 사이 메모리 안정 여부와 대기 한도를 사전에 정한다.
+- H3 단일 변경 실험 완료: 마지막 지시문만 자세히 바꾼 개발 24×4 비교의 명확한 오류는 기본 모델 8→9, 고정 152회 어댑터 4→10이었다. 유용성도 각각 2.958→2.625, 2.917→2.500으로 하락했다. 모든 96개 판정을 동결한 뒤 매핑을 확인했다. 새 지시문은 채택하지 않으며, 지시가 부족해서 실패했다는 설명은 이번 변경으로 뒷받침되지 않는다. 최종 96건은 아직 생성·품질 평가에 사용하지 않았다.
+
+
+### 4K 실제 자료 검수 중 확인한 입력·정답 계약 (2026-10-03)
+
+- 승인된 길이 극단 표본의 재점검에서 의미상 근거는 있으나 운영 SYSTEM의 한두 문장 형식과 맞지 않는 장문 5개를 확인했다. 원판정은 보존하고 `fourk-dataset-expansion-v1/root-qa-admission-overlay-v1.json`으로 입장 보류를 추가했다. 정답을 잘라 승인하거나 길이 숫자만으로 제외하지 않는다. 최종 학습 최대 정답 길이는 입장 후 재산출한다.
+- `worker.compile_prompt`와 `build_generation_input`에는 개별 발언의 `ts`만 있고 생성 현재 시각·날짜·시간대는 없다. 검토용 실제 정답 시각은 모델 입력 근거로 사용하면 안 된다. 대화가 오늘임을 확립하지 않은 절대 날짜를 정답에서 ‘오늘’로 변환한 사례는 보류한다. 현재 실험은 동결된 reply-v4 입력을 유지한다. 현재 시각 제공은 별도 입력 계약 개선 후보이며 이번 데이터·평가 중간에 조용히 추가하지 않는다.
+
+- 4K 검수 기록 입장 검사에서 Luna 42행의 `hash`가 원문 `review_hash` 대신 판정 행 자체의 digest인 저장 오류를 발견했다. 42/42에서 잘못된 값의 계산식과 기존 ID·grant·input·target 연결이 정확함을 독립 확인했다. 원판정을 수정하지 않고 `preparation-v3/root-luna-binding-correction-v1.json`으로 정정하며, 이후 writer는 원천 hash를 직접 바인딩하고 행 서명을 별도 필드에 둔다. 일부 승인 경고 누락·입력 hash 오기는 별도 정정 기록으로 확인한다.
+- 위 저장 오류와 별개로 일정·권한·자료 적합성 관련 승인 11건을 root/Sol이 전체 맥락으로 다시 확인했다. 8건은 앞선 본인 의사와 연결됐고, 현재 일정 가능 여부·과거 작업 방법·보이지 않는 시안 승인에 근거가 부족한 3건은 입장 보류했다. 전체 묶음을 독립 재검토했다고 표시하지 않는다.
+
+
+### 2026-10-04 — 실제 4K 파일럿의 첫 업데이트 전 메모리 압력
+
+- 최종 학습 535개(실제 471 + 합성 64), 검증 46개를 봉인했다. 전체 정답·EOS·줄바꿈 상한은 66이다. 실제 6개 전체 길이는 2,302–3,904이며 최대 입력은 3,885토큰이다. 추가 special token을 뺀 `tokenizer.vocab_size` 대신 실제 `get_vocab()` 범위 248,077로 파일럿 토큰 ID 검증 메타데이터만 정정했다. 원래 데이터·토큰·6개 grant는 불변이다.
+- `actual4k-resource-pilot-v1/run-v2`는 시뮬레이터·에뮬레이터 0개, 30초 안정 창을 통과했다. 시작 free+inactive+speculative 합은 28.748GB, wired 4.136GB이며 이 합은 실제 학습 용량 보장이 아니다. GPU 프로세스 실행 18.307초에 OS pressure 2로 중단됐다. 마지막 wired 31.123GB·compressor 10.193GB, 최대 프로세스 RSS 7.572GB, swap 추가 증가 0이다. 완료 업데이트·학습 가중치·모델 개선 증거는 없다.
+- 이전 3K 합성 시험에는 매 단계 후 active 약 5.07GB와 free cache 약 33.1GB가 관측됐다. peak active 약 32.86GB는 별도 최고값이다. 현재 `clear_cache_threshold=0`은 단계 완료 후 캐시를 정리하며, 첫 단계 내부의 미사용 캐시 보유는 제한하지 않는다. [MLX set_cache_limit](https://ml-explore.github.io/mlx/build/html/python/_autosummary/mlx.core.set_cache_limit.html) 및 설치 버전의 docstring을 확인했다. 다음 별도 시험은 모델 로드 전 free cache 한도만 1GiB로 설정하고 기존 데이터·계산·중단 기준을 유지한다. 활성 텐서의 최대 점유 감소나 4K 성공을 보장하는 설정은 아니다.
+- 종료 후 자동 복구가 실패했다. 시작 도구는 status 요청당 1초를 기다리고 전체 60초 후 새 데몬을 종료한다. 별도 조회에서는 준비·암호화·schema7 정상 응답에 3.57초/1.09초가 걸렸다. 응답 기한에 따른 오판 가능성을 확인해 소스의 요청별 기한을 10초로 늘리고 전체 60초는 유지했다. 1.2초 정상 응답 회귀를 포함한 집중 검사 4개가 통과했다. 설치 CLI는 아직 교체하지 않았으며, 실험 복구는 같은 설치 데몬·설정·환경과 더 긴 준비 조회를 쓰는 별도 경로로 보강한다. 실패 파일럿 기록은 덮어쓰지 않는다.
+
+- 캐시 1GiB 시험(`actual4k-resource-pilot-cache1g-v1/run-v1`)도 17.598초에 pressure 2로 중단됐다. 모델 로드 후 active 5.038GB, 첫 batch shape `[1,2305]`·정답 3토큰까지 도달했으나 업데이트는 0회다. 최대 RSS 7.657GB, 추가 swap 0. 자동 복구와 후속 schema7 확인은 성공했다.
+- 다음 후보 `set_memory_limit`은 Metal allocator 구현만 보면 캐시 GC 설정처럼 보이지만, [동일 v0.32.2의 상위 graph evaluator](https://github.com/ml-explore/mlx/blob/v0.32.2/mlx/transforms.cpp)는 active memory가 한도를 넘고 실행 중 task가 있으면 streams를 finalize하고 `scheduler::wait_for_one()`을 호출한다. 전체 참조를 확인하지 않은 초기 조사 결론은 정정했다. 20GiB 설정은 계산을 유지하며 비동기 작업의 메모리 중첩을 줄일 후보지만, 단일 연산·필수 live buffer를 강제로 줄이는 hard cap은 아니다.
+- 작업 없는 Gradle 8.14.3 데몬 PID52935 하나만 `--status`로 IDLE 확인 후 정상 `--stop`했다. 종료 전 footprint 표시는 2.5G이며 이만큼의 물리 RAM이 회수됐다고 주장하지 않는다. 사용자 전면 앱은 종료하지 않았다. macOS disk buffer purge는 권한 오류로 실행되지 않았고 재시도하지 않았다. 다음 시험에는 이 OS 시작 조건 변화도 기록하며, 개선을 allocator 한도 변경만의 인과로 단정하지 않는다.
+
+
+### 2026-10-04: actual 4K resource blocker after cleanup
+
+Simulator/Android emulator devices and UI were verified stopped; four obsolete review RAM owners and one independently verified idle Gradle daemon were stopped. Final admission remains 535 train / 46 validation records. GPU trials have not established actual 4K memory feasibility and full training has not started.
+
+Frozen-prefix materialization inside differentiation failed before its first update. Moving prefix work outside differentiation preserved the original loss and passed two CPU updates plus intervening evaluation with full 62-gradient and Adam parity, but the first three actual MLX peaks were unchanged. Both this trial and the separately frozen bounded-warning diagnostic completed four updates through padded length 3137 and stopped during the next long record.
+
+The final bounded-warning diagnostic (plan dfea59be061f8f4cf4fd6deb6979cdb929f0be436f879e96df8a51f6f6679558) observed raw final pressure 4, wired 41218228224 bytes, reclaimable proxy 1641627648 bytes, and swap growth 1313142211 bytes. The normal-only trial was not retrospectively relabeled. The monitor's last-good pressure field is stale when validation raises; the conclusion correctly uses resources.samples[-1].pressure_level. This is a critical-pressure guard stop, not evidence of an observed Metal OOM.
+
+### 2026-10-04 — exact chunk VJP: CPU parity passed, first actual pilot failed
+
+The user explicitly requested resolving the underlying memory issue and continuing through training. A process-local custom recurrence VJP copies evaluated chunk values into independent leaf buffers and propagates the final-state cotangent through every preceding chunk. Helper SHA `5cee017acac1757c93b872a4bee8e58e2a2f624aaa9747e4214e5349fe48cad1` passed separate CPU recurrence checks and the original answer-only loss with all 62 LoRA gradients, two persistent Adam updates, and intervening validation. The remaining CPU gradient graph shrank, but this was not proof of GPU peak memory.
+
+The actual same-six/18-update normal-pressure pilot (`actual4k-resource-pilot-boundedvjp-v1/run-v1`, plan `7cb80a43c71f0119c710e73bb4c5306a4035caf8c67ca967428c092e2ad7d248`) stopped after 22.989 seconds before completing the first update. Initial wired/proxy were 3.995/32.006GB; the final observed pressure was 2, wired 39.055GB, proxy 2.245GB, peak RSS 7.095GB, and additional swap 0.272GB. The phase within the first update has not yet been localized. This result does not establish a memory improvement. Daemon restoration and encrypted schema 7 readiness passed. No full training or adapter activation occurred. Preserve this failure and inspect phase-local allocation before another actual-data run.
+
+The prefix observer measured the first frozen-prefix peak at 5764891944 bytes and first full-step peak at 25080535380 bytes; the large additional peak occurred after prefix preparation. Counters are cumulative, not independent per-stage peaks. No adapter remains. Automatic daemon restoration and independent schema 7 readiness passed. No further GPU trials or speculative CPU optimization until external memory headroom changes; then retest the original normal-only policy.
+
+## 2026-10-04: 4K memory fix and final training/evaluation closure
+
+The complete 535-update run succeeded with the fixed C16 parallel gated-delta recurrence and frozen-prefix computation outside gradient tracing. Full-context gradients were preserved. Peak MLX memory was 29.987 GB, incremental swap was zero, and all 1,377 pressure samples across training/checkpoint evaluation were normal. This required the complete recorded allocator/BFS/cache/guard profile; the new backend option alone is not a 30 GB guarantee.
+
+Saved checkpoint 268 was selected by the frozen development quality rule, rather than the lowest-loss 535 checkpoint. All 96 fresh final cases and 288 outputs were judged before unblinding. Real clear semantic failure cases fell from 25/48 to 12/48, but synthetic usefulness declined from 2.8125 to 2.6875 and consent failures rose from 8 to 10. Both final gates reject; an observed explicit-refusal reversal also remains. Production stays on the base model with no active adapter. The former real22 reproduction gap remains disclosed.
+
+Only after final summaries were frozen, the validated helpers were integrated into runtime v5 with explicit parallel_chunk16 opt-in. Related tests: 71 pass, including the real tiny CPU installer/prefix/62-gradient/Adam2/mid-evaluation path. Four training modules were backed up, installed, and imported in isolation. Actual full-9B training used the preintegration sealed controller; the new packaged installer was not subjected to a second full training run. Both owned corpus RAM servers shut down gracefully, their sockets and review staging were removed, and daemon/encryption schema7 readiness was confirmed. Daily04:00 schedule remains deleted. Full evidence and limitations: docs/27-historical-reply-training-plan.md, sections18.3–18.6.

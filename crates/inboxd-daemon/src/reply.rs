@@ -22,42 +22,6 @@ pub(crate) struct ReplyService {
     wake: Notify,
 }
 
-const MAX_REPLY_WORKERS: usize = 2;
-
-fn reply_worker_count(configured: Option<&str>, physical_memory_bytes: Option<u64>) -> usize {
-    configured
-        .and_then(|value| value.parse::<usize>().ok())
-        .map(|count| count.clamp(1, MAX_REPLY_WORKERS))
-        .unwrap_or_else(|| {
-            usize::from(physical_memory_bytes.unwrap_or(0) >= 48 * 1024 * 1024 * 1024) + 1
-        })
-}
-
-#[cfg(target_os = "macos")]
-fn physical_memory_bytes() -> Option<u64> {
-    let output = std::process::Command::new("/usr/sbin/sysctl")
-        .args(["-n", "hw.memsize"])
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8(output.stdout).ok()?.trim().parse().ok())
-        .flatten()
-}
-
-#[cfg(not(target_os = "macos"))]
-fn physical_memory_bytes() -> Option<u64> {
-    None
-}
-
-fn configured_worker_count() -> usize {
-    reply_worker_count(
-        std::env::var("INBOXD_REPLY_WORKERS").ok().as_deref(),
-        physical_memory_bytes(),
-    )
-}
-
 struct ReplyJob {
     id: String,
     chat: String,
@@ -304,18 +268,6 @@ mod worker_tests {
     }
 
     #[test]
-    fn worker_pool_defaults_to_two_only_with_measured_memory_headroom() {
-        let gib = 1024 * 1024 * 1024;
-        assert_eq!(reply_worker_count(None, Some(48 * gib)), 2);
-        assert_eq!(reply_worker_count(None, Some(47 * gib)), 1);
-        assert_eq!(reply_worker_count(None, Some(16 * gib)), 1);
-        assert_eq!(reply_worker_count(None, None), 1);
-        assert_eq!(reply_worker_count(Some("1"), Some(48 * gib)), 1);
-        assert_eq!(reply_worker_count(Some("2"), Some(16 * gib)), 2);
-        assert_eq!(reply_worker_count(Some("20"), Some(48 * gib)), 2);
-    }
-
-    #[test]
     fn incoming_bursts_coalesce_and_cannot_delay_forever() {
         let mut queue = Vec::new();
         let first = tokio::time::Instant::now();
@@ -423,7 +375,7 @@ mod worker_tests {
     }
 
     #[tokio::test]
-    async fn one_wakeup_dispatches_backlog_to_two_waiting_consumers() {
+    async fn single_consumer_drains_backlog_in_priority_order_after_one_wakeup() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let actor = Arc::new(
@@ -438,10 +390,10 @@ mod worker_tests {
             queue: Mutex::new(Vec::new()),
             wake: Notify::new(),
         });
-        let first_service = Arc::clone(&service);
-        let first = tokio::spawn(async move { first_service.next_job().await });
-        let second_service = Arc::clone(&service);
-        let second = tokio::spawn(async move { second_service.next_job().await });
+        let consumer_service = Arc::clone(&service);
+        let consumer = tokio::spawn(async move {
+            vec![consumer_service.next_job().await, consumer_service.next_job().await]
+        });
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         let now = tokio::time::Instant::now() - std::time::Duration::from_secs(1);
         {
@@ -463,15 +415,12 @@ mod worker_tests {
                 now,
             );
         }
-        // Simulate coalesced producer notifications: the first consumer must
-        // hand the remaining ready backlog to the second consumer.
+        // A single notification must allow the sole consumer to drain ready jobs.
         service.wake.notify_one();
-        let mut ids = tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            vec![first.await.unwrap(), second.await.unwrap()]
-        })
+        let ids = tokio::time::timeout(std::time::Duration::from_secs(1), consumer)
         .await
+        .unwrap()
         .unwrap();
-        ids.sort();
         assert_eq!(ids, ["newest", "older"]);
     }
 
@@ -562,12 +511,6 @@ impl ReplyService {
             let now = tokio::time::Instant::now();
             if queue.first().is_some_and(|job| job.ready_at <= now) {
                 let id = queue.remove(0).id;
-                if !queue.is_empty() {
-                    // A notification permit can coalesce before both pool
-                    // consumers are waiting. Hand the remaining backlog to
-                    // another idle consumer after every dispatch.
-                    self.wake.notify_one();
-                }
                 return id;
             }
             // Wait for the highest-ranked job even when a lower-ranked job has
@@ -592,11 +535,9 @@ impl ReplyService {
         });
         let pending = Arc::clone(&service);
         let task = tokio::spawn(async move {
-            let worker_count = configured_worker_count();
             let mut pool = tokio::task::JoinSet::new();
-            for _ in 0..worker_count {
-                pool.spawn(Arc::clone(&pending).run_worker_loop(Arc::clone(&actor)));
-            }
+            // A single consumer owns the local model, regardless of memory or environment.
+            pool.spawn(Arc::clone(&pending).run_worker_loop(Arc::clone(&actor)));
             while pool.join_next().await.is_some() {
                 pool.spawn(Arc::clone(&pending).run_worker_loop(Arc::clone(&actor)));
             }
@@ -632,7 +573,7 @@ impl ReplyService {
             if worker.is_none() {
                 worker = Worker::start().ok();
             }
-            let result=match worker.as_mut(){Some(w)=>crate::reply_pipeline::run(w,request).await.unwrap_or_else(|error|{worker=None;json!({"id":claim["suggestion_id"],"status":"failed","error":error,"prompt_version":"reply-v2"})}),None=>json!({"id":claim["suggestion_id"],"status":"failed","error":"local_reply_worker_unavailable","prompt_version":"reply-v2"})};
+            let result=match worker.as_mut(){Some(w)=>crate::reply_pipeline::run(w,request).await.unwrap_or_else(|error|{worker=None;json!({"id":claim["suggestion_id"],"status":"failed","error":error,"prompt_version":claim["prompt_version"]})}),None=>json!({"id":claim["suggestion_id"],"status":"failed","error":"local_reply_worker_unavailable","prompt_version":claim["prompt_version"]})};
             if result["id"] != claim["suggestion_id"] || result["reset_worker"] == true {
                 worker = None;
             }

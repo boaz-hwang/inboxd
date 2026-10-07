@@ -32,7 +32,7 @@ export async function createKakaoAccount(credentials: PersonalCredentials, sessi
         }
         case "kakao_page": {
           const page = await client.getMessagePage(req.chat_id!, { count: req.limit ?? 100, ...(req.cursor ? { from: req.cursor } : {}) });
-          return { messages: page.messages.map(m => ({ id: m.log_id, chat_id: req.chat_id!, author_id: String(m.author_id), author_name: m.author_name ?? "", ts: m.sent_at, body: m.message })), complete: page.complete, ...(page.next_cursor ? { next_cursor: page.next_cursor } : {}) };
+          return { messages: page.messages.map(m => ({ id: m.log_id, chat_id: req.chat_id!, author_id: String(m.author_id), author_name: m.author_name ?? "", ts: m.sent_at, body: m.message, ...(m.type === 26 && typeof m.attachment?.src_logId === "string" ? { parent_id: m.attachment.src_logId } : {}) })), complete: page.complete, ...(page.next_cursor ? { next_cursor: page.next_cursor } : {}) };
         }
         case "kakao_members": return { data: await client.getMembersByIds(req.chat_id!, req.ids!) };
         case "kakao_self_members": return { data: await client.getMembers(req.chat_id!) };

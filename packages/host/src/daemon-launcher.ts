@@ -6,10 +6,12 @@ import { Socket } from "node:net";
 import { fileURLToPath } from "node:url";
 
 const DEFAULT_READINESS_TIMEOUT_MS = 60_000;
-const STATUS_PROBE_TIMEOUT_MS = 200;
+// Owner status includes durable store health; a healthy encrypted store may
+// take longer than 200 ms. Each probe still shares the overall readiness deadline.
+const STATUS_PROBE_TIMEOUT_MS = 10_000;
 const POLL_INTERVAL_MS = 25;
 const TERMINATION_GRACE_MS = 250;
-const SAFE_ENV_KEYS = ["HOME", "PATH", "TMPDIR", "USER", "LOGNAME", "LANG", "LC_ALL", "XDG_RUNTIME_DIR", "INBOXD_REPLY_MODEL", "INBOXD_REPLY_PYTHON", "INBOXD_REPLY_WORKERS"] as const;
+const SAFE_ENV_KEYS = ["HOME", "PATH", "TMPDIR", "USER", "LOGNAME", "LANG", "LC_ALL", "XDG_RUNTIME_DIR", "INBOXD_REPLY_MODEL", "INBOXD_REPLY_PYTHON"] as const;
 
 export const defaultDaemonBinary = fileURLToPath(
   new URL("../../../target/inboxd-product/release/inboxd-daemon", import.meta.url),

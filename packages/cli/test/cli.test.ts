@@ -103,6 +103,11 @@ describe("protocol-only CLI handlers", () => {
     expect(lastRequest(transport)).toMatchObject({ method: "system.status", params: {} });
     await respondToCall(transport, cli.chatList(), { chats: [] });
     expect(lastRequest(transport)).toMatchObject({ method: "chat.list", params: {} });
+    await respondToCall(transport, cli.accountList({ platform: "telegram" }), { accounts: [] });
+    expect(lastRequest(transport)).toMatchObject({ method: "account.list", params: { platform: "telegram" } });
+    const accountPage = { platform: "telegram", account: "a", chat_id: "123", limit: 30, cursor: "account:next" };
+    await respondToCall(transport, cli.accountMessages(accountPage), { messages: [], complete: true });
+    expect(lastRequest(transport)).toMatchObject({ method: "account.messages", params: accountPage });
     await respondToCall(transport, cli.inbox({ platform: "slack", account: "a", chat_id: "c" }), { messages: [] });
     expect(lastRequest(transport)).toMatchObject({ method: "message.inbox" });
     await respondToCall(transport, cli.get({ platform: "slack", account: "a", chat_id: "c", msg_id: "m" }), { message: null });

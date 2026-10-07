@@ -85,6 +85,7 @@ pub(crate) struct AccountService {
     pages: std::sync::Mutex<BTreeMap<u64, (std::time::Instant, Value)>>,
     sequence: std::sync::atomic::AtomicU64,
     pub(crate) read_sync: Mutex<()>,
+    history_lock: Mutex<()>,
 }
 impl AccountService {
     pub(crate) fn new(configs: Vec<AccountConfig>) -> Self {
@@ -99,6 +100,7 @@ impl AccountService {
             pages: Default::default(),
             sequence: std::sync::atomic::AtomicU64::new(0),
             read_sync: Mutex::new(()),
+            history_lock: Mutex::new(()),
             slots: configs
                 .into_iter()
                 .map(|config| Entry {
@@ -335,6 +337,245 @@ impl AccountService {
             .map_err(|e| e.message)?;
         Ok(())
     }
+    /// Import a verified owner archive; no provider reads, unread updates or
+    /// recommendation queueing. Rooms may have left the current directory.
+    pub(crate) async fn import_local_archive(
+        &self,
+        chat: &Value,
+        params: &Value,
+    ) -> Result<Value, String> {
+        if chat["platform"] != "kakao" {
+            return Err("local archive platform unavailable".into());
+        }
+        let entry = self
+            .slots
+            .iter()
+            .find(|e| e.config.platform == "kakao" && e.config.account == chat["account"])
+            .ok_or("local archive account unavailable")?;
+        let config: Value = serde_json::from_str(entry.config.config.as_str())
+            .map_err(|_| "local archive account configuration invalid")?;
+        if config["kind"] != "kakao_personal" {
+            return Err("local archive requires personal account".into());
+        }
+        let credentials: Value = serde_json::from_str(
+            config["credentials"]
+                .as_str()
+                .ok_or("local archive account identity unavailable")?,
+        )
+        .map_err(|_| "local archive account identity unavailable")?;
+        let own = credentials["userId"]
+            .as_str()
+            .ok_or("local archive account identity unavailable")?;
+        if params["self_user_id"] != own {
+            return Err("local archive self identity mismatch".into());
+        }
+        let source = &params["source"];
+        if source["schema"] != "kakao-mac-sqlcipher-v1"
+            || source["snapshot_sha256"]
+                .as_str()
+                .is_none_or(|s| s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Err("local archive source invalid".into());
+        }
+        if params["status_only"] == true {
+            let storage = self
+                .storage
+                .as_ref()
+                .ok_or("local archive storage unavailable")?;
+            let mut status=storage.call_async(StorageOperation::ReadLocalArchiveSummary,json!({"platform":"kakao","account":chat["account"],"source_id":source["snapshot_sha256"],"self_user_id":own})).await.map_err(|e|e.message)?;
+            status["reader"] = json!("local_archive");
+            status["coverage_state"] = json!("unknown");
+            status["read_performed"] = json!(false);
+            return Ok(status);
+        }
+        let page_id = params["page_id"]
+            .as_str()
+            .filter(|s| {
+                !s.is_empty()
+                    && s.len() <= 128
+                    && s.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_-:.".contains(&b))
+            })
+            .ok_or("local archive page identity invalid")?;
+        let rows = params["messages"]
+            .as_array()
+            .filter(|r| !r.is_empty() && r.len() <= 100)
+            .ok_or("local archive page invalid")?;
+        if rows.iter().any(|m| {
+            m["chat_id"] != chat["chat_id"]
+                || m["id"]
+                    .as_str()
+                    .is_none_or(|s| s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()))
+                || !m["author_id"].is_string()
+                || !m["body"].is_string()
+                || m["ts"].as_f64().is_none_or(|t| !t.is_finite() || t < 0.)
+                || m["type"].as_i64().is_none()
+        }) {
+            return Err("local archive message invalid".into());
+        }
+        use sha2::{Digest, Sha256};
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(
+                json!({"chat":chat,"self_user_id":own,"source":source,"messages":rows})
+                    .to_string()
+                    .as_bytes()
+            )
+        );
+        let mut batch = chat.clone();
+        batch["messages"] = json!(rows);
+        batch["observed_at"] = json!(self.next_observation());
+        batch["local_archive"] =
+            json!({"page_id":page_id,"digest":digest,"source":source,"self_user_id":own});
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or("local archive storage unavailable")?;
+        let result = storage
+            .call_async(StorageOperation::ObserveMessages, batch)
+            .await
+            .map_err(|e| e.message)?;
+        Ok(
+            json!({"reader":"local_archive","page_id":page_id,"event_count":rows.len(),"stored":result["stored"],"inserted":result["inserted"].as_array().map_or(0,Vec::len),"replayed":result["replayed"]==true,"source":"verified_owner_local_archive","coverage_state":"unknown","read_performed":false}),
+        )
+    }
+    /// Owner-only entry point; provider continuations never leave encrypted storage.
+    pub(crate) async fn history(
+        &self,
+        chat: &Value,
+        interval: &Value,
+        status_only: bool,
+    ) -> Result<Value, String> {
+        let _serial = self.history_lock.lock().await;
+        let storage = self.storage.as_ref().ok_or("history storage unavailable")?;
+        let platform = chat["platform"]
+            .as_str()
+            .ok_or("invalid history platform")?;
+        let raw_chat = chat["chat_id"].as_str().ok_or("invalid history chat")?;
+        let raw_chat = if platform == "telegram" {
+            raw_chat.strip_prefix("telegram:chat:").unwrap_or(raw_chat)
+        } else {
+            raw_chat
+        };
+        let scope = json!({"platform":platform,"account":chat["account"],"chat_id":crate::accounts_backend::storage_keys::chat(platform,raw_chat)});
+        let entry = self
+            .slots
+            .iter()
+            .find(|e| e.config.platform == platform && e.config.account == chat["account"])
+            .ok_or("history account unavailable")?;
+        let previous = storage
+            .call_async(StorageOperation::ReadHistoryState, scope.clone())
+            .await
+            .map_err(|e| e.message)?;
+        if !previous.is_null() && previous["interval"] != *interval {
+            return Err("history interval differs from durable job".into());
+        }
+        let mut state = if previous.is_null() {
+            json!({"v":1,"interval":interval,"cursor":null,"committed_pages":0,"terminal":false,"seen_cursors":[]})
+        } else {
+            previous.clone()
+        };
+        let progress = |s: &Value| json!({"status":if s["terminal"]==true {"complete"} else if s["committed_pages"]==0 {"unstarted"} else {"pending"},"committed_pages":s["committed_pages"],"terminal":s["terminal"],"coverage_state":"unknown","source":"server_accessible_history","earliest_observed_ts":s["earliest_observed_ts"],"latest_observed_ts":s["latest_observed_ts"]});
+        if status_only || state["terminal"] == true {
+            return Ok(json!({"progress":progress(&state),"read_performed":false,"event_count":0}));
+        }
+        let _admission = entry.schedule.admit(false)?;
+        let mut slot = entry.slot.lock().await;
+        if !slot.loaded || slot.failed {
+            return Err("history account directory unavailable".into());
+        }
+        if !slot.chats.iter().any(|c| c["chat_id"] == raw_chat) {
+            return Err("history room permission unavailable".into());
+        }
+        let observed = self.next_observation();
+        let generation = slot.generation;
+        let overlapped_send = slot.sending.upgrade().is_some();
+        let mut backend = slot.take_backend();
+        drop(slot);
+        let result = call_account(
+            &entry.config,
+            &mut backend,
+            &entry.schedule,
+            &json!({"op":"history","chat_id":raw_chat,"cursor":state["cursor"]}),
+            self.run_worker,
+        )
+        .await?;
+        let mut slot = entry.slot.lock().await;
+        if !overlapped_send
+            && slot.sending.upgrade().is_none()
+            && slot.generation == generation
+            && observed >= slot.last_read_order
+        {
+            slot.backend = Some(backend);
+            slot.last_read_order = observed;
+        }
+        drop(slot);
+        let rows = result["messages"]
+            .as_array()
+            .filter(|r| r.len() <= 1000)
+            .ok_or("invalid history page")?;
+        if rows
+            .iter()
+            .any(|m| m["chat_id"] != raw_chat || m["id"].as_str().is_none_or(str::is_empty))
+        {
+            return Err("invalid history page scope".into());
+        }
+        let next = if result["complete"] == true {
+            Value::Null
+        } else {
+            result["next_cursor"].clone()
+        };
+        if !next.is_null()
+            && (next.as_str().is_none_or(str::is_empty)
+                || next == state["cursor"]
+                || state["seen_cursors"]
+                    .as_array()
+                    .is_some_and(|a| a.contains(&next)))
+        {
+            return Err("history cursor not progressing".into());
+        }
+        if result["complete"] != true && next.is_null() {
+            return Err("history cursor unavailable".into());
+        }
+        let seen = state["seen_cursors"]
+            .as_array_mut()
+            .ok_or("invalid history state")?;
+        if !next.is_null() {
+            seen.push(next.clone());
+            if seen.len() > 128 {
+                seen.remove(0);
+            }
+        }
+        state["cursor"] = next.clone();
+        state["terminal"] = json!(next.is_null());
+        state["committed_pages"] = json!(state["committed_pages"].as_u64().unwrap_or(0) + 1);
+        for row in rows {
+            let ts = row["ts"]
+                .as_f64()
+                .filter(|n| n.is_finite() && *n >= 0.)
+                .ok_or("invalid history timestamp")?;
+            state["earliest_observed_ts"] =
+                json!(state["earliest_observed_ts"].as_f64().unwrap_or(ts).min(ts));
+            state["latest_observed_ts"] =
+                json!(state["latest_observed_ts"].as_f64().unwrap_or(ts).max(ts));
+        }
+        let observations = crate::accounts_backend::storage_keys::observations(platform, rows);
+        let mut batch = scope;
+        batch["observed_at"] = json!(observed);
+        batch["messages"] = json!(observations);
+        batch["expected_history_checkpoint"] = previous;
+        batch["history_checkpoint"] = state.clone();
+        let stored = storage
+            .call_async(StorageOperation::ObserveMessages, batch)
+            .await
+            .map_err(|e| e.message)?;
+        if let Some(events) = &self.events {
+            let _ = events.publish("message.upserted", json!({"chat":chat}));
+        }
+        Ok(
+            json!({"progress":progress(&state),"read_performed":true,"event_count":rows.len(),"stored":stored["stored"],"inserted":stored["inserted"].as_array().map_or(0,Vec::len),"coverage_state":"unknown"}),
+        )
+    }
     pub(crate) async fn query(&self, op: &str, params: &Value) -> Result<Value, String> {
         #[cfg(test)]
         if op == "send" {
@@ -459,7 +700,10 @@ impl AccountService {
             .ok_or("연결된 계정 없음")?;
         let slot = entry.slot.lock().await;
         if !slot.loaded || slot.failed {
-            return Err(slot.error.clone().unwrap_or_else(|| "채팅 목록을 먼저 불러오세요".into()));
+            return Err(slot
+                .error
+                .clone()
+                .unwrap_or_else(|| "채팅 목록을 먼저 불러오세요".into()));
         }
         if !slot
             .chats
@@ -500,7 +744,10 @@ impl AccountService {
             };
             let mut slot = entry.slot.lock().await;
             if !slot.loaded || slot.failed {
-                return Err(slot.error.clone().unwrap_or_else(|| "채팅 목록을 먼저 불러오세요".into()));
+                return Err(slot
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "채팅 목록을 먼저 불러오세요".into()));
             }
             let chat = params["chat_id"].as_str();
             if let Some(id) = chat {
@@ -782,7 +1029,15 @@ impl WorkerProcess {
         }
         let value: Value = serde_json::from_slice(&response).map_err(|_| "워커 응답 오류")?;
         if value["ok"] != true {
-            if matches!(value["error"].as_str(), Some("KakaoTalk 인증이 만료되었습니다. inboxd connect kakao로 다시 연결하세요." | "Slack 인증이 만료되었습니다. inboxd connect slack으로 다시 연결하세요." | "Telegram 세션이 해제되었습니다. inboxd connect telegram으로 다시 연결하세요.")) {
+            if matches!(
+                value["error"].as_str(),
+                Some(
+                    "provider_rate_limit"
+                        | "KakaoTalk 인증이 만료되었습니다. inboxd connect kakao로 다시 연결하세요."
+                        | "Slack 인증이 만료되었습니다. inboxd connect slack으로 다시 연결하세요."
+                        | "Telegram 세션이 해제되었습니다. inboxd connect telegram으로 다시 연결하세요."
+                )
+            ) {
                 return Err(value["error"].as_str().unwrap().into());
             }
             return Err("메신저 요청 실패".into());
@@ -1304,7 +1559,16 @@ mod tests {
         assert_eq!(cached["chats"].as_array().unwrap().len(), 1);
         assert_eq!(cached["errors"].as_array().unwrap().len(), 1);
         assert_eq!(cached["errors"][0]["message"], "offline");
-        assert_eq!(service.query("messages", &json!({"platform":"telegram","account":"personal","chat_id":"room"})).await.unwrap_err(), "offline");
+        assert_eq!(
+            service
+                .query(
+                    "messages",
+                    &json!({"platform":"telegram","account":"personal","chat_id":"room"})
+                )
+                .await
+                .unwrap_err(),
+            "offline"
+        );
         assert!(service.query("send",&json!({"platform":"telegram","account":"personal","chat_id":"room","body":"hello","request_id":"another-request-1234"})).await.is_err());
         service.run_worker = Some(fake);
         assert!(
@@ -1313,6 +1577,131 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        assert!(service.query("messages", &json!({"platform":"telegram","account":"personal","chat_id":"room"})).await.is_ok());
+        assert!(
+            service
+                .query(
+                    "messages",
+                    &json!({"platform":"telegram","account":"personal","chat_id":"room"})
+                )
+                .await
+                .is_ok()
+        );
+    }
+    #[tokio::test]
+    async fn history_resumes_after_service_restart_and_does_not_expose_provider_cursor_or_body() {
+        fn history_fake<'a>(
+            _: &'a AccountConfig,
+            req: &'a Value,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                match req["op"].as_str().unwrap() {
+                    "chats" => Ok(json!({"chats":[{"chat_id":"r","title":"r","can_send":true}]})),
+                    "history" => {
+                        let first = req["cursor"].is_null();
+                        if !first {
+                            assert_eq!(req["cursor"], "private-provider-anchor");
+                        }
+                        Ok(
+                            json!({"messages":[{"id":if first {"1"}else{"2"},"chat_id":"r","author_id":"u","author_name":"synthetic name","ts":if first{1}else{2},"body":"private synthetic body"}],"complete":!first,"next_cursor":if first{json!("private-provider-anchor")}else{Value::Null}}),
+                        )
+                    }
+                    _ => panic!("history must never send or mark read"),
+                }
+            })
+        }
+        let dir = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let storage = Arc::new(
+            StorageActor::start(inboxd_storage::StorageActorConfig::new(
+                dir.path().canonicalize().unwrap().join("history.db"),
+                [0x42; 32],
+            ))
+            .unwrap(),
+        );
+        let config = AccountConfig {
+            platform: "kakao".into(),
+            account: "a".into(),
+            config: Zeroizing::new("{}".into()),
+        };
+        let chat = json!({"platform":"kakao","account":"a","chat_id":"r"});
+        let interval = json!({"from_ts":0,"to_ts":10});
+        for page in 1..=2 {
+            let mut service =
+                AccountService::new(vec![config.clone()]).with_storage(storage.clone());
+            service.run_worker = Some(history_fake);
+            service.list(&json!({})).await.unwrap();
+            let result = service.history(&chat, &interval, false).await.unwrap();
+            assert_eq!(result["progress"]["committed_pages"], page);
+            assert!(!result.to_string().contains("private"));
+            assert_eq!(result["progress"]["terminal"], page == 2);
+            let status = service.history(&chat, &interval, true).await.unwrap();
+            assert_eq!(status["progress"], result["progress"]);
+            assert!(
+                service
+                    .history(&chat, &json!({"from_ts":0,"to_ts":11}), true)
+                    .await
+                    .is_err()
+            );
+        }
+    }
+    #[tokio::test]
+    async fn owner_local_archive_accepts_archived_rooms_only_for_matched_configured_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let storage = Arc::new(
+            StorageActor::start(inboxd_storage::StorageActorConfig::new(
+                dir.path().canonicalize().unwrap().join("archive.db"),
+                [0x52; 32],
+            ))
+            .unwrap(),
+        );
+        let config = AccountConfig {
+            platform: "kakao".into(),
+            account: "a".into(),
+            config: Zeroizing::new(
+                json!({"kind":"kakao_personal","credentials":json!({"userId":"7"}).to_string()})
+                    .to_string(),
+            ),
+        };
+        let service = AccountService::new(vec![config]).with_storage(storage.clone());
+        let chat = json!({"platform":"kakao","account":"a","chat_id":"archived-room"});
+        let params = json!({"self_user_id":"7","source":{"schema":"kakao-mac-sqlcipher-v1","snapshot_sha256":"a".repeat(64)},"page_id":"p1","messages":[{"id":"1","chat_id":"archived-room","author_id":"7","body":"private archive text","ts":1,"type":1}]});
+        // No directory load or provider process is required for a left room.
+        let result = service.import_local_archive(&chat, &params).await.unwrap();
+        assert_eq!(result["inserted"], 1);
+        assert!(!result.to_string().contains("private"));
+        let replay = service.import_local_archive(&chat, &params).await.unwrap();
+        assert_eq!(replay["replayed"], true);
+        assert_eq!(replay["inserted"], 0);
+        let status = service
+            .import_local_archive(
+                &chat,
+                &json!({"self_user_id":"7","source":params["source"],"status_only":true}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status["raw_records"], 1);
+        assert_eq!(status["pages"], 1);
+        assert_eq!(status["canonical_inserted"], 1);
+        assert!(!status.to_string().contains("private"));
+        let mut wrong = params.clone();
+        wrong["self_user_id"] = json!("8");
+        assert!(service.import_local_archive(&chat, &wrong).await.is_err());
+        let mut wrong = params.clone();
+        wrong["messages"][0]["chat_id"] = json!("foreign");
+        assert!(service.import_local_archive(&chat, &wrong).await.is_err());
+        let mut wrong = params;
+        wrong["messages"][0]["body"] = json!("changed private source");
+        assert!(service.import_local_archive(&chat, &wrong).await.is_err());
+        let foreign = json!({"platform":"kakao","account":"other","chat_id":"archived-room"});
+        assert!(
+            service
+                .import_local_archive(&foreign, &wrong)
+                .await
+                .is_err()
+        );
     }
 }

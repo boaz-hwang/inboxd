@@ -17,6 +17,70 @@ use tokio::{
 
 const KEY: [u8; 32] = [0x71; 32];
 
+#[tokio::test]
+async fn history_exports_require_authenticated_local_owner() {
+    let directory = private_tempdir();
+    let daemon = launch(config(directory.path())).await.unwrap();
+    for role in ["reader", "agent", "mcp", "sender", "approver"] {
+        let mut client = Client::connect(daemon.socket_path()).await;
+        client.request("system.hello", json!({"role":role})).await;
+        for params in [
+            json!({"history_candidates":true}),
+            json!({"history_inventory":true}),
+        ] {
+            let response = client.request_frame("trajectory.list", params).await;
+            assert_eq!(response["ok"], false, "{role}: {response}");
+        }
+    }
+    for role in ["reader", "agent", "mcp", "sender", "approver"] {
+        let mut client = Client::connect(daemon.socket_path()).await;
+        client.request("system.hello", json!({"role":role})).await;
+        let response=client.request_frame("sync.backfill",json!({"reader":"connected_account","chat":{"platform":"kakao","account":"a","chat_id":"r"},"interval":{"from_ts":0,"to_ts":10},"status_only":true})).await;
+        assert_eq!(response["ok"], false);
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("approver"),
+            "authorization must precede provider dispatch"
+        );
+    }
+    for role in ["reader", "agent", "mcp", "sender", "approver"] {
+        let mut client = Client::connect(daemon.socket_path()).await;
+        client.request("system.hello", json!({"role":role})).await;
+        let response=client.request_frame("sync.backfill",json!({"reader":"local_archive","chat":{"platform":"kakao","account":"a","chat_id":"r"},"self_user_id":"7","source":{"schema":"kakao-mac-sqlcipher-v1","snapshot_sha256":"a".repeat(64)},"page_id":"p1","messages":[]})).await;
+        assert_eq!(response["ok"], false);
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("approver")
+        );
+    }
+    let token = fs::read_to_string(directory.path().join("approver.token")).unwrap();
+    let mut owner = Client::connect(daemon.socket_path()).await;
+    owner
+        .request(
+            "system.hello",
+            json!({"role":"sender","sender_token":token.trim()}),
+        )
+        .await;
+    assert!(
+        owner
+            .request("trajectory.list", json!({"history_candidates":true}))
+            .await["candidates"]
+            .is_array()
+    );
+    assert!(
+        owner
+            .request("trajectory.list", json!({"history_inventory":true}))
+            .await["rooms"]
+            .is_array()
+    );
+    drop(owner);
+    shutdown(daemon).await;
+}
+
 fn private_tempdir() -> TempDir {
     let directory = tempfile::tempdir().unwrap();
     fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -274,7 +338,13 @@ async fn all_legacy_read_methods_are_storage_backed_and_audited_by_session() {
     );
     let sessions = rows
         .iter()
-        .map(|row| serde_json::from_str::<Value>(row["payload_json"].as_str().unwrap()).unwrap()["session_id"].as_str().unwrap().to_owned())
+        .map(|row| {
+            serde_json::from_str::<Value>(row["payload_json"].as_str().unwrap()).unwrap()
+                ["session_id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
         .collect::<Vec<_>>();
     assert!(sessions[0].len() >= 32);
     assert!(sessions.iter().all(|session| session == &sessions[0]));
@@ -592,9 +662,35 @@ async fn backfill_uses_a_private_durable_checkpoint_and_enforces_page_budget() {
         .request_frame("sync.backfill", params.clone())
         .await;
     assert_eq!(denied["ok"], false);
+    for field in ["status_only", "resume"] {
+        let mut invalid = params.clone();
+        invalid[field] = json!("true");
+        let rejected = sender.request_frame("sync.backfill", invalid).await;
+        assert_eq!(rejected["ok"], false);
+        assert!(
+            rejected["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("must be a boolean")
+        );
+    }
     let first = sender.request("sync.backfill", params.clone()).await;
-    assert_eq!(first, json!({"event_count":1,"authoritative":true}));
+    assert_eq!(first["event_count"], 1);
+    assert_eq!(first["authoritative"], true);
+    assert_eq!(first["progress"]["status"], "budget_exhausted");
+    assert_eq!(first["progress"]["committed_pages"], 1);
     assert!(!first.to_string().contains("opaque_1"));
+
+    let mut status_params = params.clone();
+    status_params["status_only"] = json!(true);
+    let status = sender.request("sync.backfill", status_params).await;
+    assert_eq!(status["read_performed"], false);
+    assert_eq!(status["progress"], first["progress"]);
+    let mut resume_params = params.clone();
+    resume_params["resume"] = json!(true);
+    let resumed = sender.request("sync.backfill", resume_params).await;
+    assert_eq!(resumed["read_performed"], false);
+    assert_eq!(resumed["progress"], first["progress"]);
 
     let exhausted = sender.request_frame("sync.backfill", params).await;
     assert_eq!(exhausted["ok"], false, "{exhausted}");

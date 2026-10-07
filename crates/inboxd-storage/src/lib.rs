@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod actor;
+mod archive;
 mod observations;
 mod owner_sends;
 mod responses;
@@ -20,7 +21,10 @@ use std::{
     fs::File,
     io::Read,
     path::Path,
-    sync::{Mutex, MutexGuard},
+    sync::{
+        Mutex, MutexGuard,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use zeroize::Zeroizing;
 
@@ -100,6 +104,9 @@ pub struct NativeHost {
     connection: Connection,
     provenance: Option<Value>,
     clock: Option<Box<dyn Fn() -> u64 + Send + Sync>>,
+    // Set once `store.migrate` succeeds, which includes a full quick_check.
+    // Diagnose then reuses it instead of rescanning the database per request.
+    integrity_verified: AtomicBool,
 }
 impl std::fmt::Debug for NativeHost {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -220,6 +227,7 @@ impl NativeHost {
             connection,
             provenance,
             clock: None,
+            integrity_verified: AtomicBool::new(false),
         })
     }
 
@@ -255,6 +263,12 @@ impl NativeHost {
         if op == "observations.delete" {
             return observations::delete(&self.connection, input);
         }
+        if op == "observations.historyState" {
+            return observations::history_state(&self.connection, input);
+        }
+        if op == "observations.archiveSummary" {
+            return observations::archive_summary(&self.connection, input);
+        }
         if op == "observations.store" {
             return observations::observe(&self.connection, input);
         }
@@ -269,16 +283,28 @@ impl NativeHost {
         if op.starts_with("response.") {
             return responses::execute(&self.connection, op, input);
         }
-        let mut result = inboxd_core::call(op, input, self)?;
+        if op == "store.diagnose" && self.integrity_verified.load(Ordering::Acquire) {
+            let cached = json!({ "integrity_ok": true });
+            return self.finish_diagnosis(inboxd_core::call(op, &cached, self)?);
+        }
+        let result = inboxd_core::call(op, input, self)?;
+        if op == "store.migrate" {
+            self.integrity_verified.store(true, Ordering::Release);
+        }
         if op == "store.diagnose" {
-            if let Some(provenance) = &self.provenance {
-                let diagnosis = result.as_object_mut().ok_or_else(|| {
-                    CoreError::new("CoreError", "store diagnosis must be an object")
-                })?;
-                diagnosis.insert("provenance".into(), provenance.clone());
-                let ready = diagnosis.get("ready").and_then(Value::as_bool) == Some(true);
-                diagnosis.insert("ready".into(), Value::Bool(ready));
-            }
+            return self.finish_diagnosis(result);
+        }
+        Ok(result)
+    }
+
+    fn finish_diagnosis(&self, mut result: Value) -> CoreResult<Value> {
+        if let Some(provenance) = &self.provenance {
+            let diagnosis = result.as_object_mut().ok_or_else(|| {
+                CoreError::new("CoreError", "store diagnosis must be an object")
+            })?;
+            diagnosis.insert("provenance".into(), provenance.clone());
+            let ready = diagnosis.get("ready").and_then(Value::as_bool) == Some(true);
+            diagnosis.insert("ready".into(), Value::Bool(ready));
         }
         Ok(result)
     }

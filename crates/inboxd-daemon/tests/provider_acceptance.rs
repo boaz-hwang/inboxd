@@ -192,7 +192,9 @@ async fn fixed_production_worker_runs_real_uds_refresh_bounded_read_and_one_atte
             }),
         )
         .await;
-    assert_eq!(backfill, json!({"event_count":1,"authoritative":true}));
+    assert_eq!(backfill["event_count"], 1);
+    assert_eq!(backfill["authoritative"], true);
+    assert_eq!(backfill["read_performed"], true);
     assert_eq!(
         reader
             .request(

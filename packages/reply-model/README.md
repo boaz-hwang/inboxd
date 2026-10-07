@@ -73,12 +73,20 @@ held-out cases separate from prompt development and model training.
 
 A generation attempt makes at most one model call. Reopening an unchanged
 conversation does not retry either an abstention or an error. A conversation or
-runtime change creates a new version. `reply-v2` / `single-generation-v2` separates
-new attempts from historical decision-graph results. Trajectories record the exact
+runtime change creates a new version. `reply-v4` preserves unknown read state and
+uses compact metadata arrays with local message aliases; original author IDs,
+timestamps, bodies and reply relationships remain intact.
+`single-generation-v2` identifies the single-call pipeline. Trajectories record the exact
 generation input (including preflight), draft and user actions. Historical route
 and checker traces remain readable. Summary listing omits large inputs.
 
 ## Personal adapter experiments
+
+Historical Kakao/Telegram replies and response-session sends now share candidate
+review, source-isolated splits, replay training and blind output evaluation.
+See [the operator guide](PERSONALIZATION.md) for collection, review and activation,
+and [the implementation checklist](../../docs/27-historical-reply-training-plan.md)
+for current verification evidence and remaining evaluation decisions.
 
 `personalization.py --help` documents manual dataset inspection, training,
 evaluation, activation and rollback. It accepts explicitly reviewed examples and
@@ -108,5 +116,13 @@ has no fixed-text recommendation fallback.
 
 `evaluation-candidates/worker-legacy.py` preserves the pre-v2 worker for offline
 comparisons. Its checker and decision modules and legacy contract tests are
-evaluation-only; the product packages only the current worker and personalization
-helper. Existing checker evaluation results describe the old pipeline.
+evaluation-only; the product packages the current worker and local learning and
+review helpers. Existing checker evaluation results describe the old pipeline.
+
+## Learning from sent replies
+
+`continual.py` now exports confirmed Inboxd response-session sends as review
+candidates, builds production-shaped training examples, and runs periodic replay
+LoRA training plus base/adapter loss and role-output comparisons once enough
+reviewed data exists. It does not learn from keystrokes or automatically activate
+a model. See [the pipeline commands and limits](PERSONALIZATION.md#continual-pipeline-2026-10-01).

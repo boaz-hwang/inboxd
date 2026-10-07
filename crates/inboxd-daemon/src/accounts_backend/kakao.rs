@@ -535,6 +535,17 @@ impl KakaoBackend {
                 }
                 Ok(result)
             }
+            "history" => {
+                // Lossless, one-page MCHATLOGS traversal from the server's oldest
+                // accessible log. Do not touch recent-history state or read cursors.
+                let result = self.page(chat, cursor, None, io).await?;
+                if result["complete"] != true
+                    && (s(&result, "next_cursor").is_empty() || s(&result, "next_cursor") == cursor)
+                {
+                    return Err("Kakao history cursor not progressing".into());
+                }
+                Ok(result)
+            }
             "messages" => {
                 if req["refresh"] == true {
                     self.histories.retain(|h| h.chat != chat);
@@ -815,6 +826,40 @@ mod tests {
         assert!(first.fork().run(&request, &mut Cycle).await.is_err());
     }
 
+    #[tokio::test]
+    async fn owner_history_exports_every_server_page_without_recent_tail_projection_or_mark_read() {
+        let mut b = KakaoBackend::default();
+        let mut io = Fake {
+            size: 100,
+            pages: 102,
+            named: true,
+            ..Default::default()
+        };
+        let mut cursor = Value::Null;
+        let mut ids = Vec::new();
+        loop {
+            let page = b
+                .run(
+                    &json!({"op":"history","chat_id":"r","cursor":cursor}),
+                    &mut io,
+                )
+                .await
+                .unwrap();
+            ids.extend(
+                array(&page, "messages")
+                    .into_iter()
+                    .map(|m| m["id"].as_str().unwrap().to_owned()),
+            );
+            if page["complete"] == true {
+                break;
+            }
+            cursor = page["next_cursor"].clone();
+        }
+        assert_eq!(ids, (1..=10200).map(|i| i.to_string()).collect::<Vec<_>>());
+        assert_eq!(io.count("kakao_page"), 102);
+        assert_eq!(io.count("kakao_mark_read"), 0);
+        assert!(b.histories.is_empty());
+    }
     #[tokio::test]
     async fn forward_history_latest_dedup_context_and_search() {
         let mut b = KakaoBackend::default();

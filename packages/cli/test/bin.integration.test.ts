@@ -31,7 +31,7 @@ describeWithRustDaemon("real CLI Rust daemon process lifecycle", () => {
       const stdout = await new Response(child.stdout).text();
       const stderr = await new Response(child.stderr).text();
       if (exitCode === 0) expect(JSON.parse(stdout)).toMatchObject({ ready: true, owner: "daemon" });
-      else expect(stderr).toContain("approver role is required");
+      else expect(stderr).toContain("no adapter is configured");
       expect(exited).toBe(true);
       expect(child.exitCode).toBe(exitCode);
     } finally {

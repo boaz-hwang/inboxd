@@ -76,8 +76,8 @@ impl TelegramBackend {
             "search" => {
                 json!({"op":"telegram_search","chat_id":request["chat_id"],"query":request["query"],"cursor":request["cursor"],"limit":100})
             }
-            "messages" => {
-                json!({"op":"telegram_history","chat_id":request["chat_id"],"limit":30,"message_id":request
+            "messages" | "history" => {
+                json!({"op":"telegram_history","chat_id":request["chat_id"],"limit":if op == "history" {100} else {30},"message_id":request
                 .get("message_id").filter(|v| !v.is_null())
                 .or_else(|| request.get("cursor").filter(|v| !v.is_null()))
                 .cloned().unwrap_or(json!("0"))})
@@ -114,6 +114,13 @@ impl TelegramBackend {
             .as_array()
             .cloned()
             .ok_or("Malformed Telegram messages")?;
+        if op == "history" {
+            // TDLib can include the starting message. It is already durably
+            // stored; an anchor-only response is the accessible endpoint.
+            if let Some(anchor) = request["cursor"].as_str() {
+                messages.retain(|m| m["id"] != anchor);
+            }
+        }
         if messages.len() > 100 {
             return Err("Telegram message limit exceeded".into());
         }
@@ -175,10 +182,12 @@ impl TelegramBackend {
                     .unwrap_or("이름 없음")
             );
             if let Some(object) = message.as_object_mut() {
-                object.remove("author_kind");
+                if op != "history" {
+                    object.remove("author_kind");
+                }
             }
         }
-        if op == "messages" {
+        if op == "messages" || op == "history" {
             messages.reverse();
         }
         if op != "send" {

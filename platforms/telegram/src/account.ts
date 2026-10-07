@@ -53,6 +53,8 @@ export function createTelegramAdapter(port: TdlibUserClientPort): AccountAdapter
     author_kind: m.sender_id?.user_id != null ? "user" : "chat",
     author_name: "",
     ts: m.date,
+    ...((m.reply_to?.chat_id == null || String(m.reply_to.chat_id) === String(m.chat_id)) &&
+      (m.reply_to?.message_id || m.reply_to_message_id) ? { parent_id: String(m.reply_to?.message_id ?? m.reply_to_message_id) } : {}),
     body: m.content?.text?.text ?? (m.content?.caption?.text || (m.content?.document?.file_name ? `[파일] ${m.content.document.file_name}` : undefined)) ??
       `[${String(m.content?.["@type"] ?? "미디어").replace(/^message/, "")}]`,
   });

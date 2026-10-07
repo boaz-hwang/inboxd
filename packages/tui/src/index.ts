@@ -839,6 +839,7 @@ export interface TuiControllerOptions {
   readonly onStateChange?: (state: TuiState) => void;
 }
 
+const LIVE_DOCTOR_INTERVAL_MS = 10_000;
 const tuiTopics: readonly ProtocolEventMethod[] = ["account.changed", "message.upserted", "coverage.changed", "safety.intent.changed", "capability.changed"];
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -1030,6 +1031,7 @@ export class TuiController {
   private liveRefresh?: Promise<void>;
   private liveDirectoryDirty = false;
   private liveChatDirty = false;
+  private liveDoctorAt = 0;
   private responseEpoch = 0;
   private draftRevision = 0;
   private readonly roomDrafts = new RoomDrafts();
@@ -1169,7 +1171,11 @@ export class TuiController {
             await this.refreshAccountDirectory(generation);
             if (generation !== this.generation || !accepted(this.current, generation)) return;
             if (reloadChat && chat === this.activeChat) await this.refreshChat(generation, undefined, false, false, true);
-            if (generation === this.generation && accepted(this.current, generation)) await this.refreshDoctor(generation);
+            // Pending rooms emit ready events every few seconds; doctor status does not need that cadence.
+            if (generation === this.generation && accepted(this.current, generation) && Date.now() - this.liveDoctorAt >= LIVE_DOCTOR_INTERVAL_MS) {
+              this.liveDoctorAt = Date.now();
+              await this.refreshDoctor(generation);
+            }
           }
         })().finally(() => { if (this.liveRefresh === flight) this.liveRefresh = undefined; });
         this.liveRefresh = flight;

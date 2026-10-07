@@ -1,4 +1,5 @@
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { expect, test } from "bun:test";
@@ -94,7 +95,7 @@ test("launches the fixed executable with only --config and waits for protocol re
   const previousSecret = process.env.INBOXD_LAUNCHER_SECRET;
   const previousReplyWorkers = process.env.INBOXD_REPLY_WORKERS;
   process.env.INBOXD_LAUNCHER_SECRET = "must-not-cross";
-  process.env.INBOXD_REPLY_WORKERS = "1";
+  process.env.INBOXD_REPLY_WORKERS = "2";
   try {
     const result = await launchPackagedDaemon({
       daemonBinary: fixture.binary,
@@ -107,7 +108,7 @@ test("launches the fixed executable with only --config and waits for protocol re
     expect(launched.argv).toEqual(["--config", fixture.configPath]);
     expect(launched.stdinClosed).toBe(true);
     expect(launched.leaked).toBeNull();
-    expect(launched.replyWorkers).toBe("1");
+    expect(launched.replyWorkers).toBeNull();
     expect(launched.envKeys).toEqual(expect.arrayContaining(["HOME", "PATH"]));
   } catch (error) {
     const errorPath = join(fixture.root, "fixture.err");
@@ -151,5 +152,50 @@ test("rejects launch files below a group- or world-writable ancestor", async () 
     expect(existsSync(fixture.recordPath)).toBe(false);
   } finally {
     await stopFixture(fixture);
+  }
+});
+
+
+test("recognizes an existing daemon whose healthy status takes longer than one second without spawning", async () => {
+  const root = mkdtempSync(join(import.meta.dir, ".daemon-launcher-slow-"));
+  chmodSync(root, 0o700);
+  const socketPath = join(root, "daemon.sock");
+  const server = createServer((socket) => {
+    let buffered = "";
+    socket.on("data", (chunk) => {
+      buffered += chunk.toString();
+      for (;;) {
+        const newline = buffered.indexOf("\n");
+        if (newline < 0) break;
+        const request = JSON.parse(buffered.slice(0, newline));
+        buffered = buffered.slice(newline + 1);
+        const respond = () => socket.write(JSON.stringify({
+          type: "response", id: request.id, method: request.method, ok: true,
+          result: request.method === "system.status" ? { ready: true } : {},
+        }) + "\n");
+        if (request.method === "system.status") {
+          const timer = setTimeout(respond, 1_200);
+          socket.once("close", () => clearTimeout(timer));
+        } else respond();
+      }
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, resolve);
+    });
+    const started = performance.now();
+    const result = await launchPackagedDaemon({
+      socketPath, readinessTimeoutMs: 2_000,
+      // These do not exist: reaching launch validation or spawn would fail.
+      daemonBinary: join(root, "must-not-spawn"), configPath: join(root, "must-not-read.json"),
+    });
+    expect(result).toBe("already-running");
+    expect(performance.now() - started).toBeGreaterThanOrEqual(1_100);
+    expect(existsSync(join(root, "must-not-spawn"))).toBe(false);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    rmSync(root, { recursive: true, force: true });
   }
 });

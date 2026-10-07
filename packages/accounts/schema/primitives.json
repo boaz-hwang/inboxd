@@ -853,6 +853,39 @@
           }
         ]
       }
+    },
+    "slack.conversations.replies": {
+      "request": {
+        "fields": {
+          "params": {
+            "fields": {
+              "channel": "nonempty",
+              "ts": "nonempty",
+              "limit": "integer",
+              "cursor": {
+                "optional": "string"
+              }
+            }
+          }
+        }
+      },
+      "result": {
+        "fields": {
+          "data": {
+            "fields": {
+              "messages": {
+                "array": "SlackMessage"
+              },
+              "has_more": {
+                "optional": "boolean"
+              },
+              "response_metadata": {
+                "optional": "SlackMetadata"
+              }
+            }
+          }
+        }
+      }
     }
   }
 }
