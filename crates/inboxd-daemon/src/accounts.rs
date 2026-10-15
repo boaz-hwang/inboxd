@@ -1033,6 +1033,7 @@ impl WorkerProcess {
                 value["error"].as_str(),
                 Some(
                     "provider_rate_limit"
+                        | "KakaoTalk 인증 자동 복구 대기 중입니다. 잠시 후 다시 시도합니다. 계속되면 inboxd connect kakao로 휴대폰 인증하세요."
                         | "KakaoTalk 인증이 만료되었습니다. inboxd connect kakao로 다시 연결하세요."
                         | "Slack 인증이 만료되었습니다. inboxd connect slack으로 다시 연결하세요."
                         | "Telegram 세션이 해제되었습니다. inboxd connect telegram으로 다시 연결하세요."

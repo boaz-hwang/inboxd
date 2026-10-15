@@ -30,10 +30,10 @@ test("concurrent independent stores coalesce rotation and persist both tokens be
   expect(new KakaoAuthStore(path).current(original).oauthToken).toBe("fresh");
 });
 
-test("rejected refresh is latched across workers until credentials change", async () => {
+test("rejected refresh is coalesced during cooldown and adopts changed credentials", async () => {
   const { path } = fixture(); let calls = 0;
   const refresh = async () => { calls++; throw Object.assign(new Error("secret response"), { code: "refresh_rejected" }); };
-  for (let i = 0; i < 3; i++) await expect(new KakaoAuthStore(path, refresh).recover(original)).rejects.toMatchObject({ code: "invalid_access_token" });
+  for (let i = 0; i < 3; i++) await expect(new KakaoAuthStore(path, refresh).recover(original)).rejects.toMatchObject({ code: "kakao_auth_recovering" });
   expect(calls).toBe(1); expect(readFileSync(path, "utf8")).not.toContain("secret response");
   const document = JSON.parse(readFileSync(path, "utf8")); document.accounts.mine.oauth_token = "reauthenticated";
   writeFileSync(path, JSON.stringify(document), { mode: 0o600 });
@@ -110,13 +110,73 @@ test("separate worker processes refresh an expired account only once", async () 
   expect(readFileSync(count, "utf8")).toBe("refresh\n");
 });
 
-test("a refreshed token rejected by the provider stays blocked across sessions", async () => {
+test("a refreshed token rejected by the provider shares cooldown across sessions", async () => {
   const { path } = fixture(); let refreshes = 0;
   const store = new KakaoAuthStore(path, async () => { refreshes++; return { accessToken: "fresh-but-rejected", refreshToken: "next" }; });
   const create = async () => ({ getChats: async () => { throw authExpired(); }, close() {} }) as unknown as KakaoTalkClient;
   for (let i = 0; i < 2; i++) {
     const client = await personalSession(original, { store, create });
-    await expect(client.getChats()).rejects.toMatchObject({ code: "invalid_access_token" }); client.close();
+    await expect(client.getChats()).rejects.toMatchObject({ code: i === 0 ? "invalid_access_token" : "kakao_auth_recovering" }); client.close();
   }
   expect(refreshes).toBe(1);
+});
+
+
+test("legacy permanent failure recovers automatically and removes its latch", async () => {
+  const { path, document } = fixture();
+  const { createHash } = await import("node:crypto");
+  Object.assign(document.accounts.mine, { inboxd_refresh_failure: { fingerprint: createHash("sha256").update("expired\0refresh-old").digest("hex") } });
+  writeFileSync(path, JSON.stringify(document), { mode: 0o600 });
+  const store = new KakaoAuthStore(path, async () => ({ accessToken: "fresh", refreshToken: "new" }));
+  expect((await store.recover(original)).oauthToken).toBe("fresh");
+  expect(JSON.parse(readFileSync(path, "utf8")).accounts.mine.inboxd_refresh_failure).toBeUndefined();
+});
+
+test("transient and rejected refreshes retry after persisted bounded backoff", async () => {
+  for (const code of ["refresh_timeout", "refresh_rejected"]) {
+    const { path } = fixture(); let now = 1000, calls = 0;
+    const refresh = async () => {
+      calls++;
+      if (calls <= 2) throw Object.assign(new Error("SECRET"), { code, httpStatus: 503, serverStatus: -950 });
+      return { accessToken: "fresh", refreshToken: "new" };
+    };
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      await expect(new KakaoAuthStore(path, refresh, () => now).recover(original)).rejects.toMatchObject({ code: "kakao_auth_recovering" });
+      const state = JSON.parse(readFileSync(path, "utf8")).accounts.mine.inboxd_refresh_failure;
+      expect(state).toMatchObject({ attempts: attempt, code, failedAt: now, httpStatus: 503, serverStatus: -950 });
+      expect(state.retryAt - now).toBe((code === "refresh_rejected" ? 900000 : 60000) * 2 ** (attempt - 1));
+      await expect(new KakaoAuthStore(path, refresh, () => now).recover(original)).rejects.toMatchObject({ code: "kakao_auth_recovering" });
+      expect(calls).toBe(attempt);
+      expect(readFileSync(path, "utf8")).not.toContain("SECRET");
+      now = state.retryAt;
+    }
+    expect((await new KakaoAuthStore(path, refresh, () => now).recover(original)).oauthToken).toBe("fresh");
+    expect(calls).toBe(3);
+  }
+});
+
+test("authentication failure while creating a session also rotates credentials", async () => {
+  const fixture = clients();
+  let attempts = 0;
+  const client = await personalSession(original, { store: fixture.store, create: async c => {
+    attempts++;
+    if (c.oauthToken === "expired") throw authExpired();
+    return fixture.create(c);
+  } });
+  expect(await client.getChats()).toEqual([]);
+  expect(attempts).toBe(2);
+  expect(fixture.counts().recoveries).toBe(1);
+  client.close();
+});
+
+
+test("repeated refresh failures cap the cooldown at one hour", async () => {
+  const { path } = fixture(); let now = 1000;
+  const store = new KakaoAuthStore(path, async () => { throw Object.assign(new Error("unavailable"), { code: "refresh_timeout" }); }, () => now);
+  for (let attempt = 1; attempt <= 12; attempt++) {
+    await expect(store.recover(original)).rejects.toMatchObject({ code: "kakao_auth_recovering" });
+    const failure = JSON.parse(readFileSync(path, "utf8")).accounts.mine.inboxd_refresh_failure;
+    expect(failure.retryAt - now).toBe(Math.min(3600000, 60000 * 2 ** (attempt - 1)));
+    now = failure.retryAt;
+  }
 });

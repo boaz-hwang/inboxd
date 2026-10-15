@@ -26,3 +26,13 @@ test("Slack and Telegram authentication errors survive batch IPC without secrets
 test("rate limits cross IPC only as a fixed safe classification", () => {
   for (const code of ["rate_limit",429]) expect(accountErrorMessage(Object.assign(new Error("private response"),{code}))).toBe("provider_rate_limit");
 });
+
+
+test("automatic Kakao recovery status survives batch IPC without exposing details", async () => {
+  let caught: unknown;
+  try {
+    await dispatch({ close() {}, async run() { throw Object.assign(new Error("private token"), { code: "kakao_auth_recovering" }); } }, { op: "batch", requests: [{ op: "kakao_page", chat_id: "room" }] });
+  } catch (error) { caught = error; }
+  expect(accountErrorMessage(caught)).toContain("자동 복구 대기");
+  expect(accountErrorMessage(caught)).not.toContain("private");
+});

@@ -26,7 +26,7 @@ export async function connectKakaoAccount(ui: ConnectionUI, login: () => Promise
     ui.report("KakaoTalk 계정과 대화 읽기를 확인했습니다.");
     return { kind: "kakao_personal", binding_id: `kakao-personal-${id}-${selected}`, account: `kakao:self:${id}`, chat_id: selected, credentials: JSON.stringify(client.getCredentials()) };
   } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "invalid_access_token" && !reauthenticated) {
+    if (error && typeof error === "object" && "code" in error && (error.code === "invalid_access_token" || error.code === "kakao_auth_recovering") && !reauthenticated) {
       client.close();
       ui.report("KakaoTalk 세션이 만료되어 휴대폰 인증을 시작합니다.");
       await login();

@@ -14,7 +14,17 @@ export async function personalSession(input: PersonalCredentials, options: Optio
   const store = options.store ?? new KakaoAuthStore();
   const create = options.create ?? (credentials => new KakaoTalkClient().login(credentials));
   let credentials = store.current(parsePersonalCredentials(input));
-  let client = await create(credentials);
+  let client: KakaoTalkClient;
+  try { client = await create(credentials); }
+  catch (error) {
+    if (!isAuthExpired(error)) throw error;
+    credentials = await store.recover(credentials);
+    try { client = await create(credentials); }
+    catch (retryError) {
+      if (isAuthExpired(retryError)) await store.reject?.(credentials);
+      throw retryError;
+    }
+  }
   let closed = false;
   let recovery: Promise<void> | undefined;
   let unbatch: (() => void) | undefined;
