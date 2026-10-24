@@ -69,9 +69,15 @@ inboxd connect kakao
 
 - Telegram: scan the QR in the opened browser with Telegram → Settings → Devices.
   An already authenticated session resumes without another scan.
-- Slack: select a logged-in workspace and a conversation by name. No token or
-  channel ID entry. Missing/expired sessions use the installed `agent-messenger`
-  login importer, which may request macOS Keychain access.
+- Slack: choose a saved account to verify or reauthenticate, or add another
+  account. Users in the same workspace are saved separately. The self chat is
+  verified automatically, then the TUI loads the account's conversations. No
+  room, token or channel ID entry. Login imports use `agent-messenger`, which
+  may request macOS Keychain access. To import another user in the same workspace,
+  check that the imported session belongs to the desired user; the importer
+  prioritizes desktop sessions and returns one user per workspace per import.
+  Already logged in? Choose the session import action; the login window opens
+  only when explicitly requested.
 - KakaoTalk: resume the personal session, or follow the installed
   `agent-messenger` secondary-device login and phone-code prompt. Choose a chat
   by name; the default first choice is the self chat. Device replacement is never

@@ -26,3 +26,39 @@ test("save connection preserves other bindings and rejects public configuration"
     expect(config.state_dir).toBe("state");
   } finally { rmSync(root, { recursive: true }); }
 });
+
+test("reconnecting Slack replaces legacy room bindings for that account only", () => {
+  const root = mkdtempSync(join(tmpdir(), "inboxd-connect-"));
+  const path = join(root, "config.json");
+  try {
+    const unrelated = [
+      { kind: "telegram", binding_id: "telegram", account: "one" },
+      { kind: "slack", binding_id: "other-slack", account: "two" },
+    ];
+    writeFileSync(path, JSON.stringify({ version: 1, providers: [
+      ...unrelated,
+      { kind: "slack", binding_id: "old-room-a", account: "one", credentials: "stale" },
+      { kind: "slack", binding_id: "old-room-b", account: "one", credentials: "stale" },
+    ] }), { mode: 0o600 });
+    const connected = { kind: "slack", binding_id: "self-chat", account: "one", credentials: "fresh" };
+    saveConnection(path, connected);
+    saveConnection(path, connected);
+    expect(JSON.parse(readFileSync(path, "utf8")).providers).toEqual([...unrelated, connected]);
+  } finally { rmSync(root, { recursive: true }); }
+});
+
+test("Slack users in one workspace coexist and reauthentication preserves legacy history keys", () => {
+  const root = mkdtempSync(join(tmpdir(), "inboxd-connect-"));
+  const path = join(root, "config.json");
+  const first = { kind: "slack", team_id: "T1", user_id: "U1", account: "slack:team:T1", binding_id: "legacy", bot_token: "old" };
+  const second = { kind: "slack", team_id: "T1", user_id: "U2", account: "slack:team:T1:user:U2", binding_id: "second", bot_token: "other" };
+  try {
+    writeFileSync(path, JSON.stringify({ version: 1, providers: [first] }), { mode: 0o600 });
+    saveConnection(path, second);
+    saveConnection(path, { ...first, account: "slack:team:T1:user:U1", binding_id: "new", bot_token: "fresh" });
+    expect(JSON.parse(readFileSync(path, "utf8")).providers).toEqual([second, { ...first, bot_token: "fresh" }]);
+    const before = readFileSync(path, "utf8");
+    expect(() => saveConnection(path, { ...second, user_id: "U3", binding_id: "legacy" })).toThrow("덮어쓸 수 없습니다");
+    expect(readFileSync(path, "utf8")).toBe(before);
+  } finally { rmSync(root, { recursive: true }); }
+});

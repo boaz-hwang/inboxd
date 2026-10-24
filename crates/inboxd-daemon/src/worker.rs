@@ -117,6 +117,7 @@ pub enum ProductionWorkerConfig {
     Slack {
         account: String,
         team_id: String,
+        user_id: Option<String>,
         allowed_chat_ids_json: String,
         bot_token: String,
         session_cookie: Option<String>,
@@ -308,10 +309,14 @@ impl ProductionWorkerConfig {
             Self::Slack {
                 account,
                 team_id,
+                user_id,
                 allowed_chat_ids_json,
                 bot_token,
                 session_cookie,
             } => {
+                if let Some(user) = user_id.take() {
+                    environment.insert("INBOXD_SLACK_USER_ID", user);
+                }
                 if let Some(cookie) = session_cookie.take() {
                     environment.insert("INBOXD_SLACK_SESSION_COOKIE", cookie);
                 }

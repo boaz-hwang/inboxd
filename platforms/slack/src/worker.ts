@@ -32,6 +32,7 @@ export interface SlackWorkerOptions {
   readonly bindingId: string;
   readonly account: string;
   readonly expectedTeamId: string;
+  readonly expectedUserId?: string;
   readonly allowedChatIds: readonly string[];
   readonly transport: SlackApiTransport;
   readonly now?: () => number;
@@ -129,6 +130,10 @@ export function createSlackWorker(options: SlackWorkerOptions): SlackWorker {
   if (!/^T[A-Z0-9]{1,255}$/.test(expectedTeamId)) {
     throw new TypeError("Slack expected team id is invalid");
   }
+  const expectedUserId = options.expectedUserId;
+  if (expectedUserId !== undefined && !/^[UW][A-Z0-9]{1,255}$/.test(expectedUserId)) {
+    throw new TypeError("Slack expected user id is invalid");
+  }
   if (!Array.isArray(options.allowedChatIds) || options.allowedChatIds.length < 1 || options.allowedChatIds.length > 100) {
     throw new TypeError("Slack chat allowlist must contain 1 to 100 entries");
   }
@@ -155,7 +160,7 @@ export function createSlackWorker(options: SlackWorkerOptions): SlackWorker {
         ? { state: "unauthenticated", reason: providerReason }
         : { state: "unknown", reason: providerReason === "ratelimited" || response.status === 429 ? "rate_limited" : "auth_unavailable" };
     }
-    if (response.body.team_id !== expectedTeamId) {
+    if (response.body.team_id !== expectedTeamId || (expectedUserId !== undefined && response.body.user_id !== expectedUserId)) {
       return { state: "unauthenticated", reason: "account_scope_mismatch" };
     }
     try {

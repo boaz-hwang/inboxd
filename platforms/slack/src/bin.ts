@@ -14,12 +14,14 @@ export const SLACK_WORKER_ENV = Object.freeze({
   bindingId: "INBOXD_SLACK_BINDING_ID",
   account: "INBOXD_SLACK_ACCOUNT",
   teamId: "INBOXD_SLACK_TEAM_ID",
+  userId: "INBOXD_SLACK_USER_ID",
   allowedChatIdsJson: "INBOXD_SLACK_ALLOWED_CHAT_IDS_JSON",
 } as const);
 
 interface SlackWorkerConfig {
   readonly token: string;
   readonly cookie?: string;
+  readonly userId?: string;
   readonly bindingId: string;
   readonly account: string;
   readonly teamId: string;
@@ -55,7 +57,7 @@ export function loadSlackWorkerConfig(env: Environment): SlackWorkerConfig {
   if (!Array.isArray(allowedChatIds) || allowedChatIds.some((value) => typeof value !== "string")) {
     throw new TypeError("invalid Slack worker configuration");
   }
-  return { token, bindingId, account, teamId, allowedChatIds, cookie: env.INBOXD_SLACK_SESSION_COOKIE };
+  return { token, bindingId, account, teamId, userId: env[SLACK_WORKER_ENV.userId], allowedChatIds, cookie: env.INBOXD_SLACK_SESSION_COOKIE };
 }
 
 function responseBoundFailure(error: unknown): boolean {
@@ -159,8 +161,9 @@ export async function main(env: Environment = process.env): Promise<number> {
       bindingId: config.bindingId,
       account: config.account,
       expectedTeamId: config.teamId,
+      expectedUserId: config.userId,
       allowedChatIds: config.allowedChatIds,
-      transport: createRecoveringSlackTransport({ bot_token: config.token, session_cookie: config.cookie, team_id: config.teamId }),
+      transport: createRecoveringSlackTransport({ bot_token: config.token, session_cookie: config.cookie, team_id: config.teamId, user_id: config.userId }),
     });
   } catch {
     return terminate("invalid configuration", 64);

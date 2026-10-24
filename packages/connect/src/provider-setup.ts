@@ -119,7 +119,7 @@ export async function verifySlackProvider(
   const auth = record(await call("auth.test", input.token, {}));
   const teamId = auth.team_id;
   if (auth.ok !== true || typeof teamId !== "string" || !/^[A-Z0-9]{2,128}$/.test(teamId)
-    || typeof auth.user_id !== "string") {
+    || typeof auth.user_id !== "string" || !/^[A-Z0-9]{2,128}$/.test(auth.user_id)) {
     throw new Error("Slack authentication failed");
   }
   const info = record(await call("conversations.info", input.token, { channel: input.channelId }));
@@ -127,10 +127,11 @@ export async function verifySlackProvider(
   if (info.ok !== true || channel.id !== input.channelId) throw new Error("Slack channel verification failed");
   return {
     kind: "slack",
-    binding_id: `slack-${teamId}-${input.channelId}`,
-    account: `slack:team:${teamId}`,
+    binding_id: `slack-${teamId}-${auth.user_id}-${input.channelId}`,
+    account: `slack:team:${teamId}:user:${auth.user_id}`,
     chat_id: input.channelId,
     team_id: teamId,
+    user_id: auth.user_id,
     bot_token: input.token,
   };
 }

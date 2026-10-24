@@ -13,6 +13,7 @@ export function createSlackAccount(config: {
   bot_token: string;
   session_cookie?: string;
   team_id?: string;
+  user_id?: string;
 }, fetcher: typeof fetch = fetch, makeListener: (client: SlackClient) => Pick<SlackListener, "on" | "start" | "stop"> = client => new SlackListener(client), auth: Pick<SlackAuthStore, "recover" | "remember"> & Partial<Pick<SlackAuthStore, "current" | "reject">> = new SlackAuthStore(fetcher)): AccountAdapter {
   let credentials: SlackCredentials = auth.current?.(config) ?? { ...config };
   let recovery: Promise<void> | undefined;

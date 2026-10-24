@@ -11,7 +11,7 @@ test("provider primitives forward exactly one API call with authentication", asy
     expect(new Headers(options.headers).get("cookie")).toBe("d=session");
     expect(new URLSearchParams(String(options.body)).get("cursor")).toBe("next");
     return Response.json({ ok: true, members: [{ id: "u" }], response_metadata: { next_cursor: "another" } });
-  }) as typeof fetch);
+  }) as typeof fetch, undefined, { async remember() {}, async recover() { throw new Error("unexpected recovery"); } });
   const result = await dispatch(account, { op: "slack.users.list", params: { cursor: "next", limit: 200 } });
   expect(result.data as unknown).toEqual({ ok: true, members: [{ id: "u" }], response_metadata: { next_cursor: "another" } });
   expect(calls).toEqual(["https://slack.com/api/users.list"]);

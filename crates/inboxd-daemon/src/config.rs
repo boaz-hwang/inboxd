@@ -79,6 +79,8 @@ pub(crate) enum ProviderConfig {
         account: String,
         chat_id: String,
         team_id: String,
+        #[serde(default)]
+        user_id: Option<String>,
         bot_token: SecretString,
         #[serde(default)]
         session_cookie: Option<SecretString>,
@@ -175,11 +177,12 @@ impl LoadedConfig {
                     bot_token,
                     session_cookie,
                     team_id,
+                    user_id,
                     ..
                 } => (
                     "slack",
                     account,
-                    json!({"kind":"slack","team_id":team_id,"bot_token":bot_token.expose(),"session_cookie":session_cookie.as_ref().map(SecretString::expose)}),
+                    json!({"kind":"slack","team_id":team_id,"user_id":user_id,"bot_token":bot_token.expose(),"session_cookie":session_cookie.as_ref().map(SecretString::expose)}),
                 ),
                 ProviderConfig::Telegram {
                     account,
@@ -244,17 +247,22 @@ impl ProviderConfig {
                 account,
                 chat_id,
                 team_id,
+                user_id,
                 bot_token,
                 session_cookie,
             } => {
                 validate_common(&binding_id, &account)?;
                 validate_ascii_identifier(&chat_id, 128, "slack chat_id")?;
                 validate_ascii_identifier(&team_id, 128, "slack team_id")?;
+                if let Some(user_id) = &user_id {
+                    validate_ascii_identifier(user_id, 128, "slack user_id")?;
+                }
                 validate_secret(bot_token.expose(), 8_192, "slack bot_token")?;
                 let claims = chat_claims("slack", &account, &chat_id, "bounded_history", true);
                 let worker = ProductionWorkerConfig::Slack {
                     account,
                     team_id,
+                    user_id,
                     allowed_chat_ids_json: serde_json::to_string(&[&chat_id])
                         .map_err(|_| "slack configuration could not be encoded".to_owned())?,
                     bot_token: bot_token.into_inner(),

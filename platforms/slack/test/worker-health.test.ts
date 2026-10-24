@@ -120,11 +120,29 @@ describe("Slack worker health and fixed authority", () => {
       { bindingId: "" },
       { account: "" },
       { expectedTeamId: "workspace-name" },
+      { expectedUserId: "" },
+      { expectedUserId: "not-a-user" },
       { allowedChatIds: [] },
       { allowedChatIds: ["C123", "C123"] },
       { allowedChatIds: ["not-a-slack-chat"] },
     ] satisfies Partial<SlackWorkerOptions>[]) {
       expect(() => createSlackWorker(options(fake.transport, override))).toThrow();
     }
+  });
+});
+
+
+test("fixed worker rejects a different user in the same workspace", async () => {
+  const fake = transportWith([{ ok: true, team_id: "T123", user_id: "U999" }]);
+  const worker = createSlackWorker(options(fake.transport, { expectedUserId: "U123" }));
+  expect(await worker.handle(baseRequest)).toMatchObject({
+    result: { state: "unavailable", auth: { state: "unauthenticated", reason: "account_scope_mismatch" } },
+  });
+});
+
+test("fixed worker accepts the configured workspace and user", async () => {
+  const fake = transportWith([{ ok: true, team_id: "T123", user_id: "U123" }]);
+  expect(await createSlackWorker(options(fake.transport, { expectedUserId: "U123" })).handle(baseRequest)).toMatchObject({
+    result: { state: "ready", auth: { state: "authenticated" } },
   });
 });

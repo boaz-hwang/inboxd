@@ -7,7 +7,7 @@ import { ensureFirstRunConfiguration, type FirstRunPaths } from "./setup.ts";
 import { readPackagedTelegramApplication, telegramProviderFromBootstrap } from "./provider-setup.ts";
 import { ConnectionRegistry, type ConnectionUI } from "./contracts.ts";
 import { hiddenPrompt, safeEnvironment } from "./host.ts";
-import { saveConnection } from "./private-config.ts";
+import { readPrivateJson, saveConnection } from "./private-config.ts";
 import { runTelegramBootstrap } from "./drivers/telegram.ts";
 import { connectSlackAccount } from "./drivers/slack.ts";
 import { connectKakaoAccount } from "./drivers/kakao.ts";
@@ -47,7 +47,7 @@ export function createConnectionRuntime(paths: FirstRunPaths, productDirectory: 
       ui.report("Telegram QR 창을 준비합니다. 휴대폰 Telegram → 설정 → 기기에서 연결하세요.");
       return telegramProviderFromBootstrap(await runTelegramBootstrap(paths, productDirectory, credentials.apiId, credentials.apiHash), credentials);
     } },
-    { id: "slack", label: "Slack — 로그인된 앱 연결", connect: () => connectSlackAccount(ui, () => runAccountLogin("slack")) },
+    { id: "slack", label: "Slack — 로그인된 앱 연결", connect: () => connectSlackAccount(ui, () => runAccountLogin("slack"), { readProviders: () => { const config = readPrivateJson(paths.config); return Array.isArray(config.providers) ? config.providers : []; } }) },
     { id: "kakao", label: "KakaoTalk — 계정 / 휴대폰 인증", connect: () => connectKakaoAccount(ui, () => runAccountLogin("kakaotalk")) },
   ]);
   return { ui, registry };

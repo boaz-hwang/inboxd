@@ -24,7 +24,21 @@ export function saveConnection(path: string, provider: ProviderConfiguration): v
   try {
     const config = readPrivateJson(path);
     if (config.version !== 1 || !Array.isArray(config.providers)) throw new Error("Inboxd 설정 형식이 올바르지 않습니다.");
-    config.providers = [...config.providers.filter(p => p?.binding_id !== provider.binding_id), provider];
+    if (provider.kind === "slack" && typeof provider.user_id === "string") {
+      const sameUser = config.providers.find(p => p?.kind === "slack" &&
+        p.team_id === provider.team_id && p.user_id === provider.user_id);
+      // Existing account strings namespace stored history. Reauthentication
+      // updates credentials without renaming that namespace or its binding.
+      if (sameUser) provider = { ...provider, account: sameUser.account, binding_id: sameUser.binding_id };
+      const conflict = config.providers.some(p => p?.kind === "slack" &&
+        (p.account === provider.account || p.binding_id === provider.binding_id) &&
+        ((typeof p.user_id === "string" && p.user_id !== provider.user_id) || p.team_id !== provider.team_id));
+      if (conflict) throw new Error("다른 Slack 계정의 연결을 덮어쓸 수 없습니다.");
+    }
+    config.providers = [...config.providers.filter(p => p?.binding_id !== provider.binding_id && !(
+      provider.kind === "slack" && typeof provider.account === "string" &&
+      p?.kind === provider.kind && p.account === provider.account
+    )), provider];
     const encoded = `${JSON.stringify(config, null, 2)}\n`;
     if (Buffer.byteLength(encoded) > 65_536) throw new Error("연결 설정 크기가 허용 범위를 넘었습니다.");
     writeFileSync(temporary, encoded, { mode: 0o600, flag: "wx" });

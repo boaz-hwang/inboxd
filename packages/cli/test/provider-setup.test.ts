@@ -72,10 +72,11 @@ test("Slack setup requires authenticated team and exact channel observations", a
   ]);
   expect(provider).toEqual({
     kind: "slack",
-    binding_id: "slack-T123-C123",
-    account: "slack:team:T123",
+    binding_id: "slack-T123-U123-C123",
+    account: "slack:team:T123:user:U123",
     chat_id: "C123",
     team_id: "T123",
+    user_id: "U123",
     bot_token: "xoxb-secret-token",
   });
 });

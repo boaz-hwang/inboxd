@@ -52,6 +52,7 @@ fn production_config() -> ProductionWorkerConfig {
         session_cookie: None,
         account: "work".into(),
         team_id: "T0123".into(),
+        user_id: None,
         allowed_chat_ids_json: "[\"C0123\"]".into(),
         bot_token: "xoxb-synthetic".into(),
     }

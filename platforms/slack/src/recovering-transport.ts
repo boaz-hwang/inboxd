@@ -7,6 +7,7 @@ export function createRecoveringSlackTransport(input: SlackCredentials, store = 
   let credentials = store.current(input);
   let transport = makeTransport(credentials);
   let recovery: Promise<void> | undefined;
+  let remembered = false;
   return {
     async call(call) {
       const read = call.method !== "chat.postMessage";
@@ -15,6 +16,7 @@ export function createRecoveringSlackTransport(input: SlackCredentials, store = 
       const result = await transport.call(call);
       const body = result.body as { ok?: boolean; error?: string } | null;
       const code = body?.ok === false ? body.error : undefined;
+      if (read && !code && !remembered) { remembered = true; await store.remember?.(credentials).catch(() => {}); }
       if (!read || !code || !slackAuthErrors.has(code)) return result;
       if (credentials === failed && !recovery) recovery = (async () => {
         credentials = await store.recover(failed); transport = makeTransport(credentials);
