@@ -74,7 +74,7 @@ impl TelegramBackend {
                 }
             }
             "search" => {
-                json!({"op":"telegram_search","chat_id":request["chat_id"],"query":request["query"],"cursor":request["cursor"],"limit":100})
+                json!({"op":"telegram_search","chat_id":request["chat_id"],"query":request["query"],"cursor":request["cursor"],"limit":request["limit"].as_u64().unwrap_or(80).clamp(1, 80)})
             }
             "messages" | "history" => {
                 json!({"op":"telegram_history","chat_id":request["chat_id"],"limit":if op == "history" {100} else {30},"message_id":request
@@ -289,10 +289,11 @@ mod tests {
         let result = backend.run(&json!({"op":"chats"}), &mut io).await.unwrap();
         assert_eq!(result["chats"].as_array().unwrap().len(), 3);
         let result = backend
-            .run(&json!({"op":"search","query":"hello"}), &mut io)
+            .run(&json!({"op":"search","query":"hello","limit":2}), &mut io)
             .await
             .unwrap();
         assert_eq!(result["next_cursor"], "opaque");
+        assert_eq!(io.calls.iter().find(|r| r["op"] == "telegram_search").unwrap()["limit"], 2);
         assert_eq!(result["messages"][0]["id"], "2");
         let result = backend
             .run(

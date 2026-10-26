@@ -35,11 +35,51 @@ function roomList(state: TuiState, width: number, height: number): string[] {
   lines.push(fit(` ↑↓ 선택  Enter 열기${start ? "  ↑ 더 보기" : ""}`, width));
   return lines.slice(0, height);
 }
+// Content keys keep edits/deletions correct even when adapters reuse row IDs.
+// Bound both entry count and retained UTF-16 cells across rooms and resizes.
+const bodyLayouts = new Map<string, { lines: string[]; cells: number }>();
+let bodyLayoutCells = 0;
+const MAX_LAYOUT_CELLS = 2_000_000;
+function messageBody(row: Row, width: number): string[] {
+  const body = clean(row.deleted ? "삭제된 메시지" : row.body ?? "내용 없음");
+  const key = `${width}\0${body}`;
+  const cached = bodyLayouts.get(key);
+  if (cached) return cached.lines;
+  const lines = wrapCells(body, width - 4);
+  const cells = key.length + lines.reduce((sum, line) => sum + line.length, 0);
+  if (cells <= MAX_LAYOUT_CELLS) {
+    while (bodyLayouts.size >= 4096 || bodyLayoutCells + cells > MAX_LAYOUT_CELLS) {
+      const oldest = bodyLayouts.keys().next().value!;
+      bodyLayoutCells -= bodyLayouts.get(oldest)!.cells;
+      bodyLayouts.delete(oldest);
+    }
+    bodyLayouts.set(key, { lines, cells });
+    bodyLayoutCells += cells;
+  }
+  return lines;
+}
+// Message arrays are immutable reducer snapshots. Keep only the latest geometry;
+// scrolling/focus/composer changes never require wrapping offscreen bodies again.
+let chatGeometry: { rows: Row[]; width: number; blocks: number[]; ends: number[]; total: number } | undefined;
+function messageGeometry(rows: Row[], width: number) {
+  if (chatGeometry?.rows === rows && chatGeometry.width === width) return chatGeometry;
+  let total = 0;
+  const ends: number[] = [];
+  const blocks = rows.map(row => { const length = messageBody(row, width).length + 2; ends.push(total += length); return length; });
+  const geometry = { rows, width, blocks, ends, total };
+  if (rows.length <= 50_000) chatGeometry = geometry;
+  return geometry;
+}
+function firstVisible(ends: number[], top: number): number {
+  let low = 0, high = ends.length;
+  while (low < high) { const middle = (low + high) >>> 1; if (ends[middle]! <= top) low = middle + 1; else high = middle; }
+  return low;
+}
 function messageBlock(state: TuiState, row: Row, width: number, selected: boolean, unified: boolean): string[] {
   const resource = resourceOf(row);
   const context = unified ? `[${platformMarks[resource?.platform ?? ""] ?? "·"}] ${isArchivedResource(state, resource) ? "[보관] " : ""}${conversationTitle(state, resource)} · ` : "";
   const meta = `${selected ? "›" : " "} ${context}${row.previewOnly ? "" : authorLabel(row, state)}  ${timeLabel(row.ts)}${row.edited ? " · 수정됨" : ""}${!unified && row.id === state.response?.sourceIds[0] ? " · 안 읽은 메시지부터" : ""}`;
-  const body = wrapCells(clean(row.deleted ? "삭제된 메시지" : row.body ?? "내용 없음"), width - 4);
+  const body = messageBody(row, width);
   const visible = unified ? body.slice(0, 2) : body;
   if (unified && body.length > 2) visible[1] = truncateCells(visible[1]!, width - 6) + " …";
   return [truncateCells(meta, width), ...visible.map(line => `  ${line}`), ""];
@@ -60,15 +100,16 @@ function timeline(state: TuiState, width: number, height: number, slices?: Visib
   if (view.status === "loading" && !rows.length) return [...lines, " 메시지 불러오는 중…"];
   if (!rows.length) return [...lines, state.screen === "search" ? " 검색 결과가 없습니다." : " 아직 불러온 메시지가 없습니다.", unified ? " 왼쪽에서 대화를 선택하세요." : " Shift+R을 눌러 메시지를 불러오세요."];
   const index = Math.min(state.focus, rows.length - 1);
-  const blocks = rows.map((row, i) => messageBlock(state, row, width, state.pane !== "rooms" && i === index, unified));
   if (!unified) {
-    let position = 0;
-    const total = blocks.reduce((sum, block) => sum + block.length, 0);
+    const geometry = messageGeometry(rows, width);
+    const total = geometry.total;
     const visible = Math.max(1, height - 2);
-    const focusEnd = blocks.slice(0, index + 1).reduce((sum, block) => sum + block.length, 0);
+    const focusEnd = geometry.ends[index] ?? 0;
     const top = Math.min(state.chatScrollOffset ?? Math.max(0, focusEnd - visible + state.detailOffset), Math.max(0, total - visible));
-    for (let i = 0; i < blocks.length; i++) {
-      const block = blocks[i]!;
+    const first = firstVisible(geometry.ends, top);
+    let position = first ? geometry.ends[first - 1]! : 0;
+    for (let i = first; i < rows.length && lines.length < height; i++) {
+      const block = messageBlock(state, rows[i]!, width, state.pane !== "rooms" && i === index, false);
       const start = Math.max(0, top - position);
       const count = Math.max(0, Math.min(block.length - start, height - lines.length));
       if (count) {
@@ -84,15 +125,22 @@ function timeline(state: TuiState, width: number, height: number, slices?: Visib
     }
     return lines;
   }
+  // Unified lists need only the neighboring blocks that can fill the viewport.
+  const blocks = new Map<number, string[]>();
+  const blockAt = (i: number) => {
+    let block = blocks.get(i);
+    if (!block) { block = messageBlock(state, rows[i]!, width, state.pane !== "rooms" && i === index, unified); blocks.set(i, block); }
+    return block;
+  };
   // Focus is always visible. The active long message can be scrolled independently.
   let first = index;
-  let used = Math.min(blocks[index]!.length, height - lines.length);
-  while (first > 0 && used + blocks[first - 1]!.length <= height - lines.length) used += blocks[--first]!.length;
-  for (let i = first; i < blocks.length && lines.length < height; i++) {
-    const start = i === index && state.detailOffset ? Math.min(state.detailOffset, Math.max(0, blocks[i]!.length - (height - lines.length))) : 0;
-    const count = Math.min(blocks[i]!.length - start, height - lines.length);
-    if (!unified) slices?.push({ id: rows[i]!.id, start, end: start + count, total: blocks[i]!.length });
-    lines.push(...blocks[i]!.slice(start, start + count));
+  let used = Math.min(blockAt(index).length, height - lines.length);
+  while (first > 0 && used + blockAt(first - 1).length <= height - lines.length) used += blockAt(--first).length;
+  for (let i = first; i < rows.length && lines.length < height; i++) {
+    const block = blockAt(i);
+    const start = i === index && state.detailOffset ? Math.min(state.detailOffset, Math.max(0, block.length - (height - lines.length))) : 0;
+    const count = Math.min(block.length - start, height - lines.length);
+    lines.push(...block.slice(start, start + count));
   }
 
   return lines;
@@ -256,9 +304,8 @@ export function chatScrollMetrics(state: TuiState, size: { width: number; height
   const frame = selectionFrame(state, size.width, size.height);
   const width = size.width - (size.width >= 80 ? sidebarWidth(size.width) + 1 : 0) - (frame ? 1 : 0);
   const visible = Math.max(1, workspaceBodyHeight(state, size.height) - (frame ? 2 : 0) - composer(state, width).length - 2);
-  const blocks = state.views.chat.data.map(row => messageBlock(state, row, width, false, false).length);
-  const total = blocks.reduce((a, b) => a + b, 0);
-  const focusEnd = blocks.slice(0, state.focus + 1).reduce((a, b) => a + b, 0);
+  const { blocks, ends, total } = messageGeometry(state.views.chat.data, width);
+  const focusEnd = ends[Math.min(state.focus, ends.length - 1)] ?? 0;
   const top = state.chatScrollOffset ?? Math.max(0, focusEnd - visible + state.detailOffset);
   return { total, visible, top: Math.min(top, Math.max(0, total - visible)), blocks };
 }

@@ -64,3 +64,33 @@ test("RTM lifecycle invalidates on edits/deletes and tears down without HTTP pol
   stop();
   expect(stops).toBe(1);
 });
+
+for (const method of ["conversations.history", "conversations.replies", "search.messages"] as const) {
+  test(`Slack ${method} accepts huddle channel strings without dropping the page`, async () => {
+    const rows = [
+      { ts: "1.001", user: "U1", text: "ordinary" },
+      { ts: "2.001", user: "U1", text: "huddle", subtype: "huddle_thread", channel: "C123" },
+      { ts: "3.001", user: "U1", text: "other", channel: { id: "C999" } },
+    ];
+    const adapter = createSlackAccount({ bot_token: "fixture" }, (async () => Response.json({
+      ok: true, messages: method === "search.messages" ? { matches: rows, pagination: { page_count: 1 } } : rows,
+    })) as unknown as typeof fetch);
+    const req = method === "search.messages"
+      ? { op: "slack.search.messages" as const, params: { query: "today", count: 100, page: 1, sort: "timestamp" as const, sort_dir: "desc" as const } }
+      : method === "conversations.replies"
+        ? { op: "slack.conversations.replies" as const, params: { channel: "C123", ts: "2.001", limit: 30 } }
+        : { op: "slack.conversations.history" as const, params: { channel: "C123", limit: 30 } };
+    const result: any = await dispatch(adapter, req);
+    const messages = method === "search.messages" ? result.data.messages.matches : result.data.messages;
+    expect(messages).toHaveLength(3);
+    expect(messages[1].channel).toEqual({ id: "C123" });
+    expect(messages[2].channel).toEqual({ id: "C999" });
+  });
+}
+
+test("Slack malformed message channel still fails validation", async () => {
+  const adapter = createSlackAccount({ bot_token: "fixture" }, (async () => Response.json({
+    ok: true, messages: [{ ts: "1.001", channel: 42 }],
+  })) as unknown as typeof fetch);
+  await expect(dispatch(adapter, { op: "slack.conversations.history", params: { channel: "C123", limit: 30 } })).rejects.toThrow("invalid primitive object");
+});

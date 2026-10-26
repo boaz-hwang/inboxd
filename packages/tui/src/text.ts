@@ -1,4 +1,5 @@
 export const CURSOR_MARK = "\u2060";
+const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 export function displayWidth(value: string): number {
   return Bun.stringWidth(value.replaceAll(CURSOR_MARK, ""));
@@ -12,10 +13,7 @@ export function truncateCells(value: string, width: number): string {
   const target = width - 1;
   let result = "";
   let used = 0;
-  const clusters = typeof Intl.Segmenter === "function"
-    ? Array.from(new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(value), (part) => part.segment)
-    : Array.from(value);
-  for (const character of clusters) {
+  for (const { segment: character } of graphemes.segment(value)) {
     const characterWidth = displayWidth(character);
     if (used + characterWidth > target) break;
     result += character;
@@ -29,9 +27,12 @@ export function wrapCells(value: string, width: number): string[] {
   const lines: string[] = [];
   for (const paragraph of value.split("\n")) {
     let line = "";
-    for (const { segment } of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(paragraph)) {
-      if (line && displayWidth(line) + displayWidth(segment) > width) { const caret = line.endsWith(CURSOR_MARK); lines.push(caret ? line.slice(0, -1) : line); line = caret ? CURSOR_MARK : ""; }
+    let cells = 0;
+    for (const { segment } of graphemes.segment(paragraph)) {
+      const segmentCells = displayWidth(segment);
+      if (line && cells + segmentCells > width) { const caret = line.endsWith(CURSOR_MARK); lines.push(caret ? line.slice(0, -1) : line); line = caret ? CURSOR_MARK : ""; cells = 0; }
       line += segment;
+      cells += segmentCells;
     }
     lines.push(line);
   }

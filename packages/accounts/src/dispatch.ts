@@ -12,10 +12,14 @@ export async function dispatchWire(adapter: AccountAdapter, input: unknown): Pro
   if (request.op !== "batch") return parseResult(request,await adapter.run(request));
   // Await every started read before returning failure or closing the SDK session.
   const settled = await Promise.allSettled(request.requests.map(async r => parseResult(r,await adapter.run(r))));
-  const failure = settled.find(r => r.status === "rejected");
+  // Any authentication failure must reach account recovery, even when an earlier
+  // request failed generically. Then prefer throttling over an opaque failure.
+  const failure = settled.find(r => r.status === "rejected" && AUTH_ERROR_CODES.has(r.reason?.code))
+    ?? settled.find(r => r.status === "rejected" && (r.reason?.code === "rate_limit" || r.reason?.code === 429))
+    ?? settled.find(r => r.status === "rejected");
   if (failure?.status === "rejected") {
     const error = new Error("provider batch failed");
-    if (AUTH_ERROR_CODES.has(failure.reason?.code)) Object.assign(error, { code: failure.reason.code });
+    if (AUTH_ERROR_CODES.has(failure.reason?.code) || failure.reason?.code === "rate_limit" || failure.reason?.code === 429) Object.assign(error, { code: failure.reason.code });
     throw error;
   }
   return { results: settled.map(r => { if (r.status === "rejected") throw r.reason; return r.value; }) };

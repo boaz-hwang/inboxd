@@ -421,3 +421,84 @@ Only after final summaries were frozen, the validated helpers were integrated in
 - Recovery includes authentication errors during session creation; reads replay at most once, listeners rebind, mutations never replay. IPC distinguishes automatic recovery from a missing-credentials/manual reconnect state; explicit connect still permits phone authentication during cooldown.
 - Verification: Kakao/accounts suite 313 tests passed; added cooldown-cap regression also passed (targeted suite 16 tests). Typecheck and import boundaries passed. Installed via bun run install:local and restarted daemon. Live Kakao returned connected, observation_failed=false, directory errors empty and latest visible message 2026-10-15 13:59:53 KST. Credential failure marker absent. No messages were sent or marked read during verification.
 - Limit: revoked refresh credentials or a mandatory phone challenge cannot be bypassed; manual inboxd connect kakao remains available.
+
+## 2026-10-26 — Slack authenticated but CLI message reads failed
+
+- Reproduced installed `inboxd account messages` failures on development and
+  development/planning channels, while account directory and auth checks worked.
+- Cause 1: the live Slack SDK WebClient logger emitted a rate-limit INFO line
+  to stdout, corrupting the account worker JSON-lines protocol. SDK console
+  diagnostics are now isolated from both RPC stdout and the content-free live
+  event stderr pipe. Allowlisted errors still cross RPC.
+- Cause 2: real `huddle_thread` messages contain a string `channel`, whereas the
+  shared primitive schema requires `{id: ...}`. One huddle caused validation to
+  reject a whole history page. Normalize string IDs at the Slack API boundary,
+  retaining original IDs and rejecting malformed values. Covers history,
+  replies, search and posted-message payloads without weakening the schema.
+- Batch read rate-limit errors now retain the safe `rate_limit` classification
+  rather than losing it inside a generic batch error.
+- Added regression tests for stdout/stderr purity, rate-limit propagation,
+  message channel variants and malformed channel rejection.
+- Cause 3 discovered during today's thread lookup: the CLI search handler kept
+  only legacy `chat/interval/query`, dropping `mode`, account scope, pagination,
+  and refresh identifiers. It now forwards the full typed search input; the
+  daemon retains validation. A CLI dispatcher regression covers remote and
+  refresh requests.
+- Installed rebuild and daemon restart restored history reads in all three
+  requested channels. The actual product channels are accessible via the saved
+  PLCO account; the QMIT account has a narrower shared-channel directory.
+- Checks: 312 account/Slack tests plus 12 CLI tests, typecheck, and import-boundary
+  validation passed. No messages were sent and no read markers were changed.
+
+- Cause 4: Slack scoped search appended a bare channel ID as `in:ID`. Live
+  comparison returned zero hits, while `in:<#ID>` and `in:channel_name` returned
+  today's messages under the identical interval. Backend now emits the ID
+  reference syntax; scoped-search regression expectation updated.
+
+Final verification: rebuilt with `bun run install:local`, restarted the packaged
+daemon, and used the installed CLI for channel-scoped remote search with the
+same KST day interval. Development returned 21 messages, planning 5, and the
+shared channel 21, including thread replies; all three searches completed.
+The 14 Rust Slack backend tests passed. Search completeness here is provider
+response completeness, not proof of exhaustive Slack index coverage.
+
+## Follow-up boundary audit — 2026-10-26
+
+- Installed CLI reproduced a result-limit violation: remote Slack search with
+  `limit:1` returned 21 messages. Slack and Telegram search backends hardcoded
+  upstream page size 100; both now forward the bounded requested size.
+- More importantly, superseded reads bypassed `MessagePages::fit`, allowing a
+  complete response of up to 30 rows regardless of caller limit. A controlled
+  overlapping-send test reproduced this and now rejects an oversized response
+  without truncating data or resurrecting stale continuations.
+- Mixed batch failures selected the first rejection even when a later failure
+  carried authentication or throttling classification. Three regression cases
+  failed before the change; dispatch now prioritizes safe auth codes, then rate
+  limits, while awaiting all started reads and suppressing provider details.
+- Live verification exposed repeated superseded-search errors during background
+  room polling. Sol review is investigating account-wide invalidation caused by
+  background refreshes before this audit can be considered complete.
+
+- Sol's fix adds private `observe_recent` dispatch for background room sweeps:
+  provider refresh stays enabled, but unrelated user search generations and
+  cursors survive. Explicit refresh/send/directory fences remain unchanged.
+  Regression covers Slack, Telegram and Kakao cursor continuation during a
+  background observation and checks explicit refresh still invalidates it.
+
+- Final installation and packaged-daemon restart completed. Installed Slack CLI
+  search with limit 1 returned exactly one distinct message on each of three
+  consecutive pages, each with a valid continuation; no superseded-read error.
+  TS account/Slack/CLI suites passed (327 tests before one extra mixed-priority
+  case; dispatch's final 9 cases all passed), Rust library suite passed before
+  the observation change, and all 11 process tests plus the strengthened final
+  cross-provider observation regression passed afterward. Typecheck, import
+  boundaries and diff whitespace checks passed. Live Telegram was not exercised.
+
+## TUI scroll rendering — 2026-10-26
+
+User clarified lag is scrolling/movement rendering, not provider I/O. Entire
+message histories were rewrapped for render, frame observation and metrics on
+each input. Sol implemented bounded body/geometry caching and visible-only block
+construction; parent removed repeated whole-line width scans and segmenter
+construction. Warm synthetic 1000-row, 20-cycle chat benchmark:3540ms ->3.6ms.
+186 TUI tests pass. Installed product verified in PTY; no daemon changes needed.

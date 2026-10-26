@@ -64,3 +64,21 @@ Interaction references, not copied implementations:
 Remote retention and API limits apply. Account-wide push updates are not yet
 subscribed; Shift+R refreshes the current directory. See
 [account adapter architecture](12-account-workspace.md) for paging and send semantics.
+
+## Scroll rendering performance — 2026-10-26
+
+Chat rendering, viewport observations and scroll metrics share immutable-array
+layout geometry. Body wrapping is cached by content/deletion state and width,
+bounded to 4096 entries and two million UTF-16 cells. Prefix line offsets locate
+the first visible message by binary search; only visible metadata and blocks are
+constructed. Unified inbox/search likewise constructs only neighboring visible
+blocks. Unicode wrapping reuses a grapheme segmenter and accumulates cell widths
+instead of rescanning the growing line for every grapheme.
+
+Reproduce with `bun packages/tui/bench/scroll.ts`: 1000 Korean/emoji messages at
+120x40, two warmups, 20 chat render/observation/metrics cycles. Measured baseline
+3540ms total versus optimized 3.6ms total on this machine. This measures warm
+JavaScript layout computation, not end-to-end key latency or terminal painting.
+Full TUI suite: 186 tests passed, including Unicode, resize, same-ID edits,
+deletion, viewport observations and native rendering. The installed release was
+rebuilt and exercised in a real PTY with room opening and page up/down input.

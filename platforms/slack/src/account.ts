@@ -50,6 +50,13 @@ export function createSlackAccount(config: {
     const result = JSON.parse(text);
     if (result.ok === false && slackAuthErrors.has(result.error)) throw slackAuthRequired();
     if (!response.ok || !result.ok) throw new Error("Slack 조회 실패");
+    // History/replies (notably huddle_thread) use a string channel ID, while
+    // search uses { id, ... }. Canonicalize the vendor variants before IPC
+    // validation; retain the actual ID so foreign-channel checks still apply.
+    const messages = Array.isArray(result.messages) ? result.messages : result.messages?.matches;
+    for (const message of [...(Array.isArray(messages) ? messages : []), result.message]) {
+      if (message && typeof message.channel === "string") message.channel = { id: message.channel };
+    }
     return result;
   }
   async function call(method: string, body: Record<string, unknown> = {}): Promise<any> {

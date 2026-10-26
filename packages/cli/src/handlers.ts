@@ -17,11 +17,18 @@ export interface ChatKey {
   readonly chat_id: string;
 }
 
-export interface SearchInput {
-  readonly chat: ChatKey;
-  readonly interval: { readonly from_ts: number; readonly to_ts: number };
+export type SearchInput = ({ readonly chat: ChatKey } | {
+  readonly platform: string;
+  readonly account: string;
+  readonly chat_id?: string;
+}) & {
+  readonly interval?: { readonly from_ts: number; readonly to_ts: number };
   readonly query: string;
-}
+  readonly mode?: "local" | "remote" | "refresh";
+  readonly limit?: number;
+  readonly cursor?: string;
+  readonly refresh_id?: string;
+};
 
 export class ApproverTTYRequiredError extends Error {
   constructor() {
@@ -133,7 +140,7 @@ export function createCliHandlers(options: CliHandlerOptions): CliHandlers {
     recent: (input) => call("message.recent", { ...input }),
     evidence: (input) => call("message.evidence", { ...input }),
     get: ({ msg_id, ...chat }) => call("message.get", { chat, msg_id }),
-    search: (input) => call("message.search", { chat: input.chat, interval: input.interval, query: input.query }),
+    search: (input) => call("message.search", { ...input }),
     syncStatus: () => call("sync.status", {}),
     backfill: (input) => call("sync.backfill", { ...input }),
     authStatus: () => call("auth.status", {}),

@@ -577,6 +577,19 @@ impl AccountService {
         )
     }
     pub(crate) async fn query(&self, op: &str, params: &Value) -> Result<Value, String> {
+        self.query_inner(op, params, true).await
+    }
+    // Background observations refresh provider caches without invalidating
+    // unrelated user reads or their snapshot continuation handles.
+    async fn observe_recent(&self, params: &Value) -> Result<Value, String> {
+        self.query_inner("messages", params, false).await
+    }
+    async fn query_inner(
+        &self,
+        op: &str,
+        params: &Value,
+        invalidate_refresh: bool,
+    ) -> Result<Value, String> {
         #[cfg(test)]
         if op == "send" {
             let storage = self.storage.as_ref().ok_or("전송 기록 저장소 없음")?;
@@ -598,7 +611,9 @@ impl AccountService {
         let mut request = params.clone();
         request["_observation_order"] = json!(observed);
         let result = async {
-            let mut result = self.dispatch_query(op, &request).await?;
+            let mut result = self
+                .dispatch_query_inner(op, &request, invalidate_refresh)
+                .await?;
             let observed = result
                 .as_object_mut()
                 .and_then(|r| r.remove("_observation_order"))
@@ -715,6 +730,14 @@ impl AccountService {
         Ok(())
     }
     pub(crate) async fn dispatch_query(&self, op: &str, params: &Value) -> Result<Value, String> {
+        self.dispatch_query_inner(op, params, true).await
+    }
+    async fn dispatch_query_inner(
+        &self,
+        op: &str,
+        params: &Value,
+        invalidate_refresh: bool,
+    ) -> Result<Value, String> {
         let platform = params["platform"].as_str().ok_or("메신저 없음")?;
         let account = params["account"].as_str().ok_or("계정 없음")?;
         for entry in &self.slots {
@@ -856,7 +879,7 @@ impl AccountService {
             {
                 return Err("검색어를 입력하세요".into());
             }
-            if request["refresh"] == true {
+            if invalidate_refresh && request["refresh"] == true {
                 slot.invalidate();
             }
             let (buffered, seen) = slot.message_pages.begin(&mut request)?;
@@ -910,7 +933,9 @@ impl AccountService {
                 if result["next_cursor"]
                     .as_str()
                     .is_some_and(|s| !s.is_empty())
-                    || result["messages"].as_array().is_none_or(|m| m.len() > 30)
+                    || result["messages"].as_array().is_none_or(|m| {
+                        m.len() > request["limit"].as_u64().unwrap_or(30).clamp(1, 30) as usize
+                    })
                     || serde_json::to_vec(&result).map_or(true, |bytes| bytes.len() > 58_000)
                 {
                     return Err("조회 중 계정 상태가 변경되었습니다. 다시 조회하세요".into());

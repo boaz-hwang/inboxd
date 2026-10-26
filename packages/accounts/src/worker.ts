@@ -7,6 +7,11 @@ import { createKakaoAccount } from "../../../contrib/kakao/src/account.ts";
 import type { AccountAdapter } from "./contracts.ts";
 import { liveEmitter } from "./live.ts";
 import { accountErrorMessage } from "./errors.ts";
+import { isolateWorkerConsole } from "./worker-console.ts";
+
+// Provider errors are reported through the allowlisted RPC error mapper below.
+// Slack's WebClient logger otherwise writes rate-limit notices into stdout.
+isolateWorkerConsole();
 
 if (!process.env.INBOXD_ACCOUNT_CONFIG) {
   process.stderr.write("Account worker: configuration required\n");

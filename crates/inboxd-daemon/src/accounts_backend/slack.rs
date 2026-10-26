@@ -391,10 +391,12 @@ impl SlackBackend {
                     if chat.is_empty() {
                         String::new()
                     } else {
-                        format!(" in:{chat}")
+                        // Slack resolves bare in: values as names, not channel IDs.
+                        format!(" in:<#{chat}>")
                     }
                 );
-                let result = call(io,"search.messages",json!({"query":query,"count":100,"page":page,"sort":"timestamp","sort_dir":"desc"})).await?;
+                let limit = req["limit"].as_u64().unwrap_or(80).clamp(1, 80);
+                let result = call(io,"search.messages",json!({"query":query,"count":limit,"page":page,"sort":"timestamp","sort_dir":"desc"})).await?;
                 let more = page
                     < result["messages"]["pagination"]["page_count"]
                         .as_u64()
@@ -675,14 +677,15 @@ mod tests {
         let mut io = Mock::default();
         let result = backend
             .run(
-                &json!({"op":"search","chat_id":"a","query":"hello"}),
+                &json!({"op":"search","chat_id":"a","query":"hello","limit":2}),
                 &mut io,
             )
             .await
             .unwrap();
         assert_eq!(result["next_cursor"], "2");
         assert_eq!(result["messages"][0]["chat_id"], "b");
-        assert_eq!(io.calls[0]["params"]["query"], "hello in:a");
+        assert_eq!(io.calls[0]["params"]["query"], "hello in:<#a>");
+        assert_eq!(io.calls[0]["params"]["count"], 2);
         backend
             .summaries
             .insert("a".into(), ("marker".into(), json!({"ts":"42"})));

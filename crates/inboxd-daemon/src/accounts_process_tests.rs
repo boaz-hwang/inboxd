@@ -356,6 +356,12 @@ async fn fixed_worker_send_invalidates_account_history_including_overlapping_rea
     service
         .with_external_send(&chat, async {
             service.query("messages", &chat).await.unwrap();
+            let mut limited = chat.clone();
+            limited["limit"] = json!(1);
+            assert!(
+                service.query("messages", &limited).await.is_err(),
+                "superseded reads must not bypass the caller's result limit"
+            );
             assert!(
                 service.slots[0].slot.lock().await.backend.is_none(),
                 "overlapping reads cannot restore stale history"
@@ -448,6 +454,46 @@ async fn common_remote_search_persists_real_adapter_results_for_all_three_accoun
         local_ids.sort();
         assert_eq!(local_ids, remote_ids);
         assert!(local["coverage"]["covered"].as_array().unwrap().is_empty());
+        service.stop_live().await;
+    }
+}
+
+#[tokio::test]
+async fn background_observations_preserve_search_continuations_and_refresh_fences() {
+    for platform in ["slack", "telegram", "kakao"] {
+        let (_directory, service) = service(platform).await;
+        service.list(&json!({})).await.unwrap();
+        let mut search =
+            json!({"platform":platform,"account":"synthetic","query":"needle","limit":1});
+        let first = service.query("search", &search).await.unwrap();
+        search["cursor"] = first["next_cursor"].clone();
+        let generation = service.slots[0].slot.lock().await.generation;
+        let refresh = json!({"platform":platform,"account":"synthetic","chat_id":"1","refresh":true,"limit":80});
+        // This is the exact room observation path used by the live sweep.
+        service.observe_recent(&refresh).await.unwrap();
+        assert_eq!(service.slots[0].slot.lock().await.generation, generation);
+        let second = service.query("search", &search).await.unwrap();
+        assert_eq!(second["messages"].as_array().unwrap().len(), 1);
+        assert_ne!(first["messages"][0]["id"], second["messages"][0]["id"]);
+        // A fresh provider read yields on IPC while the observation starts.
+        let fresh = json!({"platform":platform,"account":"synthetic","query":"needle","limit":1});
+        let (overlap, observed) = tokio::join!(
+            service.query("search", &fresh),
+            service.observe_recent(&refresh)
+        );
+        observed.unwrap();
+        let mut continued = fresh.clone();
+        continued["cursor"] = overlap.unwrap()["next_cursor"].clone();
+        assert_eq!(
+            service.query("search", &continued).await.unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        // An explicit refresh still fences all outstanding snapshots.
+        service.query("messages", &refresh).await.unwrap();
+        assert!(service.query("search", &search).await.is_err());
         service.stop_live().await;
     }
 }

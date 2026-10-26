@@ -234,3 +234,14 @@ test("CLI direct send delegates non-TTY authority and preserves request IDs", as
   expect(lastRequest(transport)).toMatchObject({ method: "message.send", params: input });
   await expect(runCli(["safety", "propose", "{}"], { handlers: cli, write: () => {} })).rejects.toThrow(/retired/);
 });
+
+test("CLI search preserves remote scope, mode and pagination instead of falling back to legacy local search", async () => {
+  const transport = new FakeTransport();
+  const cli = await started(transport);
+  const input = { platform: "slack", account: "a", chat_id: "C123", query: "after:2026-10-25", mode: "remote" as const, limit: 80, cursor: "opaque" };
+  await respondToCall(transport, runCli(["message", "search", JSON.stringify(input)], { handlers: cli, write() {} }), { messages: [] });
+  expect(lastRequest(transport)).toMatchObject({ method: "message.search", params: input });
+  const refresh = { chat: { platform: "slack", account: "a", chat_id: "C123" }, query: "todo", mode: "refresh" as const, refresh_id: "refresh-1" };
+  await respondToCall(transport, cli.search(refresh), { messages: [] });
+  expect(lastRequest(transport)).toMatchObject({ method: "message.search", params: refresh });
+});

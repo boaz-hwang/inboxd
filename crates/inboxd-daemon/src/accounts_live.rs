@@ -379,7 +379,7 @@ impl AccountService {
                         }
                         let result = tokio::time::timeout(
                             Duration::from_secs(30),
-                            self.query("messages", &request),
+                            self.observe_recent(&request),
                         )
                         .await;
                         if matches!(result, Ok(Ok(_))) {
