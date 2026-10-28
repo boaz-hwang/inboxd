@@ -81,6 +81,9 @@
         },
         "latest": {
           "optional": "SlackMessage"
+        },
+        "is_open": {
+          "optional": "boolean"
         }
       }
     },
@@ -883,6 +886,54 @@
                 "optional": "SlackMetadata"
               }
             }
+          }
+        }
+      }
+    },
+    "kakao_leave": {
+      "request": {
+        "fields": {
+          "chat_id": "nonempty"
+        }
+      },
+      "result": {
+        "fields": {
+          "state": {
+            "enum": [
+              "Left"
+            ]
+          }
+        }
+      }
+    },
+    "slack_leave": {
+      "request": {
+        "fields": {
+          "chat_id": "nonempty"
+        }
+      },
+      "result": {
+        "fields": {
+          "state": {
+            "enum": [
+              "Left"
+            ]
+          }
+        }
+      }
+    },
+    "telegram_leave": {
+      "request": {
+        "fields": {
+          "chat_id": "nonempty"
+        }
+      },
+      "result": {
+        "fields": {
+          "state": {
+            "enum": [
+              "Left"
+            ]
           }
         }
       }

@@ -67,7 +67,7 @@ pub const LEGACY_REQUEST_METHODS: [&str; 21] = [
     "subscribe",
 ];
 
-pub const REQUEST_METHODS: [&str; 31] = [
+pub const REQUEST_METHODS: [&str; 32] = [
     "system.hello",
     "system.ping",
     "system.status",
@@ -90,6 +90,7 @@ pub const REQUEST_METHODS: [&str; 31] = [
     "account.list",
     "account.messages",
     "account.search",
+    "account.leave",
     "message.send",
     "response.open",
     "response.get",
@@ -212,7 +213,7 @@ pub fn parse_request(value: &Value, role: Option<ClientRole>) -> Result<Protocol
             }
         }
     }
-    if method == "message.send"
+    if matches!(method, "message.send" | "account.leave")
         && role.is_some_and(|role| !matches!(role, ClientRole::Approver | ClientRole::Sender))
     {
         return Err(ProtocolError::bad_request(

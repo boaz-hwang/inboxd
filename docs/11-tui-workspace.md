@@ -31,6 +31,14 @@ time. A missing unread count is not shown as zero.
   the exit sequence. Escape and `q` no longer cancel/quit. Shift+R refreshes the
   account directory and selected chat. The `b` refresh and `d` detail shortcuts
   are removed; `5` manages connections; `?` shows help.
+- With the room list focused, Shift+D opens a leave confirmation for the arrow's
+  room, independently of the open conversation. Enter/Y confirms once;
+  Escape/N/Ctrl+C cancels without exiting. Other keys and mouse navigation cannot
+  change the target while confirming or waiting. Successful leave removes the room;
+  an unconfirmed result retains it and asks the user to check the messenger.
+  Kakao leaves the room; Slack leaves channels or closes DMs; Telegram leaves groups
+  and channels and removes them from the list, or deletes personal chat history
+  only for the current user. The confirmation explains the provider-specific effect.
 - At 80 columns, open chats use the full width; Tab can return to the sidebar.
   At 100+ columns, the sidebar and conversation remain visible together.
 

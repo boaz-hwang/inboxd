@@ -253,7 +253,7 @@ export function renderWorkspace(state: TuiState, size: { width: number; height: 
   const contentWidth = split ? width - leftWidth - 1 - (frame ? 1 : 0) : width;
   const input = composer(state, contentWidth);
   const notice = usefulNotice(state);
-  const footer = state.composeActive && state.pane === "messages" ? " 작성 중  ·  Shift+Tab 이전 영역  ·  ⌥←→ 단어 이동  Ctrl+A/E 줄 처음·끝" : " / 검색  Ctrl+K 대화찾기  Shift+Tab 영역 이동  ←→ 필터 선택  ? 도움말";
+  const footer = state.pane === "rooms" && !state.finderActive ? " ↑↓ 대화 선택  Enter 열기  Shift+D 나가기  Ctrl+K 대화찾기  ? 도움말" : state.composeActive && state.pane === "messages" ? " 작성 중  ·  Shift+Tab 이전 영역  ·  ⌥←→ 단어 이동  Ctrl+A/E 줄 처음·끝" : " / 검색  Ctrl+K 대화찾기  Shift+Tab 영역 이동  ←→ 필터 선택  ? 도움말";
   const exitHint = state.pane === "filters" || state.pane === "rooms" ? "Ctrl+C 종료" : "Ctrl+C 취소 · 두 번 종료";
   const help = state.helpOpen ? [" 1 전체 · 3 대화 · 4 전송 기록 · 5 연결 · ↑↓ 선택 · Enter 열기/답장", ` c 작성 · r 인용 · s 전송 상태 · Shift+R 불러오기 · ${exitHint}`] : [];
   const coverage = state.views[state.screen].coverage ?? state.coverage;
@@ -280,6 +280,20 @@ export function renderWorkspace(state: TuiState, size: { width: number; height: 
     return sidebar + seam + panel;
   });
   const lines = [...header(state, width), ...body, fit(status, width), ...(notice ? [fit(` ${notice}`, width)] : []), ...help.map(line => fit(line, width)), fit(footer, width)];
+  if (state.leaveRoom) {
+    const { resource, title, pending } = state.leaveRoom;
+    const warning = resource.platform === "telegram" ? "그룹·채널은 탈퇴, 개인 대화는 내 기록을 삭제합니다." : resource.platform === "slack" ? "채널은 탈퇴, DM은 대화 목록에서 닫습니다." : "원본 메신저에서 나갑니다. 대화 기록을 잃을 수 있습니다.";
+    for (let i = 0; i < lines.length; i++) lines[i] = lines[i]!.replaceAll(CURSOR_MARK, "");
+    const dialog = boxed(pending ? "대화방 나가는 중…" : "대화방 나가기", [
+      ...wrapCells(clean(title), width - 4).slice(0, 3),
+      ...wrapCells(`${platformNames[resource.platform] ?? resource.platform} · ${clean(resource.account)} · ${resource.kind === "chat" ? clean(resource.chat_id) : ""}`, width - 4).slice(0, 2),
+      ...wrapCells(warning, width - 4),
+      pending ? "처리 결과를 기다리고 있습니다." : "이 대화방에서 나갈까요?",
+      pending ? "" : "Enter / Y 나가기 · Esc / N / Ctrl+C 취소",
+    ], width);
+    const start = Math.max(3, Math.floor((height - dialog.length) / 2));
+    lines.splice(start, Math.min(dialog.length, height - start - 1), ...dialog.slice(0, height - start - 1));
+  }
   return lines.slice(0, height).map(line => fit(line, width)).join("\n");
 }
 

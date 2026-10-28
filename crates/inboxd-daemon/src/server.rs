@@ -904,6 +904,17 @@ async fn dispatch(
             }
             Ok(crate::reply::public_result(result))
         }
+        "account.leave" => {
+            if !session.trusted_sender && !session.trusted_approver {
+                return Err(RpcError::unsupported(
+                    "authenticated local owner authorization is required",
+                ));
+            }
+            accounts
+                .leave(&Value::Object(request.params.clone()))
+                .await
+                .map_err(RpcError::unsupported)
+        }
         "account.messages" | "account.search" => {
             let op = request.method.strip_prefix("account.").unwrap();
             accounts

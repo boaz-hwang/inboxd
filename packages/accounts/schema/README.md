@@ -1,6 +1,6 @@
 # Private account primitives
 
-`primitives.json` is the source of truth for the daemon-to-provider contract. It describes 25 operations, their individual request/result shapes, and the vendor fields the Rust policies consume. `bun scripts/generate-account-contract.ts` generates Rust serde models and TS discriminated types; `--check` verifies both checked-in outputs, including Rust formatting. Generation requires Bun and the Rust toolchain.
+`primitives.json` is the source of truth for the daemon-to-provider contract. It describes 28 operations, their individual request/result shapes, and the vendor fields the Rust policies consume. `bun scripts/generate-account-contract.ts` generates Rust serde models and TS discriminated types; `--check` verifies both checked-in outputs, including Rust formatting. Generation requires Bun and the Rust toolchain.
 
 The wire format stays the existing JSON-lines envelope. Product builds package the daemon and provider worker together; this change does not add a version negotiation protocol or support independently updating workers.
 

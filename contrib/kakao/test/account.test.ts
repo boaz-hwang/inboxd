@@ -91,3 +91,13 @@ test("page preserves explicit quoted-reply source without copying attachment bod
   expect(page.messages[0]).toMatchObject({id:"2",parent_id:"1"});
   expect(JSON.stringify(page)).not.toContain("private source");
 });
+
+test("leave calls the SDK for the exact room and checks its acknowledgement", async () => {
+  const calls: string[] = [];
+  const adapter = await createKakaoAccount({ userId: "7" } as PersonalCredentials, {
+    async leaveChat(id: string) { calls.push(id); return { success: calls.length === 1 }; }, close() {},
+  } as never);
+  expect(await dispatch(adapter, { op: "kakao_leave", chat_id: "123" })).toEqual({ state: "Left" });
+  await expect(dispatch(adapter, { op: "kakao_leave", chat_id: "456" })).rejects.toThrow();
+  expect(calls).toEqual(["123", "456"]);
+});

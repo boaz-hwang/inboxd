@@ -44,6 +44,15 @@ impl AccountBackend {
         request: &Value,
         io: &mut impl ProviderIo,
     ) -> Result<Value, String> {
+        if request["op"] == "leave" {
+            let platform = match &self.0 {
+                Backend::Slack(_) => "slack",
+                Backend::Kakao(_) => "kakao",
+                Backend::Telegram(_) => "telegram",
+                Backend::Unsupported => return Err("지원하지 않는 계정".into()),
+            };
+            return io.call(serde_json::json!({"op":format!("{platform}_leave"),"chat_id":request["chat_id"]})).await;
+        }
         match &mut self.0 {
             Backend::Slack(state) => state.run(request, io).await,
             Backend::Kakao(state) => state.run(request, io).await,

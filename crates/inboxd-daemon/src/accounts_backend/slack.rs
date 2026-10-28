@@ -166,11 +166,10 @@ impl SlackBackend {
                 return Err("Slack 목록 제한".into());
             }
             let page = call(io,"conversations.list",json!({"types":"public_channel,private_channel,im,mpim","exclude_archived":false,"limit":200,"cursor":cursor})).await?;
-            rooms.extend(
-                items(&page["channels"]).into_iter().filter(|c| {
-                    c["is_member"] == true || c["is_im"] == true || c["is_mpim"] == true
-                }),
-            );
+            rooms.extend(items(&page["channels"]).into_iter().filter(|c| {
+                (c["is_member"] == true || c["is_im"] == true || c["is_mpim"] == true)
+                    && !((c["is_im"] == true || c["is_mpim"] == true) && c["is_open"] == false)
+            }));
             if rooms.len() > 20000 {
                 return Err("Slack 목록 제한".into());
             }

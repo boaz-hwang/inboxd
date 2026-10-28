@@ -95,6 +95,22 @@ test("loads every directory page, keeps provider names and sorts by latest activ
   controller.stop();
 });
 
+test("arrow keys switch the messenger filter from the room list", async () => {
+  const { controller } = setup();
+  await controller.start();
+  expect(controller.state.pane).toBe("rooms");
+  await controller.dispatchKey("ArrowRight");
+  expect(controller.state.platform).toBe("slack");
+  expect(controller.state.pane).toBe("rooms");
+  await controller.dispatchKey("ArrowRight");
+  expect(controller.state.platform).toBe("telegram");
+  await controller.dispatchKey("ArrowLeft");
+  expect(controller.state.platform).toBe("slack");
+  await controller.dispatchKey("ArrowLeft");
+  expect(controller.state.platform).toBeUndefined();
+  controller.stop();
+});
+
 test("only Shift+Tab cycles rooms, filters and messages", async () => {
   const { controller } = setup();
   await controller.start();

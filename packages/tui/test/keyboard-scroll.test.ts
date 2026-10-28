@@ -12,6 +12,8 @@ test("terminal shortcuts distinguish editing, modifiers, and literal characters"
   expect(actionKey(key("q", { ctrl: true }))).toBe("");
   expect(actionKey(key("return", { shift: true }))).toBe("ShiftEnter");
   expect(actionKey(key("r", { shift: true }))).toBe("R");
+  expect(actionKey(key("d", { shift: true }))).toBe("D");
+  expect(actionKey(key("d", { shift: true }), true)).toBe("D");
   expect(actionKey(key("up", { shift: true }), true)).toBe("PageUp");
   expect(actionKey(key("down", { shift: true }), true)).toBe("PageDown");
   for (const modifier of [{ meta: true }, { option: true }]) {

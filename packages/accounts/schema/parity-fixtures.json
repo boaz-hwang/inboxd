@@ -213,5 +213,14 @@
 {"name":"telegram_send_file invalid size 0","platform":"telegram","request":{"op":"telegram_send_file","chat_id":"1","file":{"path":"/tmp/file.txt","name":"file.txt","size":0,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},"request_valid":false,"result":{},"result_valid":false},
 {"name":"telegram_send_file invalid size 104857601","platform":"telegram","request":{"op":"telegram_send_file","chat_id":"1","file":{"path":"/tmp/file.txt","name":"file.txt","size":104857601,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},"request_valid":false,"result":{},"result_valid":false},
 {"name":"telegram_send_file invalid size 1.5","platform":"telegram","request":{"op":"telegram_send_file","chat_id":"1","file":{"path":"/tmp/file.txt","name":"file.txt","size":1.5,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},"request_valid":false,"result":{},"result_valid":false},
+{"name":"kakao_leave","platform":"kakao","request":{"op":"kakao_leave","chat_id":"room"},"request_valid":true,"result":{"state":"Left"},"result_valid":true},
+{"name":"kakao leave cannot batch","platform":"kakao","request":{"op":"batch","requests":[{"op":"kakao_leave","chat_id":"room"}]},"request_valid":false,"result":{},"result_valid":false},
+{"name":"kakao leave unknown result","platform":"kakao","request":{"op":"kakao_leave","chat_id":"room"},"request_valid":true,"result":{},"result_valid":false},
+{"name":"slack_leave","platform":"slack","request":{"op":"slack_leave","chat_id":"room"},"request_valid":true,"result":{"state":"Left"},"result_valid":true},
+{"name":"slack leave cannot batch","platform":"slack","request":{"op":"batch","requests":[{"op":"slack_leave","chat_id":"room"}]},"request_valid":false,"result":{},"result_valid":false},
+{"name":"slack leave unknown result","platform":"slack","request":{"op":"slack_leave","chat_id":"room"},"request_valid":true,"result":{},"result_valid":false},
+{"name":"telegram_leave","platform":"telegram","request":{"op":"telegram_leave","chat_id":"room"},"request_valid":true,"result":{"state":"Left"},"result_valid":true},
+{"name":"telegram leave cannot batch","platform":"telegram","request":{"op":"batch","requests":[{"op":"telegram_leave","chat_id":"room"}]},"request_valid":false,"result":{},"result_valid":false},
+{"name":"telegram leave unknown result","platform":"telegram","request":{"op":"telegram_leave","chat_id":"room"},"request_valid":true,"result":{},"result_valid":false},
 {"name":"slack.conversations.replies","platform":"slack","request":{"op":"slack.conversations.replies","params":{"channel":"C1","ts":"1","limit":20}},"request_valid":true,"result":{"data":{"messages":[]}},"result_valid":true}
 ]

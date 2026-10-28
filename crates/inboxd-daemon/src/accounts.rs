@@ -576,6 +576,60 @@ impl AccountService {
             json!({"progress":progress(&state),"read_performed":true,"event_count":rows.len(),"stored":stored["stored"],"inserted":stored["inserted"].as_array().map_or(0,Vec::len),"coverage_state":"unknown"}),
         )
     }
+    /// Owner-confirmed room mutation. Serialize with sends and fence older reads.
+    pub(crate) async fn leave(&self, params: &Value) -> Result<Value, String> {
+        let fields = params.as_object().ok_or("잘못된 나가기 요청")?;
+        if fields.len() != 3
+            || !["platform", "account", "chat_id"].iter().all(|k| {
+                params[*k]
+                    .as_str()
+                    .is_some_and(|v| !v.is_empty() && v.len() <= 256)
+            })
+        {
+            return Err("정확한 대화방 식별자가 필요합니다".into());
+        }
+        let entry = self
+            .slots
+            .iter()
+            .find(|e| {
+                e.config.platform == params["platform"] && e.config.account == params["account"]
+            })
+            .ok_or("연결된 계정 없음")?;
+        let _admission = entry.schedule.admit(true)?;
+        let _guard = entry.schedule.sends.lock().await;
+        let mut slot = entry.slot.lock().await;
+        if !slot.loaded
+            || slot.failed
+            || !slot.chats.iter().any(|c| c["chat_id"] == params["chat_id"])
+        {
+            return Err("연결된 계정의 대화방이 아닙니다".into());
+        }
+        let mut backend = slot.take_backend();
+        slot.invalidate();
+        let outcome = call_account(
+            &entry.config,
+            &mut backend,
+            &entry.schedule,
+            &json!({"op":"leave","chat_id":params["chat_id"]}),
+            self.run_worker,
+        )
+        .await;
+        slot.invalidate();
+        let result = outcome.map_err(|_| {
+            "나가기 결과를 확인하지 못했습니다. 원본 메신저에서 확인하세요".to_string()
+        })?;
+        if result["state"] != "Left" {
+            return Err("나가기 완료를 확인하지 못했습니다".into());
+        }
+        slot.chats.retain(|c| c["chat_id"] != params["chat_id"]);
+        entry.snapshot.lock().unwrap().chats = slot.chats.clone();
+        drop(slot);
+        if let Some(events) = &self.events {
+            let _ = events.publish("account.changed", json!({"phase":"left","chat":params}));
+        }
+        Ok(result)
+    }
+
     pub(crate) async fn query(&self, op: &str, params: &Value) -> Result<Value, String> {
         self.query_inner(op, params, true).await
     }
@@ -1148,6 +1202,64 @@ mod tests {
             }
         })
     }
+    #[tokio::test]
+    async fn leave_validates_scope_and_evicts_only_acknowledged_room() {
+        fn worker<'a>(
+            config: &'a AccountConfig,
+            request: &'a Value,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                if request["op"] == "leave" {
+                    assert_eq!(request["chat_id"], "room");
+                    if config.account == "fail" {
+                        return Err("provider failed".into());
+                    }
+                    return Ok(json!({"state":"Left"}));
+                }
+                fake(config, request).await
+            })
+        }
+        let mut service = AccountService::new(
+            ["one", "two", "fail"]
+                .into_iter()
+                .map(|account| AccountConfig {
+                    platform: "kakao".into(),
+                    account: account.into(),
+                    config: Zeroizing::new("{}".into()),
+                })
+                .collect(),
+        );
+        service.run_worker = Some(worker);
+        let target = json!({"platform":"kakao","account":"one","chat_id":"room"});
+        assert!(service.leave(&target).await.is_err());
+        service.list(&json!({})).await.unwrap();
+        assert!(
+            service
+                .leave(&json!({"platform":"kakao","account":"one","chat_id":"foreign"}))
+                .await
+                .is_err()
+        );
+        assert!(
+            service
+                .leave(&json!({"platform":"kakao","account":"one","chat_id":"room","extra":true}))
+                .await
+                .is_err()
+        );
+        assert_eq!(service.leave(&target).await.unwrap()["state"], "Left");
+        assert!(service.leave(&target).await.is_err());
+        assert!(
+            service
+                .leave(&json!({"platform":"kakao","account":"fail","chat_id":"room"}))
+                .await
+                .is_err()
+        );
+        let rooms = service.list(&json!({})).await.unwrap();
+        let rows = rooms["chats"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r["account"] != "one"));
+    }
+
     #[tokio::test]
     async fn direct_send_warms_only_target_account_and_revoked_binding_never_falls_back() {
         fn isolated<'a>(

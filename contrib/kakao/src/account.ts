@@ -3,7 +3,7 @@ import { personalSession, type PersonalCredentials } from "./personal-session.ts
 import type { AccountAdapter } from "../../../packages/accounts/src/contracts.ts";
 type AccountClient = Pick<Awaited<ReturnType<typeof personalSession>>,
   "getChats" | "getMessagePage" | "getMembersByIds" | "getMembers" | "sendMessage" | "markRead" | "close"
-> & Partial<Pick<Awaited<ReturnType<typeof personalSession>>, "getChatTitle" | "getChat" | "sendFile" | "onPush" | "onSessionEvent" | "isConnected">>;
+> & Partial<Pick<Awaited<ReturnType<typeof personalSession>>, "leaveChat" | "getChatTitle" | "getChat" | "sendFile" | "onPush" | "onSessionEvent" | "isConnected">>;
 
 /** Session-owned SDK operations. Traversal, caching and display policy live in Rust. */
 export async function createKakaoAccount(credentials: PersonalCredentials, session?: AccountClient): Promise<AccountAdapter> {
@@ -23,6 +23,12 @@ export async function createKakaoAccount(credentials: PersonalCredentials, sessi
     },
     async run(req) {
       switch (req.op) {
+        case "kakao_leave": {
+          if (!client.leaveChat) throw new Error("나가기를 지원하지 않는 세션입니다");
+          const result = await client.leaveChat(req.chat_id);
+          if (!result.success) throw new Error("KakaoTalk 나가기 확인 실패");
+          return { state: "Left" };
+        }
         case "kakao_metadata": return { own_id: credentials.userId, has_details: !!client.getChat };
         case "kakao_rooms": return { data: await client.getChats({ all: true, resolveTitles: req.params?.resolve_titles === true }) };
         case "kakao_detail": {

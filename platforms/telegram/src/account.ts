@@ -61,6 +61,20 @@ export function createTelegramAdapter(port: TdlibUserClientPort): AccountAdapter
   const run: AccountAdapter["run"] = async (req) => {
     const list = { _: "params" in req && "list" in req.params && req.params.list === "archive" ? "chatListArchive" : "chatListMain" };
     switch (req.op) {
+      case "telegram_leave": {
+        const chat_id = Number(req.chat_id);
+        if (!Number.isSafeInteger(chat_id) || chat_id === 0) throw new Error("Invalid Telegram chat id");
+        const chat = await query({ _: "getChat", chat_id });
+        if (String(chat.id) !== req.chat_id) throw new Error("Telegram chat mismatch");
+        if (["chatTypePrivate", "chatTypeSecret"].includes(chat.type?.["@type"] ?? chat.type?._)) {
+          if (chat.can_be_deleted_only_for_self !== true) throw new Error("내 대화 기록 삭제를 지원하지 않는 대화입니다");
+          await query({ _: "deleteChatHistory", chat_id, remove_from_chat_list: true, revoke: false });
+        } else if (["chatTypeBasicGroup", "chatTypeSupergroup"].includes(chat.type?.["@type"] ?? chat.type?._)) {
+          await query({ _: "leaveChat", chat_id });
+          await query({ _: "deleteChatHistory", chat_id, remove_from_chat_list: true, revoke: false });
+        } else throw new Error("나가기를 지원하지 않는 대화 유형입니다");
+        return { state: "Left" };
+      }
       case "telegram_load_directory":
         try {
           await query({ _: "loadChats", chat_list: list, limit: req.limit });

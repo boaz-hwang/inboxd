@@ -18,6 +18,31 @@ use tokio::{
 const KEY: [u8; 32] = [0x71; 32];
 
 #[tokio::test]
+async fn leave_requires_authenticated_local_owner() {
+    let directory = private_tempdir();
+    let daemon = launch(config(directory.path())).await.unwrap();
+    for role in ["reader", "agent", "mcp", "sender", "approver"] {
+        let mut client = Client::connect(daemon.socket_path()).await;
+        client.request("system.hello", json!({"role":role})).await;
+        let result = client
+            .request_frame(
+                "account.leave",
+                json!({"platform":"kakao","account":"one","chat_id":"room"}),
+            )
+            .await;
+        assert_eq!(result["ok"], false);
+        assert!(
+            result["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("authenticat"),
+            "{role}: {result}"
+        );
+    }
+    daemon.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn history_exports_require_authenticated_local_owner() {
     let directory = private_tempdir();
     let daemon = launch(config(directory.path())).await.unwrap();

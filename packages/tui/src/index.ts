@@ -86,6 +86,7 @@ export interface ResponseSession {
 }
 
 export interface TuiState {
+  leaveRoom?: { resource: ResourceRefV1; title: string; pending: boolean };
   response?: ResponseSession;
   responseFocus?: boolean;
   screen: Screen;
@@ -445,7 +446,7 @@ export function reduce(state: TuiState, action: TuiAction): TuiState {
     return state;
   }
   if ((state.screen === "inbox" || state.screen === "chat") && !state.detailOpen) {
-    if (action.key === "[" || action.key === "]" || (state.pane === "filters" && (action.key === "ArrowLeft" || action.key === "ArrowRight"))) {
+    if (["[", "]", "ArrowLeft", "ArrowRight"].includes(action.key)) {
       const options = platformOptions(state);
       const current = options.indexOf(state.platform ?? "all");
       const platform = options[(current + (action.key === "]" || action.key === "ArrowRight" ? 1 : options.length - 1)) % options.length];
@@ -1108,6 +1109,7 @@ export class TuiController {
   }
 
   disconnected(degraded = false): void {
+    if (this.current.leaveRoom) this.replace({ ...this.current, leaveRoom: undefined, notice: "연결 끊김 · 나가기 결과는 원본 메신저에서 확인하세요." });
     this.closeResponse("disconnected");
     this.roomDrafts.clear();
     clearTimeout(this.directoryTimer);
@@ -1220,6 +1222,7 @@ export class TuiController {
   }
 
   async selectConversation(index: number): Promise<void> {
+    if (this.current.leaveRoom) return;
     if (this.current.searchActive || this.current.sendPending) return;
     const room = conversationRows(this.current)[index];
     if (!room) return;
@@ -1240,9 +1243,10 @@ export class TuiController {
     }
   }
 
-  focusMessages(): void { this.replace({ ...this.current, pane: "messages" }); }
+  focusMessages(): void { if (this.current.leaveRoom) return; this.replace({ ...this.current, pane: "messages" }); }
 
   async dispatchPaste(text: string): Promise<void> {
+    if (this.current.leaveRoom) return;
     this.interruptArmed = false;
     if (this.current.sendPending || this.current.responseFocus && ["Failed", "Uncertain"].includes(this.current.response?.sendState ?? "")) return;
     if (!this.current.composeActive && !this.current.searchActive && !this.current.finderActive) return;
@@ -1280,6 +1284,25 @@ export class TuiController {
   }
 
   async dispatchKey(key: string): Promise<void> {
+    if (this.current.leaveRoom) {
+      this.interruptArmed = false;
+      if (this.current.leaveRoom.pending) return;
+      if (["Cancel", "Escape", "n", "N"].includes(key)) {
+        this.replace({ ...this.current, leaveRoom: undefined });
+      } else if (key === "Enter" || key === "y" || key === "Y") await this.confirmLeaveRoom();
+      return;
+    }
+    if (key === "D" && this.current.pane === "rooms" && ["inbox", "chat"].includes(this.current.screen)
+      && !this.current.finderActive && !this.current.searchActive && !this.current.detailOpen && !this.current.helpOpen) {
+      const room = conversationRows(this.current)[this.current.roomFocus ?? 0];
+      if (!room) return;
+      if (!this.current.accountMode || room.resource.kind !== "chat" || this.current.connection.status !== "connected" || this.current.sendPending) {
+        this.replace({ ...this.current, notice: "나가기 불가 · 계정 연결과 전송 상태를 확인하세요." });
+        return;
+      }
+      this.replace({ ...this.current, leaveRoom: { resource: room.resource, title: room.title, pending: false }, notice: undefined });
+      return;
+    }
     if (key === "Escape") return;
     if (key === "Cancel") {
       if (this.interruptArmed || this.current.pane === "filters" || this.current.pane === "rooms") {
@@ -1295,6 +1318,38 @@ export class TuiController {
     }
     this.interruptArmed = false;
     await this.handleKey(key);
+  }
+
+  private async confirmLeaveRoom(): Promise<void> {
+    const target = this.current.leaveRoom;
+    if (!target || target.pending || target.resource.kind !== "chat") return;
+    if (this.current.connection.status !== "connected") {
+      this.replace({ ...this.current, leaveRoom: undefined, notice: "연결이 끊겨 나가기를 실행하지 않았습니다." });
+      return;
+    }
+    const generation = this.generation;
+    const { platform, account, chat_id } = target.resource;
+    this.replace({ ...this.current, leaveRoom: { ...target, pending: true } });
+    try {
+      const result = await this.options.client.request("account.leave", { platform, account, chat_id });
+      if (generation !== this.generation) return;
+      if (result.state !== "Left") throw new Error("unconfirmed leave");
+      this.accountDirectoryRequest++;
+      this.roomDrafts.take(target.resource);
+      if (sameResource(this.activeResource, target.resource)) {
+        this.setActiveResource(undefined);
+        this.replace({ ...this.current, screen: "inbox", composeActive: false, draft: "", draftCursor: 0, composeMode: undefined, replyTo: undefined });
+      }
+      const keep = (row: Row) => !sameResource(rowResource(row), target.resource);
+      this.replace({ ...this.current, leaveRoom: undefined, pane: "rooms",
+        directory: this.current.directory?.filter(keep),
+        capabilities: { ...this.current.capabilities, data: this.current.capabilities.data.filter(c => !sameResource(c.resource, target.resource)) },
+        views: { ...this.current.views, inbox: { ...this.current.views.inbox, data: this.current.views.inbox.data.filter(keep) }, search: { ...this.current.views.search, data: this.current.views.search.data.filter(keep) } },
+        notice: `${target.title} · 나가기 완료` });
+      this.replace({ ...this.current, roomFocus: Math.max(0, Math.min(this.current.roomFocus ?? 0, conversationRows(this.current).length - 1)) });
+    } catch {
+      if (generation === this.generation) this.replace({ ...this.current, leaveRoom: undefined, notice: "나가기 완료를 확인하지 못했습니다. 원본 메신저에서 확인 후 Shift+R로 새로고침하세요." });
+    }
   }
 
   private async cancelCurrentInput(): Promise<void> {
@@ -1366,7 +1421,7 @@ export class TuiController {
     this.update({ type: "key", key });
     if (!before.composeActive && this.current.composeActive && this.current.composeMode !== "approved_template" && !this.current.response) await this.openResponse();
     if (!inputActive && key === "1") this.replace({ ...this.current, platform: undefined, pane: "rooms", roomFocus: 0 });
-    if (!inputActive && (key === "[" || key === "]" || before.pane === "filters" && ["ArrowLeft", "ArrowRight"].includes(key)) && this.current.platform && this.activeResource?.platform !== this.current.platform) {
+    if (!inputActive && ["[", "]", "ArrowLeft", "ArrowRight"].includes(key) && !before.detailOpen && (before.screen === "inbox" || before.screen === "chat") && this.current.platform && this.activeResource?.platform !== this.current.platform) {
       this.update({ type: "switchScreen", screen: "inbox" });
       if (before.pane === "filters") this.replace({ ...this.current, pane: "filters" });
     }

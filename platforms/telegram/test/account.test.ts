@@ -127,3 +127,21 @@ test("Telegram revoked sessions request reconnection without read loops", async 
   await expect(dispatch(adapter, { op: "telegram_list_directory", limit: 10, params: { list: "main" } })).rejects.toMatchObject({ code: "telegram_auth_required" });
   expect(reads).toBe(1);
 });
+
+for (const type of ["chatTypePrivate", "chatTypeSupergroup"]) test(`leave ${type} never revokes other users' history`, async () => {
+  const calls: any[] = [];
+  const adapter = createTelegramAdapter({ accountQuery: async (q: any) => {
+    calls.push(q);
+    return q._ === "getChat" ? { id: 10, type: { _: type }, can_be_deleted_only_for_self: true } : { _: "ok" };
+  } } as unknown as TdlibUserClientPort);
+  expect(await dispatch(adapter, { op: "telegram_leave", chat_id: "10" })).toEqual({ state: "Left" });
+  expect(calls.map(c => c._)).toEqual(type === "chatTypePrivate" ? ["getChat", "deleteChatHistory"] : ["getChat", "leaveChat", "deleteChatHistory"]);
+  expect(calls.at(-1)).toEqual({ _: "deleteChatHistory", chat_id: 10, remove_from_chat_list: true, revoke: false });
+});
+
+test("Telegram rejects an unknown room type without a mutation", async () => {
+  let calls = 0;
+  const adapter = createTelegramAdapter({ accountQuery: async () => { calls++; return { id: 10, type: { _: "future" } }; } } as unknown as TdlibUserClientPort);
+  await expect(dispatch(adapter, { op: "telegram_leave", chat_id: "10" })).rejects.toThrow();
+  expect(calls).toBe(1);
+});

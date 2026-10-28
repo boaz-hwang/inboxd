@@ -65,6 +65,27 @@ test("RTM lifecycle invalidates on edits/deletes and tears down without HTTP pol
   expect(stops).toBe(1);
 });
 
+for (const direct of [false, true]) test(`leave ${direct ? "DM closes" : "channel leaves"} the exact room without retrying`, async () => {
+  const calls: string[] = [];
+  const adapter = createSlackAccount({ bot_token: "fixture" }, (async (url: string, options: RequestInit) => {
+    calls.push(url.split("/").at(-1)!);
+    expect(new URLSearchParams(String(options.body)).get("channel")).toBe("room");
+    return Response.json({ ok: true, channel: { id: "room", is_im: direct } });
+  }) as typeof fetch);
+  expect(await dispatch(adapter, { op: "slack_leave", chat_id: "room" })).toEqual({ state: "Left" });
+  expect(calls).toEqual(["conversations.info", direct ? "conversations.close" : "conversations.leave"]);
+});
+
+test("Slack leave failures never report success or retry", async () => {
+  let calls = 0;
+  const adapter = createSlackAccount({ bot_token: "fixture" }, (async (_url: string) => {
+    calls++;
+    return Response.json(calls === 1 ? { ok: true, channel: { id: "room" } } : { ok: false, error: "cant_leave_general" });
+  }) as typeof fetch);
+  await expect(dispatch(adapter, { op: "slack_leave", chat_id: "room" })).rejects.toThrow();
+  expect(calls).toBe(2);
+});
+
 for (const method of ["conversations.history", "conversations.replies", "search.messages"] as const) {
   test(`Slack ${method} accepts huddle channel strings without dropping the page`, async () => {
     const rows = [

@@ -21,4 +21,4 @@
                          │                                                      
  ↑↓ 선택  Enter 열기     │                                                      
  일부 기록만 표시 중 · Shift+R 불러오기                                         
- / 검색  Ctrl+K 대화찾기  Shift+Tab 영역 이동  ←→ 필터 선택  ? 도움말           
+ ↑↓ 대화 선택  Enter 열기  Shift+D 나가기  Ctrl+K 대화찾기  ? 도움말            

@@ -110,6 +110,12 @@ export function createSlackAccount(config: {
       return stopListening;
     },
     async run(req) {
+      if (req.op === "slack_leave") {
+        const info = await call("conversations.info", { channel: req.chat_id });
+        if (!info.channel || info.channel.id !== req.chat_id) throw new Error("Slack 대화방 확인 실패");
+        await call(info.channel.is_im || info.channel.is_mpim ? "conversations.close" : "conversations.leave", { channel: req.chat_id });
+        return { state: "Left" };
+      }
       if (req.op === "slack_send_file") {
         let bytes: Buffer;
         try { bytes = await readSelectedAttachment(req.file); }

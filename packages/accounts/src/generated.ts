@@ -4,7 +4,7 @@ export type SlackUser = { id?: (string) | null; profile?: (Profile) | null; real
 export type SlackChannelId = { id: string };
 export type SlackBotProfile = { name?: (string) | null };
 export type SlackMessage = { ts: string; user?: (string) | null; text?: (string) | null; channel?: (SlackChannelId) | null; bot_profile?: (SlackBotProfile) | null; username?: (string) | null };
-export type SlackRoom = { id: string; is_member?: (boolean) | null; is_im?: (boolean) | null; is_mpim?: (boolean) | null; user?: (string) | null; name?: (string) | null; is_archived?: (boolean) | null; unread_count?: (number) | null; latest?: (SlackMessage) | null };
+export type SlackRoom = { id: string; is_member?: (boolean) | null; is_im?: (boolean) | null; is_mpim?: (boolean) | null; user?: (string) | null; name?: (string) | null; is_archived?: (boolean) | null; unread_count?: (number) | null; latest?: (SlackMessage) | null; is_open?: (boolean) | null };
 export type SlackMarker = { id: string; latest?: (string) | null; updated?: (string | number) | null; history_invalid?: (string | number | boolean) | null };
 export type SlackMetadata = { next_cursor?: (string) | null };
 export type SlackPagination = { page_count: number };
@@ -71,6 +71,12 @@ export type TelegramSendFileRequest = { op: "telegram_send_file" } & { chat_id: 
 export type TelegramSendFileResult = { state: "Sent"; receipt: string } | { state: "Failed"; reason: string };
 export type SlackConversationsRepliesRequest = { op: "slack.conversations.replies" } & { params: { channel: string; ts: string; limit: number; cursor?: (string) | null } };
 export type SlackConversationsRepliesResult = { data: { messages: Array<SlackMessage>; has_more?: (boolean) | null; response_metadata?: (SlackMetadata) | null } };
+export type KakaoLeaveRequest = { op: "kakao_leave" } & { chat_id: string };
+export type KakaoLeaveResult = { state: "Left" };
+export type SlackLeaveRequest = { op: "slack_leave" } & { chat_id: string };
+export type SlackLeaveResult = { state: "Left" };
+export type TelegramLeaveRequest = { op: "telegram_leave" } & { chat_id: string };
+export type TelegramLeaveResult = { state: "Left" };
 export interface PrimitiveResults {
   "slack.users.list": SlackUsersListResult;
   "slack.users.info": SlackUsersInfoResult;
@@ -99,8 +105,11 @@ export interface PrimitiveResults {
   "kakao_send_file": KakaoSendFileResult;
   "telegram_send_file": TelegramSendFileResult;
   "slack.conversations.replies": SlackConversationsRepliesResult;
+  "kakao_leave": KakaoLeaveResult;
+  "slack_leave": SlackLeaveResult;
+  "telegram_leave": TelegramLeaveResult;
 }
-export type PrimitiveRequest = SlackUsersListRequest | SlackUsersInfoRequest | SlackClientCountsRequest | SlackConversationsListRequest | SlackConversationsMembersRequest | SlackConversationsHistoryRequest | SlackSearchMessagesRequest | SlackChatPostMessageRequest | KakaoMetadataRequest | KakaoRoomsRequest | KakaoDetailRequest | KakaoPageRequest | KakaoMembersRequest | KakaoSelfMembersRequest | KakaoSendRequest | KakaoMarkReadRequest | TelegramLoadDirectoryRequest | TelegramListDirectoryRequest | TelegramChatRequest | TelegramSenderRequest | TelegramHistoryRequest | TelegramSearchRequest | TelegramSendRequest | SlackSendFileRequest | KakaoSendFileRequest | TelegramSendFileRequest | SlackConversationsRepliesRequest;
+export type PrimitiveRequest = SlackUsersListRequest | SlackUsersInfoRequest | SlackClientCountsRequest | SlackConversationsListRequest | SlackConversationsMembersRequest | SlackConversationsHistoryRequest | SlackSearchMessagesRequest | SlackChatPostMessageRequest | KakaoMetadataRequest | KakaoRoomsRequest | KakaoDetailRequest | KakaoPageRequest | KakaoMembersRequest | KakaoSelfMembersRequest | KakaoSendRequest | KakaoMarkReadRequest | TelegramLoadDirectoryRequest | TelegramListDirectoryRequest | TelegramChatRequest | TelegramSenderRequest | TelegramHistoryRequest | TelegramSearchRequest | TelegramSendRequest | SlackSendFileRequest | KakaoSendFileRequest | TelegramSendFileRequest | SlackConversationsRepliesRequest | KakaoLeaveRequest | SlackLeaveRequest | TelegramLeaveRequest;
 export type ReadRequest = Exclude<PrimitiveRequest, { op: "kakao_send" | "kakao_mark_read" | "telegram_send" | "slack.chat.postMessage" | "slack_send_file" | "kakao_send_file" | "telegram_send_file" }>;
 export type AccountRequest = PrimitiveRequest | { op: "batch"; requests: ReadRequest[] };
 export type AccountResult = PrimitiveResults[keyof PrimitiveResults] | { results: PrimitiveResults[ReadRequest["op"]][] };

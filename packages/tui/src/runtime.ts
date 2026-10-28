@@ -30,7 +30,7 @@ export function actionKey(event: KeyEvent, editing = false): string {
   if (event.ctrl && event.name === "k") return "Find";
   if (event.ctrl && event.name === "f") return "MessageSearch";
   if (event.ctrl || event.meta || event.option) return "";
-  if (event.shift && event.name.toLowerCase() === "r") return "R";
+  if (event.shift && ["r", "d"].includes(event.name.toLowerCase())) return event.name.toUpperCase();
   switch (event.name) {
     case "tab": return "Tab";
     case "left": return "ArrowLeft";

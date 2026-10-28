@@ -74,6 +74,8 @@ pub(crate) struct SlackRoom {
     pub(crate) unread_count: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) latest: Option<SlackMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) is_open: Option<bool>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -667,6 +669,39 @@ pub(crate) struct SlackConversationsRepliesResultData {
 pub(crate) struct SlackConversationsRepliesResult {
     pub(crate) data: SlackConversationsRepliesResultData,
 }
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) enum KakaoLeaveResultState {
+    #[serde(rename = "Left")]
+    Left,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct KakaoLeaveResult {
+    pub(crate) state: KakaoLeaveResultState,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) enum SlackLeaveResultState {
+    #[serde(rename = "Left")]
+    Left,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SlackLeaveResult {
+    pub(crate) state: SlackLeaveResultState,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) enum TelegramLeaveResultState {
+    #[serde(rename = "Left")]
+    Left,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct TelegramLeaveResult {
+    pub(crate) state: TelegramLeaveResultState,
+}
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "op", deny_unknown_fields)]
 pub(crate) enum PrimitiveRequest {
@@ -765,6 +800,12 @@ pub(crate) enum PrimitiveRequest {
     SlackConversationsReplies {
         params: SlackConversationsRepliesParams,
     },
+    #[serde(rename = "kakao_leave")]
+    KakaoLeave { chat_id: String },
+    #[serde(rename = "slack_leave")]
+    SlackLeave { chat_id: String },
+    #[serde(rename = "telegram_leave")]
+    TelegramLeave { chat_id: String },
     #[serde(rename = "batch")]
     Batch { requests: Vec<PrimitiveRequest> },
 }
@@ -797,6 +838,9 @@ pub(crate) enum PrimitiveResult {
     KakaoSendFile(KakaoSendFileResult),
     TelegramSendFile(TelegramSendFileResult),
     SlackConversationsReplies(SlackConversationsRepliesResult),
+    KakaoLeave(KakaoLeaveResult),
+    SlackLeave(SlackLeaveResult),
+    TelegramLeave(TelegramLeaveResult),
     Batch(Vec<PrimitiveResult>),
 }
 impl PrimitiveRequest {
@@ -879,6 +923,11 @@ impl PrimitiveRequest {
             }
             Self::SlackConversationsReplies { .. } => {
                 PrimitiveResult::SlackConversationsReplies(serde_json::from_value(value)?)
+            }
+            Self::KakaoLeave { .. } => PrimitiveResult::KakaoLeave(serde_json::from_value(value)?),
+            Self::SlackLeave { .. } => PrimitiveResult::SlackLeave(serde_json::from_value(value)?),
+            Self::TelegramLeave { .. } => {
+                PrimitiveResult::TelegramLeave(serde_json::from_value(value)?)
             }
             Self::Batch { requests } => {
                 #[derive(serde::Deserialize)]

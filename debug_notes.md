@@ -413,6 +413,14 @@ Saved checkpoint 268 was selected by the frozen development quality rule, rather
 
 Only after final summaries were frozen, the validated helpers were integrated into runtime v5 with explicit parallel_chunk16 opt-in. Related tests: 71 pass, including the real tiny CPU installer/prefix/62-gradient/Adam2/mid-evaluation path. Four training modules were backed up, installed, and imported in isolation. Actual full-9B training used the preintegration sealed controller; the new packaged installer was not subjected to a second full training run. Both owned corpus RAM servers shut down gracefully, their sockets and review staging were removed, and daemon/encryption schema7 readiness was confirmed. Daily04:00 schedule remains deleted. Full evidence and limitations: docs/27-historical-reply-training-plan.md, sections18.3–18.6.
 
+### 2026-10-08 — Shift+D absent after restarting the installed TUI
+
+- Expected: room-list Shift+D opens a confirmation for the highlighted room.
+- Reproduced in the user's right-hand cmux terminal: the room arrow was visible, but Shift+D produced no dialog; footer still showed the old shortcuts.
+- Root cause: the running executable was ~/.inboxd/product/release/inboxd (built October 7), whereas the feature existed only in repository sources modified October 8. Restarting the old installed executable could not load the change.
+- Resolution in progress: use the existing local product installer to rebuild/publish launcher, daemon and account worker together; restart the identified owner daemon, then relaunch the same terminal and verify the confirmation and cancellation without leaving a real room.
+- Verified: local install completed, owner daemon restarted, and the same right-hand cmux terminal relaunched the installed binary. Selecting a different row then Shift+D visibly opened the correct room confirmation; Escape dismissed it and preserved selection. No actual leave was performed. Prevention is recorded in root AGENTS.md.
+
 
 ## 2026-10-15 — Kakao authentication recovery cooldown
 
@@ -421,6 +429,15 @@ Only after final summaries were frozen, the validated helpers were integrated in
 - Recovery includes authentication errors during session creation; reads replay at most once, listeners rebind, mutations never replay. IPC distinguishes automatic recovery from a missing-credentials/manual reconnect state; explicit connect still permits phone authentication during cooldown.
 - Verification: Kakao/accounts suite 313 tests passed; added cooldown-cap regression also passed (targeted suite 16 tests). Typecheck and import boundaries passed. Installed via bun run install:local and restarted daemon. Live Kakao returned connected, observation_failed=false, directory errors empty and latest visible message 2026-10-15 13:59:53 KST. Credential failure marker absent. No messages were sent or marked read during verification.
 - Limit: revoked refresh credentials or a mandatory phone challenge cannot be bypassed; manual inboxd connect kakao remains available.
+
+
+## 2026-10-24 — Slack stale workspace recovery
+
+- Report: selecting cached QMIT failed again after desktop credential extraction.
+- Verified cause: Slack auth.test returned invalid_auth for cached QMIT and Team Attention; Robopet and PLCO authenticated. agent-messenger setWorkspace merges successful imports into its existing cache, retaining stale workspaces. The connector retried the stale selected entry and collapsed the error into a generic login failure.
+- Fix: distinguish rejected sessions from request/network failures. After extraction, retry the selected workspace; if still rejected, verify cached alternatives and require an explicit new selection. Never switch accounts silently, delete cached sessions, or open a self conversation after cancellation.
+- Validation: 17 connection tests, TypeScript and import boundaries passed; installed with bun run install:local. Actual installed terminal command selecting QMIT reproduced extraction of Robopet/PLCO, then displayed the targeted QMIT login notice and only those two verified alternatives. Cancelled without changing bindings. No messages sent.
+- Actual QMIT connection remains unavailable until Slack login is restored; PLCO is a different workspace ID. Asked user which workspace they intend. Beads availability checked: this repository has no Beads database.
 
 ## 2026-10-26 — Slack authenticated but CLI message reads failed
 
@@ -502,3 +519,15 @@ each input. Sol implemented bounded body/geometry caching and visible-only block
 construction; parent removed repeated whole-line width scans and segmenter
 construction. Warm synthetic 1000-row, 20-cycle chat benchmark:3540ms ->3.6ms.
 186 TUI tests pass. Installed product verified in PTY; no daemon changes needed.
+
+## Latest-code publication validation — 2026-10-28
+
+Connection simplification/rebinding and confirmed room-leave changes were
+validated together. Typecheck and import-boundary checks passed; 724 TypeScript
+tests passed. Rust initially loaded an outdated protocol artifact (account.leave
+reported unknown despite its source registration); cleaning inboxd-protocol
+artifacts and rebuilding resolved the mismatch, and daemon/protocol suites
+passed. Rebuilt the installed product and restarted its daemon. Actual PTY
+verification opened the highlighted room's Shift+D confirmation and cancelled
+with N; no room was left and no history was deleted. Promotional artifacts
+remain outside the code publication.
