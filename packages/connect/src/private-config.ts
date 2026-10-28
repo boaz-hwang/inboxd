@@ -36,7 +36,7 @@ export function saveConnection(path: string, provider: ProviderConfiguration): v
       if (conflict) throw new Error("다른 Slack 계정의 연결을 덮어쓸 수 없습니다.");
     }
     config.providers = [...config.providers.filter(p => p?.binding_id !== provider.binding_id && !(
-      provider.kind === "slack" && typeof provider.account === "string" &&
+      (provider.kind === "kakao_personal" || provider.kind === "slack") && typeof provider.account === "string" &&
       p?.kind === provider.kind && p.account === provider.account
     )), provider];
     const encoded = `${JSON.stringify(config, null, 2)}\n`;

@@ -35,10 +35,19 @@ version-pinned Kakao SDK has a persisted patch disabling send retries.
 
 - Telegram: QR first; TDLib may subsequently require account 2FA/code. Default
   scope is Saved Messages, verified against the authenticated self identity.
-- Slack: reuse a logged-in workspace and select a conversation by name; no
-  access-token or channel-ID entry. Invalid sessions require desktop login.
+- Slack: reuse a logged-in workspace, selecting it only when several are available.
+  Verify the self chat automatically without a scope or conversation picker; the
+  account runtime discovers all workspace conversations independently. Reconnecting
+  replaces older Slack bindings for that account to avoid retaining stale credentials.
+  No access-token or channel-ID entry. Invalid sessions require desktop login.
 - Kakao: reuse a valid personal session, or login as a secondary tablet with
-  phone confirmation. A separate personal worker supports bounded message reads
+  phone confirmation. The connector automatically verifies a one-message read
+  from the self chat and saves the connection without a chat-selection prompt.
+  This self-chat binding preserves the legacy worker contract; the account
+  adapter independently discovers all chats, and full-history collection remains
+  explicit. Reconnecting replaces prior personal bindings for the same account
+  so the account runtime cannot select stale credentials from an older binding.
+  A separate personal worker supports bounded message reads
   and approval-gated text sends. The existing local-read and official-template
   workers retain their separate capability contracts.
 
@@ -52,6 +61,104 @@ Test registry dispatch, cancellation/failure persistence, session validation,
 provider identity/scope verification and real daemon compatibility. Run boundary
 checks and render TUI evidence at both supported sizes. Record live observations
 separately from mocked transport tests; never call an offline test a live pass.
+
+2026-10-18: after `bun run install:local`, the installed `inboxd connect kakao`
+reused the existing session, verified reading, saved successfully without a chat
+selection prompt, and restarted the packaged daemon. The installed TUI then
+showed 39 Kakao chats with the Kakao filter selected and no list-load warning.
+This verifies existing-session reconnect and directory display, not fresh phone
+authentication or complete historical-message collection. Connection tests (6),
+TypeScript typecheck and import-boundary checks passed.
+
+2026-10-18 (Slack/Telegram follow-up): the installed Slack connector offered the
+workspace menu for multiple sessions, then verified and saved an existing
+workspace with no scope or room-selection prompt and restarted the daemon.
+Single-workspace auto-selection, multi-workspace selection, cancellation,
+self-chat identity mismatch and expired-session recovery passed offline tests.
+All connection tests (12), typecheck and import-boundary checks passed.
+The installed Telegram command displayed the revised conditional QR notice;
+that verification was cancelled after observing the notice, so this change does
+not claim a new Telegram authentication success.
+The installed TUI showed 26 conversations with the Slack filter selected.
+The shared workspace also displayed a partial account-list load warning; this
+check does not establish that every connected account loaded successfully.
+
+## Onboarding review — 2026-10-20 (proposal, not implemented)
+
+Scope: current source, existing validation records, and the installed
+`inboxd connect` menu (opened and cancelled without connecting an account).
+Fresh authentication, first-run Keychain prompts, and provider failure paths
+were inspected in code, not reproduced against live accounts.
+
+The room-picker removal already reduces Slack/Kakao setup friction. Remaining
+work should prioritize reaching the first usable conversation and recovering
+from interruption:
+
+1. **P0 — Give successful setup an explicit destination.**
+   `packages/connect/src/setup-runtime.ts:connectInstalledAccounts` loops back
+   to the provider menu after saving; its only exit is labelled "취소".
+   After one connection, offer "대화 시작" as the default and "다른 메신저 추가"
+   as the secondary action. Show connected account/workspace labels. Explicit
+   `inboxd connect <provider>` should retain its command-oriented exit behavior.
+2. **P0 — Resume incomplete onboarding.**
+   `ensureInstalledConfiguration` checks configuration-file existence, although
+   the empty base configuration is created before account setup. Cancelling or
+   failing before any successful connection therefore skips automatic setup on
+   the next launch. Distinguish no-account, intentionally skipped, and completed
+   states. Give the no-account TUI a direct connect action instead of requiring
+   `5 → C`; preserve already saved accounts when another connection fails.
+3. **P1 — Make authentication progress and recovery actionable.**
+   Explain the Keychain request before initializing it. Telegram currently
+   opens the QR page once, waits for bootstrap exit, ignores AUTH_READY, and
+   collapses failures into a generic authentication error. Emit sanitized
+   progress/error codes for QR waiting, additional authentication, verification,
+   cancellation, and timeout. Provide reopen/retry/back actions and bounded
+   network waits without interrupting a user who is still entering a code.
+   Preserve hidden password input and credential-free logs.
+4. **P1 — Separate authentication success from usable-directory success.**
+   Slack/Kakao announce loading the full list before the daemon's directory
+   result is known. Display "계정 인증 완료" first, then actual directory status
+   and count in the TUI. `loadAccountDirectory` currently reduces account errors
+   to a generic warning; `workspace.ts:doctor` derives provider rows from
+   discovered resources rather than the configured account inventory. A failed
+   account with no rows can therefore disappear from that view. Render every
+   configured account, including workspace, failure reason, and targeted
+   reconnect action. Keep successful accounts usable.
+5. **P2 — Reduce repeated setup and first-use uncertainty.**
+   Mark existing Slack workspaces and optionally allow selecting several in one
+   pass, persisting each successful connection independently. After first list
+   load, show a short dismissible hint for opening a chat, finding a room, and
+   composing/sending; explain that the visible list is not a full-history import.
+6. **Distribution prerequisite.**
+   The current installer builds locally, requires macOS arm64 and Telegram
+   application credentials, while fresh Slack/Kakao authentication requires
+   `agent-messenger` on PATH. For onboarding on another person's Mac, provide
+   validated packaged prerequisites and provider-specific preflight checks.
+   This is a distribution proposal, not evidence of a tested external install.
+
+Suggested flow: launch → short introduction/preflight → choose messenger →
+reuse session or authenticate → verify account → "대화 시작" (default) /
+"다른 메신저 추가" → incremental directory loading → first conversation.
+
+Acceptance checks for implementation: first-run cancellation resumes sensibly;
+one successful account reaches the inbox without choosing "취소"; failed second
+connections preserve the first; QR/browser failure offers a concrete next step;
+an account returning no chats remains visible in connection management; partial
+directory failure leaves healthy accounts usable. Validate changes in the
+installed product, including fresh-auth paths separately from session reuse.
+
+## Slack stale-session recovery — 2026-10-24
+
+Credential extraction merges valid imports into the agent-messenger cache; it
+does not remove stale workspaces. Cache membership is therefore not evidence of
+a current login. On an authentication rejection, reconnect extracts once and
+rechecks the selected workspace. If it remains unavailable, reconnect verifies
+the alternatives and asks the user to select one explicitly. Cancellation
+preserves bindings. Network/service failures do not trigger extraction.
+
+Installed verification: selecting stale QMIT produced its login notice and a
+recovery menu containing only authenticated Robopet/PLCO; cancellation completed
+without saving a different account. This does not establish a working QMIT login.
 
 ## Slack multi-account identity — 2026-10-24
 

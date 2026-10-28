@@ -79,9 +79,11 @@ inboxd connect kakao
   Already logged in? Choose the session import action; the login window opens
   only when explicitly requested.
 - KakaoTalk: resume the personal session, or follow the installed
-  `agent-messenger` secondary-device login and phone-code prompt. Choose a chat
-  by name; the default first choice is the self chat. Device replacement is never
-  forced by Inboxd.
+  `agent-messenger` secondary-device login and phone-code prompt. No chat selection
+  is required: after connection, the TUI loads all chats returned by the account.
+  The self chat is checked automatically to verify reading; it does not limit the
+  visible chat list. Full-history collection remains a separate action. Device
+  replacement is never forced by Inboxd.
 
 The developer installer supplies Telegram application credentials from local
 configuration. Users do not register Slack/Kakao developer apps. The fallback

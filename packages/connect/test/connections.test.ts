@@ -27,6 +27,26 @@ test("save connection preserves other bindings and rejects public configuration"
   } finally { rmSync(root, { recursive: true }); }
 });
 
+test("reconnecting Kakao replaces legacy room bindings for that account only", () => {
+  const root = mkdtempSync(join(tmpdir(), "inboxd-connect-"));
+  const path = join(root, "config.json");
+  try {
+    const unrelated = [
+      { kind: "slack", binding_id: "slack", account: "one" },
+      { kind: "kakao_personal", binding_id: "other-kakao", account: "two" },
+    ];
+    writeFileSync(path, JSON.stringify({ version: 1, providers: [
+      ...unrelated,
+      { kind: "kakao_personal", binding_id: "old-room-a", account: "one", credentials: "stale" },
+      { kind: "kakao_personal", binding_id: "old-room-b", account: "one", credentials: "stale" },
+    ] }), { mode: 0o600 });
+    const connected = { kind: "kakao_personal", binding_id: "self-chat", account: "one", credentials: "fresh" };
+    saveConnection(path, connected);
+    saveConnection(path, connected);
+    expect(JSON.parse(readFileSync(path, "utf8")).providers).toEqual([...unrelated, connected]);
+  } finally { rmSync(root, { recursive: true }); }
+});
+
 test("reconnecting Slack replaces legacy room bindings for that account only", () => {
   const root = mkdtempSync(join(tmpdir(), "inboxd-connect-"));
   const path = join(root, "config.json");

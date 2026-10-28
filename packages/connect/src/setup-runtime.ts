@@ -44,7 +44,7 @@ export function createConnectionRuntime(paths: FirstRunPaths, productDirectory: 
   const registry = new ConnectionRegistry([
     { id: "telegram", label: "Telegram — QR 로그인", async connect() {
       const credentials = readPackagedTelegramApplication(productDirectory);
-      ui.report("Telegram QR 창을 준비합니다. 휴대폰 Telegram → 설정 → 기기에서 연결하세요.");
+      ui.report("Telegram 로그인 상태를 확인합니다. 인증이 필요하면 QR 창이 열립니다.");
       return telegramProviderFromBootstrap(await runTelegramBootstrap(paths, productDirectory, credentials.apiId, credentials.apiHash), credentials);
     } },
     { id: "slack", label: "Slack — 로그인된 앱 연결", connect: () => connectSlackAccount(ui, () => runAccountLogin("slack"), { readProviders: () => { const config = readPrivateJson(paths.config); return Array.isArray(config.providers) ? config.providers : []; } }) },
