@@ -86,6 +86,7 @@ export interface CliHandlers {
   send(input: MessageSendParams): Promise<JsonObject>;
   sendStatus(id: string): Promise<JsonObject>;
   doctor(): Promise<JsonObject>;
+  reply(action: "on" | "off" | "status"): Promise<JsonObject>;
   trajectory(action: "list" | "delete" | "settings", input: JsonObject): Promise<JsonObject>;
   listPending(): Promise<JsonObject>;
   reject(input: { readonly intent_id: string; readonly reason: string }): Promise<JsonObject>;
@@ -147,6 +148,7 @@ export function createCliHandlers(options: CliHandlerOptions): CliHandlers {
     send: (input) => call("message.send", { ...input }),
     sendStatus: (id) => call("send.status", { id }),
     doctor: () => call("system.status", {}),
+    reply: (action) => action === "status" ? call("reply.status", {}) : call("reply.setEnabled", { enabled: action === "on" }),
     trajectory: (action, input) => call(`trajectory.${action}`, input),
     listPending: () => approverCall("safety.intent.listPending", {}),
     reject: (input) => approverCall("safety.intent.reject", input),

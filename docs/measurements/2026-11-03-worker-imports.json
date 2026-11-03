@@ -1,0 +1,92 @@
+[
+  {
+    "variant": "static",
+    "provider_imported": "slack",
+    "footprint": "44.9M"
+  },
+  {
+    "variant": "static",
+    "provider_imported": "telegram",
+    "footprint": "37.3M"
+  },
+  {
+    "variant": "static",
+    "provider_imported": "kakao_personal",
+    "footprint": "43.6M"
+  },
+  {
+    "variant": "static",
+    "provider_imported": "slack",
+    "footprint": "44.1M"
+  },
+  {
+    "variant": "static",
+    "provider_imported": "telegram",
+    "footprint": "44.8M"
+  },
+  {
+    "variant": "static",
+    "provider_imported": "kakao_personal",
+    "footprint": "37.3M"
+  },
+  {
+    "variant": "lazy",
+    "provider_imported": "slack",
+    "footprint": "31.3M"
+  },
+  {
+    "variant": "lazy",
+    "provider_imported": "telegram",
+    "footprint": "19.5M"
+  },
+  {
+    "variant": "lazy",
+    "provider_imported": "kakao_personal",
+    "footprint": "25.0M"
+  },
+  {
+    "variant": "lazy",
+    "provider_imported": "slack",
+    "footprint": "29.4M"
+  },
+  {
+    "variant": "lazy",
+    "provider_imported": "telegram",
+    "footprint": "19.9M"
+  },
+  {
+    "variant": "lazy",
+    "provider_imported": "kakao_personal",
+    "footprint": "25.8M"
+  },
+  {
+    "variant": "lazy-smol",
+    "provider_imported": "slack",
+    "footprint": "31.1M"
+  },
+  {
+    "variant": "lazy-smol",
+    "provider_imported": "telegram",
+    "footprint": "19.9M"
+  },
+  {
+    "variant": "lazy-smol",
+    "provider_imported": "kakao_personal",
+    "footprint": "24.9M"
+  },
+  {
+    "variant": "lazy-smol",
+    "provider_imported": "slack",
+    "footprint": "28.3M"
+  },
+  {
+    "variant": "lazy-smol",
+    "provider_imported": "telegram",
+    "footprint": "20.1M"
+  },
+  {
+    "variant": "lazy-smol",
+    "provider_imported": "kakao_personal",
+    "footprint": "23.2M"
+  }
+]

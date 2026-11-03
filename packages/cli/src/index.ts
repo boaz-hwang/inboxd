@@ -69,6 +69,7 @@ export async function runCli(
   const [group, action, payload] = argv;
   let result: JsonObject;
   switch (`${group ?? ""} ${action ?? ""}`) {
+    case "reply on": case "reply off": case "reply status": result = await handlers.reply(action as "on" | "off" | "status"); break;
     case "daemon start": result = await handlers.daemonStart(); break;
     case "daemon status": result = await handlers.daemonStatus(); break;
     case "chat list": result = await handlers.chatList(); break;

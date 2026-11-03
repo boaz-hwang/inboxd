@@ -22,7 +22,7 @@ export const LEGACY_REQUEST_METHODS = [
   "subscribe",
 ] as const;
 
-export const REQUEST_METHODS = [...LEGACY_REQUEST_METHODS.filter(method => method !== "safety.intent.create" && method !== "safety.intent.claimApprovalCode" && method !== "safety.intent.approve"), "capability.list", "account.list", "account.messages", "account.search", "account.leave", "message.send", "response.open", "response.get", "response.seen", "response.feedback", "response.next", "trajectory.list", "trajectory.delete", "trajectory.settings"] as const;
+export const REQUEST_METHODS = [...LEGACY_REQUEST_METHODS.filter(method => method !== "safety.intent.create" && method !== "safety.intent.claimApprovalCode" && method !== "safety.intent.approve"), "capability.list", "account.list", "account.messages", "account.search", "account.leave", "message.send", "response.open", "response.get", "response.seen", "response.feedback", "response.next", "trajectory.list", "trajectory.delete", "trajectory.settings", "reply.status", "reply.setEnabled"] as const;
 
 export const LEGACY_EVENT_METHODS = [
   "message.upserted",
@@ -290,7 +290,7 @@ function requestMethod(value: unknown): ProtocolMethod {
 
 function assertOwnerAccess(method: ProtocolMethod, role?: ClientRole): void {
   if (role === undefined) return;
-  if ((["account.leave", "message.send", "safety.intent.listPending", "safety.intent.reject"].includes(method) || method.startsWith("response.") || method.startsWith("trajectory."))
+  if ((["account.leave", "message.send", "safety.intent.listPending", "safety.intent.reject", "reply.setEnabled"].includes(method) || method.startsWith("response.") || method.startsWith("trajectory."))
     && role !== "sender" && role !== "approver") {
     throw new ProtocolSchemaError(`${method} requires an authenticated sender or approver role`);
   }

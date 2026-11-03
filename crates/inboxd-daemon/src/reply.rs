@@ -4,12 +4,15 @@ use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
-    sync::{Mutex, Notify},
+    sync::{Mutex, Notify, watch},
     task::JoinHandle,
 };
 
@@ -20,6 +23,11 @@ pub(crate) struct ReplyService {
     actor: Arc<StorageActor>,
     queue: Mutex<Vec<ReplyJob>>,
     wake: Notify,
+    enabled: watch::Sender<bool>,
+    worker: Mutex<Option<Worker>>,
+    worker_pid: AtomicU32,
+    control: Mutex<()>,
+    disabled_path: Option<PathBuf>,
 }
 
 struct ReplyJob {
@@ -72,6 +80,18 @@ fn enqueue_job(
             .then_with(|| b.activity.total_cmp(&a.activity))
             .then_with(|| a.first_queued.cmp(&b.first_queued))
     });
+}
+
+async fn run_enabled(
+    worker: &mut Worker,
+    request: Value,
+    enabled: &mut watch::Receiver<bool>,
+) -> Result<Value, String> {
+    tokio::select! {
+        biased;
+        _ = enabled.wait_for(|value| !*value) => Err("local reply generation disabled".to_owned()),
+        result = crate::reply_pipeline::run(worker, request) => result,
+    }
 }
 
 pub(crate) struct Worker {
@@ -389,10 +409,18 @@ mod worker_tests {
             actor,
             queue: Mutex::new(Vec::new()),
             wake: Notify::new(),
+            enabled: watch::channel(true).0,
+            worker: Mutex::new(None),
+            worker_pid: AtomicU32::new(0),
+            control: Mutex::new(()),
+            disabled_path: None,
         });
         let consumer_service = Arc::clone(&service);
         let consumer = tokio::spawn(async move {
-            vec![consumer_service.next_job().await, consumer_service.next_job().await]
+            vec![
+                consumer_service.next_job().await,
+                consumer_service.next_job().await,
+            ]
         });
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         let now = tokio::time::Instant::now() - std::time::Duration::from_secs(1);
@@ -418,9 +446,9 @@ mod worker_tests {
         // A single notification must allow the sole consumer to drain ready jobs.
         service.wake.notify_one();
         let ids = tokio::time::timeout(std::time::Duration::from_secs(1), consumer)
-        .await
-        .unwrap()
-        .unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(ids, ["newest", "older"]);
     }
 
@@ -470,6 +498,75 @@ mod worker_tests {
     }
 
     #[tokio::test]
+    async fn local_ai_switch_stops_worker_and_survives_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let actor = Arc::new(
+            StorageActor::start(inboxd_storage::StorageActorConfig::new(
+                directory.path().join("switch.db"),
+                [0x45; 32],
+            ))
+            .unwrap(),
+        );
+        let marker = directory.path().join("reply-ai.disabled");
+        let (service, task) =
+            ReplyService::start_with_state(Arc::clone(&actor), Some(marker.clone()));
+        let process = worker("IFS= read -r request; IFS= read -r another");
+        let pid = process._child.id().unwrap();
+        service.worker_pid.store(pid, Ordering::SeqCst);
+        *service.worker.lock().await = Some(process);
+        // Model is blocked waiting for output while holding the worker mutex.
+        // Off must interrupt it immediately rather than wait for its 120s timeout.
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let generating_service = Arc::clone(&service);
+        let generating = tokio::spawn(async move {
+            let mut enabled = generating_service.enabled.subscribe();
+            let mut worker = generating_service.worker.lock().await;
+            let _ = started_tx.send(());
+            run_enabled(
+                worker.as_mut().unwrap(),
+                json!({"id":"blocked"}),
+                &mut enabled,
+            )
+            .await
+        });
+        started_rx.await.unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            service.set_enabled(false),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            generating.await.unwrap().unwrap_err(),
+            "local reply generation disabled"
+        );
+        assert_eq!(result["enabled"], false);
+        assert_eq!(result["worker_running"], false);
+        assert!(marker.exists());
+        assert!(
+            !std::process::Command::new("/bin/ps")
+                .args(["-p", &pid.to_string(), "-o", "pid="])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        task.abort();
+        let _ = task.await;
+        let (restarted, task) = ReplyService::start_with_state(actor, Some(marker.clone()));
+        assert_eq!(restarted.status().await["enabled"], false);
+        let result = restarted.set_enabled(true).await.unwrap();
+        assert_eq!(result["enabled"], true);
+        assert_eq!(result["worker_running"], false); // Lazy load, no unsolicited generation.
+        assert!(!marker.exists());
+        restarted.set_enabled(false).await.unwrap();
+        restarted.set_enabled(false).await.unwrap();
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn accepts_only_complete_matching_frames() {
         let mut worker = worker(
             "IFS= read -r request; printf '%s\\n' '{\"id\":\"expected\",\"status\":\"abstained\"}'",
@@ -504,14 +601,18 @@ impl ReplyService {
         self.enqueue(id, &prepared["chat"], unread, activity).await;
     }
 
+    #[cfg(test)]
     async fn next_job(&self) -> String {
+        self.next_job_record().await.id
+    }
+
+    async fn next_job_record(&self) -> ReplyJob {
         loop {
             let notified = self.wake.notified();
             let mut queue = self.queue.lock().await;
             let now = tokio::time::Instant::now();
             if queue.first().is_some_and(|job| job.ready_at <= now) {
-                let id = queue.remove(0).id;
-                return id;
+                return queue.remove(0);
             }
             // Wait for the highest-ranked job even when a lower-ranked job has
             // already finished its debounce. Otherwise opening a read room can
@@ -527,11 +628,24 @@ impl ReplyService {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn start(actor: Arc<StorageActor>) -> (Arc<Self>, JoinHandle<()>) {
+        Self::start_with_state(actor, None)
+    }
+
+    pub(crate) fn start_with_state(
+        actor: Arc<StorageActor>,
+        disabled_path: Option<PathBuf>,
+    ) -> (Arc<Self>, JoinHandle<()>) {
         let service = Arc::new(Self {
             actor: Arc::clone(&actor),
             queue: Mutex::new(Vec::new()),
             wake: Notify::new(),
+            enabled: watch::channel(disabled_path.as_ref().is_none_or(|p| !p.exists())).0,
+            worker: Mutex::new(None),
+            worker_pid: AtomicU32::new(0),
+            control: Mutex::new(()),
+            disabled_path,
         });
         let pending = Arc::clone(&service);
         let task = tokio::spawn(async move {
@@ -546,10 +660,27 @@ impl ReplyService {
     }
 
     async fn run_worker_loop(self: Arc<Self>, actor: Arc<StorageActor>) {
-        let mut worker: Option<Worker> = None;
+        let mut enabled = self.enabled.subscribe();
         let mut loaded_runtime = String::new();
         loop {
-            let id = self.next_job().await;
+            if !*enabled.borrow_and_update() {
+                if enabled.changed().await.is_err() {
+                    return;
+                }
+                continue;
+            }
+            let job = tokio::select! {
+                biased;
+                _ = enabled.changed() => continue,
+                job = self.next_job_record() => job,
+            };
+            let mut worker_guard = self.worker.lock().await;
+            let worker = &mut *worker_guard;
+            if !*self.enabled.borrow() {
+                self.queue.lock().await.insert(0, job);
+                continue;
+            }
+            let id = job.id;
             let claim = match actor
                 .call_async(
                     StorageOperation::ResponseGenerationClaim,
@@ -563,7 +694,8 @@ impl ReplyService {
             let model = installed_path("INBOXD_REPLY_MODEL", DEFAULT_MODEL, true);
             let runtime = runtime_version();
             if runtime != loaded_runtime {
-                worker = None;
+                *worker = None;
+                self.worker_pid.store(0, Ordering::SeqCst);
                 loaded_runtime = runtime.clone();
             }
             let request = json!({"id":claim["suggestion_id"],"suggestion_id":claim["suggestion_id"],"chat":claim["chat"],
@@ -571,11 +703,29 @@ impl ReplyService {
                 "context":claim["context"],"incoming_message_ids":claim["incoming_message_ids"],
                 "adapter_registry":adapter_registry(),"runtime_version":runtime});
             if worker.is_none() {
-                worker = Worker::start().ok();
+                *worker = Worker::start().ok();
+                self.worker_pid.store(
+                    worker.as_ref().and_then(|w| w._child.id()).unwrap_or(0),
+                    Ordering::SeqCst,
+                );
             }
-            let result=match worker.as_mut(){Some(w)=>crate::reply_pipeline::run(w,request).await.unwrap_or_else(|error|{worker=None;json!({"id":claim["suggestion_id"],"status":"failed","error":error,"prompt_version":claim["prompt_version"]})}),None=>json!({"id":claim["suggestion_id"],"status":"failed","error":"local_reply_worker_unavailable","prompt_version":claim["prompt_version"]})};
+            let generated = match worker.as_mut() {
+                Some(w) => run_enabled(w, request, &mut enabled).await,
+                None => Err("local_reply_worker_unavailable".to_owned()),
+            };
+            let result = match generated {
+                Ok(result) => result,
+                Err(error) => {
+                    self.worker_pid.store(0, Ordering::SeqCst);
+                    if let Some(mut process) = worker.take() {
+                        let _ = process._child.kill().await;
+                    }
+                    json!({"id":claim["suggestion_id"],"status":"failed","error":error,"prompt_version":claim["prompt_version"]})
+                }
+            };
             if result["id"] != claim["suggestion_id"] || result["reset_worker"] == true {
-                worker = None;
+                *worker = None;
+                self.worker_pid.store(0, Ordering::SeqCst);
             }
             let status = result["status"]
                 .as_str()
@@ -590,7 +740,52 @@ impl ReplyService {
                 .await;
         }
     }
+    pub(crate) async fn status(&self) -> Value {
+        let pid = self.worker_pid.load(Ordering::SeqCst);
+        json!({"enabled": *self.enabled.borrow(), "worker_running": pid != 0, "worker_pid": if pid == 0 { None } else { Some(pid) }})
+    }
+
+    pub(crate) async fn set_enabled(&self, enabled: bool) -> Result<Value, String> {
+        let _control = self.control.lock().await;
+        if let Some(path) = &self.disabled_path {
+            if enabled {
+                match std::fs::remove_file(path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => return Err("unable to persist local AI setting".into()),
+                }
+            } else {
+                use std::os::unix::fs::OpenOptionsExt;
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(path)
+                    .map_err(|_| "unable to persist local AI setting")?;
+            }
+        }
+        self.enabled.send_replace(enabled);
+        if !enabled {
+            let mut worker = self.worker.lock().await;
+            if let Some(mut process) = worker.take() {
+                process
+                    ._child
+                    .kill()
+                    .await
+                    .map_err(|_| "unable to stop local AI worker")?;
+            }
+        }
+        if !enabled {
+            self.worker_pid.store(0, Ordering::SeqCst);
+        }
+        Ok(self.status().await)
+    }
+
     pub(crate) async fn observe(&self, mut scope: Value) {
+        if !*self.enabled.borrow() {
+            return;
+        }
         scope["runtime_version"] = json!(runtime_version());
         if let Ok(prepared) = self
             .actor
@@ -601,6 +796,9 @@ impl ReplyService {
         }
     }
     pub(crate) async fn enqueue_session(&self, result: &Value) {
+        if !*self.enabled.borrow() {
+            return;
+        }
         if result["status"] != "queued" {
             return;
         }

@@ -46,12 +46,13 @@ async function ready(transport: FakeTransport): Promise<void> {
   for (let index = 0; index < 8; index += 1) await Promise.resolve();
 }
 
-async function started(transport: FakeTransport, options: { role?: "reader" | "agent" | "approver"; isTTY?: boolean; approverToken?: string; launchDaemon?: () => Promise<void> } = {}) {
+async function started(transport: FakeTransport, options: { role?: "reader" | "agent" | "approver" | "sender"; isTTY?: boolean; approverToken?: string; launchDaemon?: () => Promise<void> } = {}) {
   const handlers = createCliHandlers({
     connect: async () => transport,
     role: options.role ?? "reader",
     isTTY: () => options.isTTY ?? true,
     approverToken: options.approverToken,
+    senderToken: options.role === "sender" ? "test-owner-token" : undefined,
     launchDaemon: options.launchDaemon,
   });
   clients.push(handlers);
@@ -244,4 +245,17 @@ test("CLI search preserves remote scope, mode and pagination instead of falling 
   const refresh = { chat: { platform: "slack", account: "a", chat_id: "C123" }, query: "todo", mode: "refresh" as const, refresh_id: "refresh-1" };
   await respondToCall(transport, cli.search(refresh), { messages: [] });
   expect(lastRequest(transport)).toMatchObject({ method: "message.search", params: refresh });
+});
+
+ test("local AI CLI maps on/off/status to runtime controls", async () => {
+  const transport = new FakeTransport();
+  const handlers = await started(transport, { role: "sender" });
+  for (const action of ["on", "off", "status"] as const) {
+    const call = runCli(["reply", action], { handlers, write: () => {} });
+    const result = await respondToCall(transport, call, { enabled: action === "on", worker_running: false });
+    const request = lastRequest(transport);
+    expect(request.method).toBe(action === "status" ? "reply.status" : "reply.setEnabled");
+    expect(request.params).toEqual(action === "status" ? {} : { enabled: action === "on" });
+    expect(result.worker_running).toBe(false);
+  }
 });

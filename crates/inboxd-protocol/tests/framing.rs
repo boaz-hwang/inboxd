@@ -7,7 +7,7 @@ use serde_json::json;
 #[test]
 fn frozen_method_surface_and_additive_capability_event_are_exact() {
     assert_eq!(LEGACY_REQUEST_METHODS.len(), 21);
-    assert_eq!(REQUEST_METHODS.len(), 32);
+    assert_eq!(REQUEST_METHODS.len(), 34);
     assert_eq!(
         LEGACY_REQUEST_METHODS[18..],
         ["settings.get", "settings.update", "subscribe"]
@@ -28,7 +28,9 @@ fn frozen_method_surface_and_additive_capability_event_are_exact() {
             "response.next",
             "trajectory.list",
             "trajectory.delete",
-            "trajectory.settings"
+            "trajectory.settings",
+            "reply.status",
+            "reply.setEnabled"
         ]
     );
     assert_eq!(

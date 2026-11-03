@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { parseMessageSendParams, parseRequest, REQUEST_METHODS } from "../src/index.ts";
 
 test("local recommendations and trajectories require the authenticated owner role", () => {
-  for (const method of REQUEST_METHODS.filter(m => m.startsWith("response.") || m.startsWith("trajectory."))) {
+  for (const method of REQUEST_METHODS.filter(m => m.startsWith("response.") || m.startsWith("trajectory.") || m === "reply.setEnabled")) {
     const frame = { type: "request", id: "1", method, params: {} };
     for (const role of ["reader", "agent", "mcp"] as const) expect(() => parseRequest(frame, role)).toThrow("authenticated");
     expect(parseRequest(frame, "sender").method).toBe(method);

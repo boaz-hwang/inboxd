@@ -13,7 +13,7 @@ import { ensureInstalledConfiguration, connectInstalledAccounts } from "./setup-
 
 const argv = process.argv.slice(2);
 if (argv.includes("--help")) {
-  console.log("usage: inboxd\n       inboxd connect [telegram|slack|kakao]\n       inboxd mcp\n       inboxd [--approver] <daemon|account|chat|message|sync|auth|send|doctor|safety|trajectory> <action> [json]");
+  console.log("usage: inboxd\n       inboxd connect [telegram|slack|kakao]\n       inboxd mcp\n       inboxd [--approver] <daemon|account|chat|message|sync|auth|send|doctor|safety|trajectory|reply> <action> [json]");
   process.exit(0);
 }
 const approverIndex = argv.indexOf("--approver");
@@ -62,7 +62,7 @@ try {
         process.once("SIGINT", close);
         return;
       }
-      const commandRole = command[0] === "trajectory"
+      const commandRole = command[0] === "reply" || command[0] === "trajectory"
         || command[0] === "account"
         || command[0] === "message" && command[1] === "send"
         || command[0] === "sync" && command[1] === "backfill" ? "sender" : role;

@@ -279,7 +279,10 @@ pub async fn launch(config: DaemonConfig) -> Result<Daemon> {
     fs::set_permissions(&config.socket_path, fs::Permissions::from_mode(0o600))
         .map_err(|error| DaemonError::new(format!("unable to secure daemon socket: {error}")))?;
     let events = Arc::new(EventHub::default());
-    let (reply_service, reply_task) = reply::ReplyService::start(Arc::clone(&actor));
+    let (reply_service, reply_task) = reply::ReplyService::start_with_state(
+        Arc::clone(&actor),
+        Some(config.state_dir.join("reply-ai.disabled")),
+    );
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let owner = Arc::new(ServerOwner { actor, state_lock });
     let server_owner = Arc::clone(&owner);

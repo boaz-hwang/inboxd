@@ -136,3 +136,17 @@ protect against a process with the same user's unrestricted shell, file, or Keyc
 ## License
 
 [MIT](LICENSE). Third-party dependencies retain their respective licenses.
+
+## Local AI reply generation
+
+```sh
+inboxd reply status
+inboxd reply off
+inboxd reply on
+```
+
+`off` stops the local model worker, cancels an active generation, and persists
+across daemon restarts. Messenger connections and existing messages are preserved.
+`on` enables generation; the model loads on the next generation request, not at
+switch-on. Status reports `enabled`, `worker_running`, and `worker_pid`.
+The owner-only setting is stored in the daemon state directory as `reply-ai.disabled`.

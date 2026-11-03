@@ -761,6 +761,23 @@ async fn dispatch(
     }
     match request.method.as_str() {
         "system.ping" => Ok(json!({"pong":true})),
+        "reply.status" => Ok(replies.status().await),
+        "reply.setEnabled" => {
+            if !session.trusted_sender && !session.trusted_approver {
+                return Err(RpcError::unsupported(
+                    "authenticated local sender authorization is required",
+                ));
+            }
+            let enabled = request
+                .params
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| RpcError::bad_request("enabled must be boolean"))?;
+            replies
+                .set_enabled(enabled)
+                .await
+                .map_err(RpcError::unsupported)
+        }
         "system.status" => {
             let encryption =
                 actor_call(actor, StorageOperation::Diagnose, json!({}), false).await?;
@@ -836,6 +853,13 @@ async fn dispatch(
             if !session.trusted_sender && !session.trusted_approver {
                 return Err(RpcError::unsupported(
                     "authenticated local owner authorization is required",
+                ));
+            }
+            if matches!(request.method.as_str(), "response.open" | "response.next")
+                && replies.status().await["enabled"] == false
+            {
+                return Err(RpcError::unsupported(
+                    "local AI replies are disabled; run inboxd reply on to enable",
                 ));
             }
             let mut input = Value::Object(request.params.clone());
