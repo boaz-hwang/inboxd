@@ -57,7 +57,12 @@ allocation. --smol provided no clear additional benefit in this small sample.
 An earlier 0.5-second sampling attempt returned unreliable startup observations
 and was discarded; only the one-second repeated run is included above.
 
-## Recommended order
+## Options considered before the follow-up decision
+
+The user subsequently chose a native Slack migration while keeping all selected
+platforms connected. No selective-loading changes were applied. See the
+[implemented migration and connected measurements](2026-11-03-slack-native-migration.md).
+The ordering below records the earlier analysis, not the current implementation plan.
 
 1. **Load only the selected provider.** Keep one process per account; dynamically
    import or compile distinct provider entrypoints. The cold experiment suggests

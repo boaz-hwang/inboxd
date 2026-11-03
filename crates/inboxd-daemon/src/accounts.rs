@@ -1051,11 +1051,19 @@ struct WorkerProcess {
     output: BufReader<tokio::process::ChildStdout>,
     _events: Option<live::EventReader>,
 }
+fn account_worker_name(platform: &str) -> &'static str {
+    if platform == "slack" {
+        "inboxd-slack-native"
+    } else {
+        "inboxd-account-worker"
+    }
+}
+
 impl WorkerProcess {
     fn start(config: &AccountConfig, schedule: &Schedule) -> Result<Self, String> {
         let executable = std::env::current_exe()
             .map_err(|_| "실행 경로 오류")?
-            .with_file_name("inboxd-account-worker");
+            .with_file_name(account_worker_name(&config.platform));
         crate::worker::validate_trusted_executable_for_owner(
             &executable,
             rustix::process::geteuid().as_raw(),

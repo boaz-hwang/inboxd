@@ -137,6 +137,14 @@ protect against a process with the same user's unrestricted shell, file, or Keyc
 
 [MIT](LICENSE). Third-party dependencies retain their respective licenses.
 
+## Slack transport
+
+Configured Slack accounts use one Rust `inboxd-slack-native` process each for
+persistent HTTP and real-time WebSocket connections. Credential maintenance reuses
+an on-demand helper that exits after its operation. Telegram and Kakao connections
+remain enabled through their existing workers. See the [connected memory comparison
+and migration evidence](docs/2026-11-03-slack-native-migration.md).
+
 ## Local AI reply generation
 
 ```sh

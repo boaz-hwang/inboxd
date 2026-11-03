@@ -5,6 +5,7 @@ members = [
   "crates/inboxd-protocol",
   "crates/inboxd-daemon",
   "crates/inboxd-keychain",
+  "crates/inboxd-slack",
 ]
 resolver = "2"
 

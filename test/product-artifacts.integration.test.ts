@@ -24,7 +24,9 @@ const telegramTdlAddonName = `${telegramTdlAddonDirectory}/darwin-arm64/tdl.node
 const executableNames = [
   "inboxd-daemon",
   "inboxd-keychain",
+  "inboxd-slack-native",
   "inboxd",
+  "inboxd-slack-auth-helper",
   "inboxd-account-worker",
   "inboxd-slack-worker",
   "inboxd-telegram-worker",
@@ -33,10 +35,12 @@ const executableNames = [
   "inboxd-kakao-local-worker",
   "inboxd-kakao-message-worker",
 ] as const;
-const replyRuntimeNames = ["learning_role_review.json", "learning_evaluation_rubrics.json", "reply_safety_curriculum.json", "reply_safety_validation.json", "inboxd-reply-worker.py", "personalization.py", "training_runtime.py", "training_curriculum.py", "continual.py", "history.py", "history_collect.py", "learning_split.py", "learning_evaluation.py", "quality_review.py", "review_sensitive.py"];
+const replyRuntimeNames = ["learning_role_review.json", "learning_evaluation_rubrics.json", "reply_safety_curriculum.json", "reply_safety_validation.json", "inboxd-reply-worker.py", "personalization.py", "training_runtime.py", "parallel_chunk.py", "prefix_outside.py", "training_curriculum.py", "continual.py", "history.py", "history_collect.py", "learning_split.py", "learning_evaluation.py", "quality_review.py", "review_sensitive.py"];
 const expectedSources = new Map<string, string>([
   ["inboxd-daemon", "crates/inboxd-daemon/src/main.rs"],
   ["inboxd-keychain", "crates/inboxd-keychain/src/main.rs"],
+  ["inboxd-slack-native", "crates/inboxd-slack/src/main.rs"],
+  ["inboxd-slack-auth-helper", "platforms/slack/src/auth-helper.ts"],
   ["inboxd", "packages/cli/src/bin.ts"],
   [telegramAppCredentialsName, "installer:telegram-app-credentials"],
   ["inboxd-account-worker", "packages/accounts/src/worker.ts"],
@@ -276,6 +280,17 @@ describe("atomic production product artifacts", () => {
     const firstBuild = await buildProduct();
     expect(firstBuild.code, firstBuild.stderr).toBe(0);
 
+    // Adding a provider TLS stack must not silently change the Keychain helper's
+    // designated code identity through Cargo feature unification.
+    const packagedKeychainHash = sha256(join(productDirectory, "inboxd-keychain"));
+    const keychainReferenceBuild = await run([
+      "cargo", "build", "--locked", "--release", "--package", "inboxd-daemon", "--bin", "inboxd-daemon",
+      "--package", "inboxd-keychain", "--bin", "inboxd-keychain", "--no-default-features",
+    ], { env: { ...process.env, CARGO_ENCODED_RUSTFLAGS: "", RUSTFLAGS: "", RUSTDOCFLAGS: "" } });
+    expect(keychainReferenceBuild.code, keychainReferenceBuild.stderr).toBe(0);
+    const referenceTarget = resolve(root, process.env.CARGO_TARGET_DIR ?? "target");
+    expect(packagedKeychainHash).toBe(sha256(join(referenceTarget, "release", "inboxd-keychain")));
+
     const expectedInventory = [
       ...executableNames,
       ...replyRuntimeNames,
@@ -329,7 +344,7 @@ describe("atomic production product artifacts", () => {
           ? "launcher"
         : file.name === telegramAppCredentialsName
           ? "application-credential"
-        : file.name === "inboxd-keychain" || file.name === "inboxd-account-worker" || expectedSources.get(file.name)?.startsWith("platforms/")
+        : file.name === "inboxd-keychain" || file.name === "inboxd-slack-native" || file.name === "inboxd-account-worker" || expectedSources.get(file.name)?.startsWith("platforms/")
           || expectedSources.get(file.name)?.startsWith("contrib/") ? "worker" : "runtime-library");
       expect(file.source_entrypoint).toBe(expectedSources.get(file.name)!);
       expect(file.mode).toBe(file.kind === "runtime-library" || file.kind === "application-credential" ? "0600" : "0700");

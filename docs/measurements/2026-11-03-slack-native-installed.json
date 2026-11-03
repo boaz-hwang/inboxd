@@ -1,0 +1,146 @@
+[
+  {
+    "sample": 1,
+    "receiving_state": "live",
+    "accounts": [
+      {
+        "platform": "kakao",
+        "state": "connected",
+        "observation_failed": false,
+        "pending_observation_rooms": 0,
+        "refreshing": false
+      },
+      {
+        "platform": "slack",
+        "state": "connected",
+        "observation_failed": false,
+        "pending_observation_rooms": 54,
+        "refreshing": false
+      },
+      {
+        "platform": "slack",
+        "state": "connected",
+        "observation_failed": false,
+        "pending_observation_rooms": 0,
+        "refreshing": false
+      },
+      {
+        "platform": "slack",
+        "state": "connected",
+        "observation_failed": false,
+        "pending_observation_rooms": 0,
+        "refreshing": false
+      },
+      {
+        "platform": "telegram",
+        "state": "connected",
+        "observation_failed": false,
+        "pending_observation_rooms": 0,
+        "refreshing": false
+      }
+    ],
+    "native_workers": 3,
+    "footprint_mib": [
+      8.59,
+      12.6,
+      7.41
+    ],
+    "total_mib": 28.6
+  },
+  {
+    "sample": 2,
+    "receiving_state": "live",
+    "accounts": [
+      {
+        "platform": "kakao",
+        "state": "connected",
+        "observation_failed": false,
+        "pending_observation_rooms": 22,
+        "refreshing": false
+      },
+      {
+        "platform": "slack",
+        "state": "connected",
+        "observation_failed": false,
+        "pending_observation_rooms": 38,
+        "refreshing": false
+      },
+      {
+        "platform": "slack",
+        "state": "connected",
+        "observation_failed": false,
+        "pending_observation_rooms": 0,
+        "refreshing": false
+      },
+      {
+        "platform": "slack",
+        "state": "connected",
+        "observation_failed": false,
+        "pending_observation_rooms": 0,
+        "refreshing": false
+      },
+      {
+        "platform": "telegram",
+        "state": "connected",
+        "observation_failed": false,
+        "pending_observation_rooms": 0,
+        "refreshing": false
+      }
+    ],
+    "native_workers": 3,
+    "footprint_mib": [
+      8.59,
+      12.4,
+      7.41
+    ],
+    "total_mib": 28.4
+  },
+  {
+    "sample": 3,
+    "receiving_state": "live",
+    "accounts": [
+      {
+        "platform": "kakao",
+        "state": "connected",
+        "observation_failed": false,
+        "pending_observation_rooms": 0,
+        "refreshing": false
+      },
+      {
+        "platform": "slack",
+        "state": "connected",
+        "observation_failed": false,
+        "pending_observation_rooms": 30,
+        "refreshing": false
+      },
+      {
+        "platform": "slack",
+        "state": "connected",
+        "observation_failed": false,
+        "pending_observation_rooms": 0,
+        "refreshing": false
+      },
+      {
+        "platform": "slack",
+        "state": "connected",
+        "observation_failed": false,
+        "pending_observation_rooms": 10,
+        "refreshing": false
+      },
+      {
+        "platform": "telegram",
+        "state": "connected",
+        "observation_failed": false,
+        "pending_observation_rooms": 0,
+        "refreshing": false
+      }
+    ],
+    "native_workers": 3,
+    "footprint_mib": [
+      8.55,
+      12.5,
+      7.42
+    ],
+    "total_mib": 28.47
+  }
+]

@@ -29,6 +29,7 @@ const telegramTdlAddonName = `${telegramTdlAddonDirectory}/darwin-arm64/tdl.node
 const dependencyLockPaths = ["Cargo.lock", "bun.lock"] as const;
 const launcherEntrypoint = { name: "inboxd", source: "packages/cli/src/bin.ts" } as const;
 const workerEntrypoints = [
+  { name: "inboxd-slack-auth-helper", source: "platforms/slack/src/auth-helper.ts" },
   { name: "inboxd-account-worker", source: "packages/accounts/src/worker.ts" },
   { name: "inboxd-slack-worker", source: "platforms/slack/src/bin.ts" },
   { name: "inboxd-telegram-worker", source: "platforms/telegram/src/worker-entrypoint.ts" },
@@ -305,6 +306,17 @@ function buildProduct(): void {
   assertOwnedPrivateDirectory(stage, uid);
   let published = false;
   try {
+    // Build Slack separately: Cargo feature unification with its TLS stack must
+    // not change the stable, already-authorized Keychain helper's code identity.
+    runCommand("release native Slack worker build", [
+      cargo, "build", "--locked", "--release", "--package", "inboxd-slack",
+      "--bin", "inboxd-slack-native", "--no-default-features",
+    ], {
+      CARGO_TARGET_DIR: targetDirectory,
+      CARGO_ENCODED_RUSTFLAGS: "",
+      RUSTDOCFLAGS: "",
+      RUSTFLAGS: "",
+    });
     runCommand("release Rust daemon build", [
       cargo,
       "build",
@@ -331,6 +343,7 @@ function buildProduct(): void {
     }
     copyFileSync(daemonSource, daemonDestination);
     copyFileSync(join(targetDirectory, "release", "inboxd-keychain"), join(stage, "inboxd-keychain"));
+    copyFileSync(join(targetDirectory, "release", "inboxd-slack-native"), join(stage, "inboxd-slack-native"));
 
     compileWorker(bun, stage, launcherEntrypoint.name, launcherEntrypoint.source);
     for (const worker of workerEntrypoints) {
@@ -396,6 +409,7 @@ function buildProduct(): void {
         gid,
       ),
       manifestFile(stage, "inboxd-keychain", "worker", "crates/inboxd-keychain/src/main.rs", 0o700, uid, gid),
+      manifestFile(stage, "inboxd-slack-native", "worker", "crates/inboxd-slack/src/main.rs", 0o700, uid, gid),
       manifestFile(
         stage,
         launcherEntrypoint.name,

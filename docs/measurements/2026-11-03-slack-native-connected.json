@@ -1,0 +1,140 @@
+[
+  {
+    "account_index": 1,
+    "reads": {
+      "bun": {
+        "counts_ok": true,
+        "self_identity_matches": true
+      },
+      "rust": {
+        "counts_ok": true,
+        "self_identity_matches": true
+      }
+    },
+    "snapshots": [
+      {
+        "elapsed_seconds": 6.3,
+        "footprint_mib": {
+          "bun": 44.9,
+          "rust": 4.41
+        }
+      },
+      {
+        "elapsed_seconds": 21.0,
+        "footprint_mib": {
+          "bun": 43.4,
+          "rust": 4.39
+        }
+      },
+      {
+        "elapsed_seconds": 45.9,
+        "footprint_mib": {
+          "bun": 42.1,
+          "rust": 4.39
+        }
+      }
+    ],
+    "events": {
+      "bun": {
+        "connected": 1,
+        "changed": 1
+      },
+      "rust": {
+        "connected": 1,
+        "changed": 1
+      }
+    }
+  },
+  {
+    "account_index": 2,
+    "reads": {
+      "bun": {
+        "counts_ok": true,
+        "self_identity_matches": true
+      },
+      "rust": {
+        "counts_ok": true,
+        "self_identity_matches": true
+      }
+    },
+    "snapshots": [
+      {
+        "elapsed_seconds": 6.0,
+        "footprint_mib": {
+          "bun": 44.8,
+          "rust": 4.61
+        }
+      },
+      {
+        "elapsed_seconds": 21.0,
+        "footprint_mib": {
+          "bun": 43.3,
+          "rust": 4.61
+        }
+      },
+      {
+        "elapsed_seconds": 46.0,
+        "footprint_mib": {
+          "bun": 42.1,
+          "rust": 4.59
+        }
+      }
+    ],
+    "events": {
+      "bun": {
+        "connected": 1,
+        "changed": 8
+      },
+      "rust": {
+        "connected": 1,
+        "changed": 10
+      }
+    }
+  },
+  {
+    "account_index": 3,
+    "reads": {
+      "bun": {
+        "counts_ok": true,
+        "self_identity_matches": true
+      },
+      "rust": {
+        "counts_ok": true,
+        "self_identity_matches": true
+      }
+    },
+    "snapshots": [
+      {
+        "elapsed_seconds": 6.0,
+        "footprint_mib": {
+          "bun": 44.9,
+          "rust": 4.34
+        }
+      },
+      {
+        "elapsed_seconds": 21.1,
+        "footprint_mib": {
+          "bun": 43.4,
+          "rust": 4.33
+        }
+      },
+      {
+        "elapsed_seconds": 46.0,
+        "footprint_mib": {
+          "bun": 42.2,
+          "rust": 4.33
+        }
+      }
+    ],
+    "events": {
+      "bun": {
+        "connected": 1,
+        "changed": 1
+      },
+      "rust": {
+        "connected": 1,
+        "changed": 1
+      }
+    }
+  }
+]
